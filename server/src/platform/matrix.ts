@@ -673,6 +673,13 @@ export class MatrixPlatform implements Platform {
   // not auto-rotate on connection recovery.
   private installMegolmAutoRotation(): void {
     if (!this.client) return;
+    // Test-only kill switch. When set, behaves as if this method was
+    // never added — used by tests/federation-repro to verify the bug
+    // reproduces without the rotation.
+    if (process.env.MATRIX_DISABLE_MEGOLM_AUTOROTATE === '1') {
+      console.log('[Matrix] megolm auto-rotation DISABLED (MATRIX_DISABLE_MEGOLM_AUTOROTATE=1)');
+      return;
+    }
 
     // Sync-recovery hook: any transition INTO 'SYNCING' from a non-syncing
     // state signals "we just reconnected." Trigger an immediate rotation

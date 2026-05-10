@@ -42,28 +42,43 @@ const server = https.createServer({
     let outBody = body;
     let droppedTypes = [];
 
+    // Helper: pull out every "type" claim an EDU makes — outer edu_type,
+    // content.type (m.direct_to_device case where type is on content),
+    // and any inner message types in content.messages.
+    function eduTypes(edu) {
+      const types = new Set();
+      if (edu.edu_type) types.add(edu.edu_type);
+      if (edu.type) types.add(edu.type);
+      if (edu.content?.type) types.add(edu.content.type);
+      if (edu.content?.messages) {
+        for (const u of Object.values(edu.content.messages)) {
+          for (const m of Object.values(u || {})) {
+            if (m?.type) types.add(m.type);
+          }
+        }
+      }
+      return [...types];
+    }
+
+    if (isFederationSend && body.length > 0 && process.env.MITM_LOG_BODIES === '1') {
+      try {
+        const parsed = JSON.parse(body.toString());
+        const eduSummary = (parsed.edus || []).map((e) => eduTypes(e).join('|') || '?');
+        log({ event: 'send_body', url: req.url, edus: eduSummary, n_pdus: (parsed.pdus || []).length });
+      } catch (_) {}
+    }
+
     if (isFederationSend && DROP_TYPES.length > 0 && body.length > 0) {
       try {
         const parsed = JSON.parse(body.toString());
         if (Array.isArray(parsed.edus)) {
           const before = parsed.edus.length;
           parsed.edus = parsed.edus.filter((edu) => {
-            const t = edu.edu_type || edu.type;
-            if (DROP_TYPES.includes(t)) {
-              droppedTypes.push(t);
+            const types = eduTypes(edu);
+            const matches = types.filter(t => DROP_TYPES.includes(t));
+            if (matches.length > 0) {
+              droppedTypes.push(...matches);
               return false;
-            }
-            // m.direct_to_device wraps inner messages of various types.
-            // Drop the entire EDU if any inner message matches.
-            if (edu.edu_type === 'm.direct_to_device' && edu.content && edu.content.messages) {
-              for (const userMessages of Object.values(edu.content.messages)) {
-                for (const msg of Object.values(userMessages || {})) {
-                  if (msg && DROP_TYPES.includes(msg.type)) {
-                    droppedTypes.push(`(direct_to_device:${msg.type})`);
-                    return false;
-                  }
-                }
-              }
             }
             return true;
           });

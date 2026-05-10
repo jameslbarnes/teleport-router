@@ -96,6 +96,7 @@ services:
       MITM_TLS_KEY:  /certs/hs-b.key
       MITM_UPSTREAM_CA: /certs/ca.pem
       MITM_DROP_TYPES: ${MITM_DROP_TYPES:-}
+      MITM_LOG_BODIES: ${MITM_LOG_BODIES:-}
       MITM_LOG_FILE: /shared/mitm.jsonl
     volumes:
       - ./certs:/certs:ro
