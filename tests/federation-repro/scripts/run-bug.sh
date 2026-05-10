@@ -70,11 +70,22 @@ touch "$TMP/bot.replies"
 
 cleanup() {
   echo
+  # Preserve bot.out for inspection — this captures matrix-js-sdk's
+  # internal log lines, useful for understanding what (if anything)
+  # rust-crypto did during the test (e.g. "Discarded existing group session"
+  # from auto-recovery vs. our patch's "[Matrix] discarded N outbound
+  # megolm session(s)").
+  if [ -f "$TMP/bot.out" ]; then
+    cp "$TMP/bot.out" "/tmp/run-bug-bot-out-${FIX}.log"
+    echo "[run-bug] saved bot.out → /tmp/run-bug-bot-out-${FIX}.log ($(wc -l < $TMP/bot.out) lines)"
+  fi
   echo "[run-bug] === bot.err (tail) ==="; tail -20 "$TMP/bot.err" 2>/dev/null || true
   echo "[run-bug] === user.out (tail) ==="; tail -20 "$TMP/user.out" 2>/dev/null || true
   echo "[run-bug] === bot.replies (tail) ==="; tail -20 "$TMP/bot.replies" 2>/dev/null || true
-  echo "[run-bug] === mitm log (tail) ==="
-  docker compose -f "$REPRO_DIR/docker-compose.yml" logs hs-b 2>/dev/null | grep -i mitm | tail -10 || true
+  echo "[run-bug] === bot.out matches: rotation/session activity ==="
+  grep -E "Discarded existing group session|\[Matrix\] discarded|\[Matrix\] sync recovered|\[Matrix\] megolm auto-rotation" "$TMP/bot.out" 2>/dev/null | tail -20 || true
+  echo "[run-bug] === mitm drops ==="
+  docker compose -f "$REPRO_DIR/docker-compose.yml" logs hs-b 2>/dev/null | grep -i mitm_drop | tail -10 || true
   rm -rf "$TMP"
   jobs -p | xargs -r kill 2>/dev/null || true
 }
@@ -101,11 +112,16 @@ start_user_inline() {
   # Cannot use $() to capture pid: the captured stdout would block the
   # caller until the bot's exec replaces stdout. So callers must use
   # USER_PID=$! immediately after.
+  # Stable user store across runs so the user's device_id stays the
+  # same — otherwise the bot's cached device list goes stale and
+  # m.room_key sharing doesn't include the user's current device.
+  : "${FED_REPRO_USER_STORE_BASE:=/tmp/fed-repro-user-store}"
+  mkdir -p "$FED_REPRO_USER_STORE_BASE"
   FED_REPRO_HS_B_URL=http://localhost:8002 \
   FED_REPRO_USER="$USER_HANDLE" \
   FED_REPRO_USER_PASS="$USER_PASS" \
   FED_REPRO_TOKEN="$HS_B_BOOTSTRAP_TOKEN" \
-  FED_REPRO_USER_STORE="$TMP/user-store" \
+  FED_REPRO_USER_STORE="$FED_REPRO_USER_STORE_BASE" \
   python3 repro/user.py > "$TMP/user.out" 2> "$TMP/user.err" &
 }
 
@@ -121,7 +137,12 @@ start_bot_inline() {
     export FED_REPRO_BOT_REPLY_FILE="$TMP/bot.replies"
     export MATRIX_CRYPTO_SNAPSHOT_PATH="$TMP/bot-snap.json"
     export MATRIX_CREDS_PATH="$TMP/bot-creds.json"
-    export MATRIX_MEGOLM_ROTATION_INTERVAL_MS=0
+    # Compress periodic rotation to 8s so the test can observe the
+    # patch's behavior in seconds, not hours. WITHOUT FIX: this env is
+    # ignored (the patch early-returns); session rotation depends on
+    # other triggers (device-list change, sync error, etc.) that we
+    # specifically avoid in the test below.
+    export MATRIX_MEGOLM_ROTATION_INTERVAL_MS=8000
     exec npx tsx "$REPRO_DIR/repro/bot.ts" < "$TMP/bot.in" > "$TMP/bot.out" 2> "$TMP/bot.err"
   ) &
 }
@@ -216,32 +237,32 @@ else
   exit 1
 fi
 
-echo "[run-bug] step 7: simulate sync interruption (restart hs-a-core)"
-docker compose -f "$REPRO_DIR/docker-compose.yml" restart hs-a-core > /dev/null 2>&1
-echo "  hs-a-core restarted; waiting for bot sync to recover..."
-sleep 15
+echo "[run-bug] step 7: wait 12s — past the bot's periodic rotation interval (8s)"
+echo "  WITHOUT FIX: nothing rotates (matrix-js-sdk has no spontaneous rotate trigger here)"
+echo "  WITH FIX:    periodic timer fires forceDiscardSession()"
+sleep 12
 
-echo "[run-bug] step 8: send after-recovery"
-echo '{"cmd":"send","text":"after-recovery"}' >&7
-sleep 8
-AFTER=$(count_decrypt_ok_with_body "after-recovery")
+echo "[run-bug] step 8: send after-rotation"
+echo '{"cmd":"send","text":"after-rotation"}' >&7
+sleep 6
+AFTER=$(count_decrypt_ok_with_body "after-rotation")
 
 if [ "$FIX" = "disabled" ]; then
   if [ "$AFTER" -eq 0 ]; then
-    echo "  ✓ FIX_DISABLED: after-recovery undecryptable (no auto-rotation, same broken session)"
+    echo "  ✓ FIX_DISABLED: after-rotation undecryptable (no auto-rotation, broken session reused)"
     echo
-    echo "[run-bug] ✅ WITHOUT FIX: bug confirmed — outbound session stays broken across sync recovery"
+    echo "[run-bug] ✅ WITHOUT FIX: bug PERSISTS — outbound session stays broken indefinitely"
   else
-    echo "  ✗ FIX_DISABLED: after-recovery decrypted unexpectedly (didn't expect recovery without the patch)"
+    echo "  ✗ FIX_DISABLED: after-rotation decrypted unexpectedly (matrix-js-sdk auto-recovered without our patch)"
     exit 1
   fi
 else
   if [ "$AFTER" -gt 0 ]; then
-    echo "  ✓ WITH FIX: after-recovery decrypted (sync-recovery hook rotated, fresh session, m.room_key delivered)"
+    echo "  ✓ WITH FIX: after-rotation decrypted (periodic timer rotated session, fresh m.room_key delivered)"
     echo
-    echo "[run-bug] ✅ WITH FIX: rotation patch unwedges the room on sync recovery"
+    echo "[run-bug] ✅ WITH FIX: rotation patch unwedges the room — periodic rotation works"
   else
-    echo "  ✗ WITH FIX: after-recovery still undecryptable — patch didn't fire or didn't help"
+    echo "  ✗ WITH FIX: after-rotation still undecryptable — patch didn't fire or didn't help"
     exit 1
   fi
 fi

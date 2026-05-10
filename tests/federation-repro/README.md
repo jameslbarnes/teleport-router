@@ -6,10 +6,52 @@ outbound megolm session.
 
 ## Status
 
-- [x] Phase 1 — two continuwuity HSes federate locally over TLS (this commit)
-- [ ] Phase 2 — bot on hs-a + user on hs-b complete an encrypted-room baseline
-- [ ] Phase 3 — federation interruption simulation (drop m.room_key in flight)
-- [ ] Phase 4 — assert bug without fix, recovery with fix
+- [x] Phase 1 — two continuwuity HSes federate locally over TLS
+- [x] Phase 2 — bot on hs-a + user on hs-b complete an encrypted-room baseline
+- [x] Phase 3 — federation interruption simulation (MITM drops m.direct_to_device)
+- [x] Phase 4 — bug reproduces; fix evaluation in progress (see findings below)
+
+## Findings (current)
+
+`bash scripts/run-baseline.sh` passes — federated encrypted round-trip is working baseline.
+
+`bash scripts/run-bug.sh` (FIX=disabled, default with the patch's
+`MATRIX_DISABLE_MEGOLM_AUTOROTATE=1` kill switch) **reproduces the bug
+exactly**:
+
+1. baseline message decrypts ok
+2. bot rotates outbound megolm session, sends "stuck-1" — m.room_key
+   to-device gets dropped by the MITM, user can't decrypt
+3. bot sends "stuck-2" reusing same broken session — also undecryptable
+4. MITM disarmed (federation healthy again)
+5. bot sends "post-restore" reusing the broken session — STILL
+   undecryptable, because matrix-js-sdk thinks the m.room_key was
+   delivered (the MITM returned 200, just with the EDU stripped) and
+   doesn't retry
+6. Wait past the bot's periodic-rotation interval, send "after-rotation":
+   - WITHOUT FIX: stays undecryptable indefinitely. Confirmed.
+
+`bash scripts/run-bug.sh` with FIX=enabled (the patch active): the
+`installMegolmAutoRotation` periodic timer fires as designed
+(visible: `[Matrix] discarded N outbound megolm session(s)` log
+lines), AND matrix-js-sdk's own log shows
+`[<roomId> encryption] Discarded existing group session`. **But the
+user still can't decrypt the after-rotation message.**
+
+So the patch fires the discard but the room doesn't actually recover.
+Hypothesis: `forceDiscardSession` evicts the cached outbound megolm
+session, which causes the next send to create a fresh session — but
+matrix-rust-sdk doesn't re-establish the underlying olm channels
+with the recipient devices that may have been corrupted by the MITM
+window. Need either (a) `crypto.shareGroupSession()` after discard,
+(b) a `/keys/claim` for users in the room to refresh olm sessions,
+or (c) a different force-reshare API I haven't found yet.
+
+**Conclusion: the patch as written needs more work before it can be
+merged.** PR #31 should stay draft until either the patch is
+revised to actually recover the room, or the test is revised to show
+where the patch's value actually lives (e.g. avoiding the broken
+state in the first place rather than recovering from it).
 
 ## Phase 2 plan (next commit)
 

@@ -79,7 +79,13 @@ async def main():
         store_sync_tokens=True,
         encryption_enabled=True,
     )
-    client = AsyncClient(HS_URL, f"@{USER}:hs-b", store_path=STORE, config=config)
+    # Stable device_id across runs so the bot's cached device list
+    # for this user stays valid. Without this, every test run gets a
+    # fresh device_id and the bot's m.room_key sharing addresses the
+    # OLD device, masking the actual rotation behavior under test.
+    DEVICE_ID = "fed-repro-user-dev"
+    client = AsyncClient(HS_URL, f"@{USER}:hs-b", device_id=DEVICE_ID,
+                         store_path=STORE, config=config)
     resp = await client.login(PASS, device_name="fed-repro-user")
     if not isinstance(resp, LoginResponse):
         emit({"event": "login_fail", "resp": str(resp)})
