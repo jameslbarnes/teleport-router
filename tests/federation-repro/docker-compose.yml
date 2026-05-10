@@ -64,15 +64,47 @@ services:
       - hs-b-data:/var/lib/conduwuit
       - ./certs:/certs:ro
 
-  hs-b:
+  hs-b-real:
+    # The "real" TLS proxy for hs-b. Renamed from `hs-b` so the MITM
+    # below can take that alias and sit in front. When phase 3's MITM
+    # is disabled, hs-b-real plays the same role as hs-a (plain pass-
+    # through TLS termination).
     image: nginx:alpine
     networks:
       fednet:
-        aliases: [hs-b]
+        aliases: [hs-b-real]
     depends_on: [hs-b-core]
     volumes:
       - ./scripts/nginx-hs-b.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/certs:ro
+
+  hs-b:
+    # Federation MITM. By default, pass-through (no traffic is altered).
+    # Set MITM_DROP_TYPES (comma-separated) to selectively drop EDUs of
+    # given to-device types from POST /_matrix/federation/v1/send/*
+    # requests in flight.
+    image: node:24-alpine
+    networks:
+      fednet:
+        aliases: [hs-b]
+    depends_on: [hs-b-real]
+    environment:
+      MITM_LISTEN_PORT: "8448"
+      MITM_UPSTREAM_HOST: hs-b-real
+      MITM_UPSTREAM_PORT: "8448"
+      MITM_TLS_CERT: /certs/hs-b.crt
+      MITM_TLS_KEY:  /certs/hs-b.key
+      MITM_UPSTREAM_CA: /certs/ca.pem
+      MITM_DROP_TYPES: ${MITM_DROP_TYPES:-}
+      MITM_LOG_FILE: /shared/mitm.jsonl
+    volumes:
+      - ./certs:/certs:ro
+      - ./repro:/app:ro
+      - mitm-shared:/shared
+    working_dir: /app
+    command: ["node", "mitm.js"]
+    ports:
+      - "8403:8448"
 
 networks:
   fednet:
@@ -81,3 +113,4 @@ networks:
 volumes:
   hs-a-data:
   hs-b-data:
+  mitm-shared:
