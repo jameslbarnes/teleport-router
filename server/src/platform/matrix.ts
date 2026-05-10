@@ -407,6 +407,15 @@ export class MatrixPlatform implements Platform {
   private processedMessageEvents = new Set<string>();
   private pendingInviteJoins = new Set<string>();
   private joinedInviteRooms = new Set<string>();
+  // Megolm session rotation. We discard outbound sessions periodically and
+  // on detected sync recovery so federation hiccups (which can drop the
+  // m.room_key to-device EDU that distributes a session) self-heal: the
+  // next outbound message creates a fresh session and a fresh m.room_key
+  // distribution. Without this, a session created during a federation
+  // outage stays undecryptable for receivers indefinitely. See incident
+  // 2026-05-09 (shape-rotator-matrix repo, docs/incidents).
+  private megolmRotationTimer: NodeJS.Timeout | null = null;
+  private lastSyncState: string | null = null;
 
   constructor(config: MatrixPlatformConfig) {
     this.config = config;
@@ -570,6 +579,8 @@ export class MatrixPlatform implements Platform {
     // Start syncing (must happen before cross-signing bootstrap so we can query our own keys)
     await this.client.startClient({ initialSyncLimit: 0 });
 
+    this.installMegolmAutoRotation();
+
     // Install the hand-rolled SAS verification manager. Replaces the SDK's
     // broken VerificationRequest/Verifier high-level API which produces MACs
     // that Continuwuity rejects with m.mismatched_sas. Ports Andrew Miller's
@@ -625,9 +636,93 @@ export class MatrixPlatform implements Platform {
     } catch (err: any) {
       console.warn('[Matrix] Final crypto flush failed:', err.message);
     }
+    if (this.megolmRotationTimer) {
+      clearInterval(this.megolmRotationTimer);
+      this.megolmRotationTimer = null;
+    }
     if (this.client) {
       this.client.stopClient();
       this.client = null;
+    }
+  }
+
+  // ── Megolm auto-rotation ─────────────────────────────────
+  //
+  // Bots that send into encrypted rooms across federation are vulnerable to
+  // a silent-decrypt-failure mode: if the m.room_key to-device EDU that
+  // distributes a freshly-created outbound megolm session is dropped (e.g.
+  // by a federation hiccup, target homeserver outage, or backed-off
+  // federation queue), receivers never get the session key and *every*
+  // subsequent message in that session is undecryptable for them. The
+  // protocol-level recovery is m.room_key_request → m.forwarded_room_key,
+  // but matrix-rust-sdk gates that on cross-signing trust by default and
+  // bot-to-user is rarely cross-signed; the request is silently ignored
+  // and the room stays broken until manual intervention.
+  //
+  // Mitigation: rotate outbound megolm sessions periodically and on
+  // detected sync-recovery transitions. After rotation, the next outbound
+  // message creates a fresh session whose m.room_key distribution will
+  // succeed if federation is healthy. Old undecryptable messages stay
+  // undecryptable, but the room is unwedged for messages going forward.
+  //
+  // History: shape-rotator-matrix incident 2026-05-09 — 6+ conduwuit
+  // restarts in 5h backed up matrix.org's federation queue, dropped the
+  // m.room_key to-device for both Router (this bot) and claw-teedah-2.
+  // claw-teedah-2 (mautrix-python) auto-recovered within hours; Router
+  // stayed broken until manual intervention because matrix-rust-sdk does
+  // not auto-rotate on connection recovery.
+  private installMegolmAutoRotation(): void {
+    if (!this.client) return;
+
+    // Sync-recovery hook: any transition INTO 'SYNCING' from a non-syncing
+    // state signals "we just reconnected." Trigger an immediate rotation
+    // for all encrypted rooms the bot is in.
+    this.client.on(ClientEvent.Sync, (state: string) => {
+      const prev = this.lastSyncState;
+      this.lastSyncState = state;
+      if (state === 'SYNCING' && prev && prev !== 'SYNCING' && prev !== 'PREPARED') {
+        console.log(`[Matrix] sync recovered (${prev} → ${state}); rotating megolm sessions`);
+        this.rotateAllOutboundMegolmSessions().catch((err: any) => {
+          console.warn('[Matrix] post-recovery megolm rotation failed:', err.message);
+        });
+      }
+    });
+
+    // Periodic rotation (default 4h). Bounded by the lower of (a) the
+    // longest plausible federation outage we can tolerate before a
+    // receiver notices and (b) the matrix-rust-sdk default rotation
+    // interval (7 days / 100 messages, far too long for bots).
+    const intervalMs = Number(process.env.MATRIX_MEGOLM_ROTATION_INTERVAL_MS || 4 * 60 * 60 * 1000);
+    if (intervalMs > 0) {
+      this.megolmRotationTimer = setInterval(() => {
+        this.rotateAllOutboundMegolmSessions().catch((err: any) => {
+          console.warn('[Matrix] periodic megolm rotation failed:', err.message);
+        });
+      }, intervalMs);
+      console.log(`[Matrix] megolm auto-rotation installed (every ${intervalMs / 1000}s + on sync recovery)`);
+    }
+  }
+
+  private async rotateAllOutboundMegolmSessions(): Promise<void> {
+    const client = this.client;
+    if (!client) return;
+    const crypto = client.getCrypto();
+    if (!crypto) return;
+    const rooms = client.getRooms().filter(r => r.hasEncryptionStateEvent());
+    let rotated = 0;
+    for (const room of rooms) {
+      try {
+        // forceDiscardSession is the supported matrix-js-sdk API for
+        // dropping the cached outbound megolm session. Next send will
+        // create a fresh one and re-distribute keys to all joined devices.
+        await crypto.forceDiscardSession(room.roomId);
+        rotated++;
+      } catch (err: any) {
+        console.warn(`[Matrix] forceDiscardSession failed for ${room.roomId}: ${err.message}`);
+      }
+    }
+    if (rotated > 0) {
+      console.log(`[Matrix] discarded ${rotated} outbound megolm session(s)`);
     }
   }
 
