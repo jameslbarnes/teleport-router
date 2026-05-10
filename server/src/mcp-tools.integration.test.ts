@@ -115,6 +115,9 @@ describe('MCP Tool Integration Tests', () => {
       expect(names).toContain('router_review_staged');
       expect(names).toContain('router_hold_entry');
       expect(names).toContain('router_release_entry');
+      expect(names).toContain('router_onboard_identity');
+      expect(names).toContain('router_platform_send_dm');
+      expect(names).toContain('router_post_daily_digest');
     });
 
     it('regular user does NOT see agent tools', async () => {
@@ -122,6 +125,9 @@ describe('MCP Tool Integration Tests', () => {
       const names = tools.map(t => t.name);
       expect(names).not.toContain('router_poll_events');
       expect(names).not.toContain('router_hold_entry');
+      expect(names).not.toContain('router_onboard_identity');
+      expect(names).not.toContain('router_platform_send_dm');
+      expect(names).not.toContain('router_post_daily_digest');
     });
 
     it('both see standard tools', async () => {
@@ -131,6 +137,80 @@ describe('MCP Tool Integration Tests', () => {
         expect(names).toContain('router_write_entry');
         expect(names).toContain('router_search');
       }
+    });
+  });
+
+  describe('router_onboard_identity', () => {
+    it('provisions a new handle and verified Matrix link for the agent', async () => {
+      const handle = `ob${Date.now().toString(36).slice(-8)}`;
+      const matrixId = `@${handle}:matrix.example.test`;
+
+      const text = await callTool(modClient, 'router_onboard_identity', {
+        platform: 'matrix',
+        platform_user_id: matrixId,
+        desired_handle: handle,
+        display_name: 'Onboarding Test',
+        source: 'matrix_space_join',
+      });
+
+      expect(text).toContain('ONBOARDING_PROVISIONED');
+      expect(text).toContain(`handle: @${handle}`);
+      expect(text).toContain(`platform_user_id: ${matrixId}`);
+      expect(text).toContain('secret_key:');
+      expect(text).toContain('/mcp/sse?key=');
+
+      const key = text.match(/secret_key: (\S+)/)?.[1];
+      expect(key).toBeTruthy();
+
+      const profile = await fetch(`http://localhost:${TEST_PORT}/api/profile/${handle}?key=${key}`);
+      expect(profile.ok).toBe(true);
+      const body = await profile.json();
+      expect(body.linkedAccounts).toEqual([
+        expect.objectContaining({
+          platform: 'matrix',
+          platformUserId: matrixId,
+          verified: true,
+        }),
+      ]);
+    });
+
+    it('does not return another secret key for an already linked Matrix user', async () => {
+      const handle = `ob${Date.now().toString(36).slice(-8)}`;
+      const matrixId = `@${handle}:matrix.example.test`;
+
+      await callTool(modClient, 'router_onboard_identity', {
+        platform: 'matrix',
+        platform_user_id: matrixId,
+        desired_handle: handle,
+      });
+      const second = await callTool(modClient, 'router_onboard_identity', {
+        platform: 'matrix',
+        platform_user_id: matrixId,
+        desired_handle: `${handle}x`.slice(0, 15),
+      });
+
+      expect(second).toContain('ALREADY_ONBOARDED');
+      expect(second).not.toContain('secret_key:');
+    });
+  });
+
+  describe('router_post_daily_digest', () => {
+    it('fails closed for moderators when Matrix is not connected', async () => {
+      const text = await callTool(modClient, 'router_post_daily_digest', {
+        date: '2026-01-01',
+        text: 'Digest body.',
+      });
+
+      expect(text).toContain('Matrix platform not connected');
+    });
+
+    it('rejects non-moderator callers even if invoked directly', async () => {
+      const text = await callTool(regularClient, 'router_post_daily_digest', {
+        date: '2026-01-01',
+        text: 'Digest body.',
+      });
+
+      expect(text).toContain('Only the Router agent can post the daily digest');
     });
   });
 

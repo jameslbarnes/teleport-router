@@ -111,6 +111,46 @@ const MODERATOR_HANDLES = new Set(
   (process.env.MODERATOR_HANDLES || '').split(',').map(h => h.trim()).filter(Boolean)
 );
 
+interface DailyDigestPostRecord {
+  date: string;
+  roomId: string;
+  messageId: string;
+  postedAt: number;
+  postedBy?: string;
+}
+
+interface DailyDigestPostState {
+  posted: Record<string, DailyDigestPostRecord>;
+}
+
+function getDailyDigestPostStatePath(): string {
+  const explicitPath = process.env.ROUTER_DAILY_DIGEST_STATE_PATH || process.env.MATRIX_DIGEST_STATE_PATH;
+  if (explicitPath) return explicitPath;
+
+  try {
+    accessSync('/data', constants.W_OK);
+    return '/data/router-daily-digest-state.json';
+  } catch {
+    return join(process.env.TMPDIR || '/tmp', 'router-daily-digest-state.json');
+  }
+}
+
+function loadDailyDigestPostState(): DailyDigestPostState {
+  try {
+    const parsed = JSON.parse(readFileSync(getDailyDigestPostStatePath(), 'utf8'));
+    if (parsed && typeof parsed === 'object' && parsed.posted && typeof parsed.posted === 'object') {
+      return { posted: parsed.posted };
+    }
+  } catch {}
+  return { posted: {} };
+}
+
+function saveDailyDigestPostState(state: DailyDigestPostState): void {
+  const path = getDailyDigestPostStatePath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
 // Tool description - single source of truth
 export const TOOL_DESCRIPTION = `Write to the shared notebook.
 
@@ -639,7 +679,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_poll_events',
     name: 'router_poll_events',
-    description: 'Poll for new events since a cursor. Returns events like entry_staged, entry_published, platform_message, platform_mention. Use this in a loop to react to what\'s happening in real time.',
+    description: 'Poll for new events since a cursor. Returns events like entry_staged, entry_published, platform_message, platform_mention, platform_onboarding, and daily_digest_requested. Use this in a loop to react to what\'s happening in real time.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -740,6 +780,58 @@ export const SYSTEM_SKILLS: Skill[] = [
         reply_to: { type: 'string', description: 'Message ID to reply to (optional)' },
       },
       required: ['platform', 'room_id', 'text'],
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_post_daily_digest',
+    name: 'router_post_daily_digest',
+    description: 'Moderator-only: post a completed Hermes-authored daily digest to the Matrix #digest room. Enforces one post per date.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Digest date in YYYY-MM-DD format.' },
+        text: { type: 'string', description: 'Final digest body. Do not include tool logs or process notes.' },
+      },
+      required: ['date', 'text'],
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_platform_send_dm',
+    name: 'router_platform_send_dm',
+    description: 'Moderator-only: send a direct message to a raw platform user ID, even before that platform account is linked to a Router handle. Use for onboarding.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', description: 'Platform name (e.g. "matrix")' },
+        platform_user_id: { type: 'string', description: 'Raw platform user ID (e.g. Matrix MXID)' },
+        text: { type: 'string', description: 'Message text (markdown supported)' },
+      },
+      required: ['platform', 'platform_user_id', 'text'],
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_onboard_identity',
+    name: 'router_onboard_identity',
+    description: 'Moderator-only: provision a new Router identity for onboarding, link the source platform account as verified, and return the secret key exactly once for delivery to the user.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', description: 'Platform being linked, e.g. "matrix".' },
+        platform_user_id: { type: 'string', description: 'Verified platform user ID, e.g. Matrix MXID.' },
+        desired_handle: { type: 'string', description: 'Requested Router handle. 3-15 lowercase letters, numbers, underscores; must start with a letter.' },
+        display_name: { type: 'string', description: 'Optional display name copied from the platform profile.' },
+        source: { type: 'string', description: 'Onboarding source label, e.g. "matrix_space_join".' },
+      },
+      required: ['platform', 'platform_user_id', 'desired_handle'],
     },
     createdAt: 0,
   },
@@ -1556,7 +1648,7 @@ function createMCPServer(secretKey: string) {
           }
         }
         // Moderation tools: only show to moderators (or if no moderators configured, show to all)
-        if (['router_poll_events', 'router_review_staged', 'router_hold_entry', 'router_release_entry', 'router_trigger_spark'].includes(skill.name)) {
+        if (['router_poll_events', 'router_review_staged', 'router_hold_entry', 'router_release_entry', 'router_trigger_spark', 'router_platform_send_dm', 'router_onboard_identity', 'router_post_daily_digest'].includes(skill.name)) {
           if (!(storage instanceof StagedStorage)) return false;
           if (MODERATOR_HANDLES.size > 0 && (!handle || !MODERATOR_HANDLES.has(handle))) return false;
         }
@@ -4094,6 +4186,93 @@ function createMCPServer(secretKey: string) {
     }
 
     // ── Platform Tools ──────────────────────────────────────
+    if (name === 'router_post_daily_digest') {
+      const requesterHandle = await getHandle();
+      const isModerator = !!requesterHandle && (MODERATOR_HANDLES.size === 0 || MODERATOR_HANDLES.has(requesterHandle));
+      if (!isModerator) {
+        return {
+          content: [{ type: 'text' as const, text: 'Only the Router agent can post the daily digest.' }],
+          isError: true,
+        };
+      }
+
+      const a = args as { date?: string; text?: string };
+      const date = a.date?.trim();
+      const text = a.text?.trim();
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return {
+          content: [{ type: 'text' as const, text: 'date must be YYYY-MM-DD.' }],
+          isError: true,
+        };
+      }
+      if (!text) {
+        return {
+          content: [{ type: 'text' as const, text: 'text is required.' }],
+          isError: true,
+        };
+      }
+
+      const state = loadDailyDigestPostState();
+      const existing = state.posted[date];
+      if (existing) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `DAILY_DIGEST_ALREADY_POSTED\ndate: ${date}\nroom_id: ${existing.roomId}\nmessage_id: ${existing.messageId}\nposted_at: ${new Date(existing.postedAt).toISOString()}`,
+          }],
+        };
+      }
+
+      const matrix = getPlatform('matrix') as (MatrixPlatform & {
+        ensureChannelRoom?: (channelId: string, channelName: string, description?: string) => Promise<string>;
+      }) | undefined;
+      if (!matrix) {
+        return {
+          content: [{ type: 'text' as const, text: 'Matrix platform not connected.' }],
+          isError: true,
+        };
+      }
+      if (typeof matrix.ensureChannelRoom !== 'function') {
+        return {
+          content: [{ type: 'text' as const, text: 'Matrix platform does not support channel rooms.' }],
+          isError: true,
+        };
+      }
+
+      try {
+        const roomId = await matrix.ensureChannelRoom('digest', 'Daily Digest', 'Daily summary of notebook activity');
+        const digestText = text.startsWith('# Daily Digest')
+          ? text
+          : `# Daily Digest — ${date}\n\n${text}`;
+        const messageId = await matrix.sendMessage(roomId, digestText);
+
+        state.posted[date] = {
+          date,
+          roomId,
+          messageId,
+          postedAt: Date.now(),
+          postedBy: requesterHandle,
+        };
+        try {
+          saveDailyDigestPostState(state);
+        } catch (stateErr) {
+          console.warn('[Digest] Posted daily digest but failed to persist idempotency state:', stateErr);
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `DAILY_DIGEST_POSTED\ndate: ${date}\nroom_id: ${roomId}\nmessage_id: ${messageId}`,
+          }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text' as const, text: `Daily digest post failed: ${err.message}` }],
+          isError: true,
+        };
+      }
+    }
+
     if (name === 'router_platform_send') {
       const a = args as { platform: string; room_id: string; text: string; reply_to?: string };
       const platform = getPlatform(a.platform);
@@ -4105,6 +4284,165 @@ function createMCPServer(secretKey: string) {
         return { content: [{ type: 'text' as const, text: `Message sent (${messageId})` }] };
       } catch (err: any) {
         return { content: [{ type: 'text' as const, text: `Send failed: ${err.message}` }], isError: true };
+      }
+    }
+
+    if (name === 'router_platform_send_dm') {
+      const requesterHandle = await getHandle();
+      const isModerator = !!requesterHandle && (MODERATOR_HANDLES.size === 0 || MODERATOR_HANDLES.has(requesterHandle));
+      if (!isModerator) {
+        return {
+          content: [{ type: 'text' as const, text: 'Only the Router agent can DM raw platform users.' }],
+          isError: true,
+        };
+      }
+
+      const a = args as { platform?: string; platform_user_id?: string; text?: string };
+      const platformName = a.platform?.trim();
+      const platformUserId = a.platform_user_id?.trim();
+      const text = a.text?.trim();
+      if (!platformName || !platformUserId || !text) {
+        return {
+          content: [{ type: 'text' as const, text: 'platform, platform_user_id, and text are required.' }],
+          isError: true,
+        };
+      }
+
+      const platform = getPlatform(platformName);
+      if (!platform) {
+        return {
+          content: [{ type: 'text' as const, text: `Platform "${platformName}" not connected.` }],
+          isError: true,
+        };
+      }
+
+      try {
+        const messageId = await platform.sendDM(platformUserId, text);
+        return {
+          content: [{ type: 'text' as const, text: `DM sent to ${platformUserId} on ${platformName} (${messageId})` }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text' as const, text: `DM send failed: ${err.message}` }],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === 'router_onboard_identity') {
+      const requesterHandle = await getHandle();
+      const isModerator = !!requesterHandle && (MODERATOR_HANDLES.size === 0 || MODERATOR_HANDLES.has(requesterHandle));
+      if (!isModerator) {
+        return {
+          content: [{ type: 'text' as const, text: 'Only the Router agent can provision onboarding identities.' }],
+          isError: true,
+        };
+      }
+
+      try {
+        const a = args as {
+          platform?: string;
+          platform_user_id?: string;
+          desired_handle?: string;
+          display_name?: string;
+          source?: string;
+        };
+        const platformName = a.platform?.trim().toLowerCase();
+        const platformUserId = a.platform_user_id?.trim();
+        const desiredHandle = normalizeHandle(a.desired_handle || '');
+        const displayName = a.display_name?.trim();
+
+        if (!platformName || !platformUserId || !desiredHandle) {
+          return {
+            content: [{ type: 'text' as const, text: 'platform, platform_user_id, and desired_handle are required.' }],
+            isError: true,
+          };
+        }
+        if (!isValidHandle(desiredHandle)) {
+          return {
+            content: [{ type: 'text' as const, text: 'Invalid handle. Use 3-15 lowercase letters, numbers, or underscores, starting with a letter.' }],
+            isError: true,
+          };
+        }
+
+        const linkedUsers = await storage.getAllUsers();
+        const alreadyLinked = linkedUsers.find(user =>
+          user.linkedAccounts?.some(account =>
+            account.platform === platformName
+            && account.platformUserId === platformUserId
+            && account.verified !== false,
+          ),
+        );
+        if (alreadyLinked) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `ALREADY_ONBOARDED\nhandle: @${alreadyLinked.handle}\nplatform: ${platformName}\nplatform_user_id: ${platformUserId}\nNo secret key can be returned because Router stores only key hashes. Ask the user to use their saved key or the account recovery policy.`,
+            }],
+          };
+        }
+
+        if (!(await storage.isHandleAvailable(desiredHandle))) {
+          return {
+            content: [{ type: 'text' as const, text: `Handle @${desiredHandle} is already taken. Ask the user for another handle.` }],
+            isError: true,
+          };
+        }
+
+        const provisionedSecretKey = generateSecretKey();
+        const provisionedKeyHash = hashSecretKey(provisionedSecretKey);
+        const existingByKey = await storage.getUserByKeyHash(provisionedKeyHash);
+        if (existingByKey) {
+          return {
+            content: [{ type: 'text' as const, text: 'Generated key collision; retry onboarding.' }],
+            isError: true,
+          };
+        }
+
+        const user = await storage.createUser({
+          handle: desiredHandle,
+          secretKeyHash: provisionedKeyHash,
+          displayName: displayName || undefined,
+        });
+        const linkedAccounts = [
+          ...(user.linkedAccounts || []),
+          {
+            platform: platformName,
+            platformUserId,
+            linkedAt: Date.now(),
+            verified: true,
+          },
+        ];
+        await storage.updateUser(user.handle, { linkedAccounts });
+
+        const pseudonym = derivePseudonym(provisionedSecretKey);
+        const mcpUrl = `${BASE_URL}/mcp/sse?key=${provisionedSecretKey}`;
+        const backend = 'teleport-router';
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: [
+              'ONBOARDING_PROVISIONED',
+              `backend: ${backend}`,
+              `handle: @${user.handle}`,
+              `platform: ${platformName}`,
+              `platform_user_id: ${platformUserId}`,
+              `source: ${a.source || 'matrix_onboarding'}`,
+              `pseudonym: ${pseudonym}`,
+              `secret_key: ${provisionedSecretKey}`,
+              `mcp_url: ${mcpUrl}`,
+              `web_url: ${BASE_URL}`,
+              `attestation_url: ${BASE_URL}/api/attestation`,
+              'delivery_note: Send the secret_key and mcp_url to the user exactly once. Tell them to save the key in a password manager and optionally delete this Matrix message after saving it.',
+            ].join('\n'),
+          }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text' as const, text: `Onboarding failed: ${err.message}` }],
+          isError: true,
+        };
       }
     }
 

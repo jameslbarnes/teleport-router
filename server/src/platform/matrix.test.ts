@@ -1,4 +1,5 @@
-import { ClientEvent, EventType, KnownMembership, RelationType, RoomEvent } from 'matrix-js-sdk';
+import { existsSync, unlinkSync } from 'fs';
+import { ClientEvent, EventType, KnownMembership, RelationType, RoomEvent, RoomMemberEvent } from 'matrix-js-sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { MatrixPlatform, ROUTER_CHANNEL_STATE, ROUTER_SPARK_EVENT, buildRouterDiscoBallAvatarPng, isMatrixMention } from './matrix.js';
 import { getEventsSince, resetEvents } from '../events.js';
@@ -628,6 +629,107 @@ describe('MatrixPlatform DMs', () => {
       vi.clearAllTimers();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('queues one onboarding event when a user joins the configured Matrix space', () => {
+    resetEvents();
+    const previousStatePath = process.env.MATRIX_ONBOARDING_STATE_PATH;
+    const statePath = `/tmp/router-matrix-onboarding-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+    process.env.MATRIX_ONBOARDING_STATE_PATH = statePath;
+
+    try {
+      const handlers = new Map<any, (...args: any[]) => void>();
+      const platform = createPlatform({ spaceRoomId: '!space:mtrx.example.test' });
+      (platform as any).botUserId = '@router:mtrx.example.test';
+      (platform as any).client = {
+        on: vi.fn((eventName: any, handler: (...args: any[]) => void) => {
+          handlers.set(eventName, handler);
+        }),
+      };
+
+      (platform as any).setupEventListeners();
+      const membershipHandler = handlers.get(RoomMemberEvent.Membership);
+
+      membershipHandler?.(
+        { getRoomId: () => '!space:mtrx.example.test' },
+        {
+          userId: '@alice:matrix.org',
+          roomId: '!space:mtrx.example.test',
+          membership: KnownMembership.Join,
+          name: 'Alice',
+        },
+      );
+      membershipHandler?.(
+        { getRoomId: () => '!space:mtrx.example.test' },
+        {
+          userId: '@alice:matrix.org',
+          roomId: '!space:mtrx.example.test',
+          membership: KnownMembership.Join,
+          name: 'Alice',
+        },
+      );
+
+      const events = getEventsSince(0);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: 'platform_onboarding',
+        data: {
+          platform: 'matrix',
+          platform_user_id: '@alice:matrix.org',
+          display_name: 'Alice',
+          space_room_id: '!space:mtrx.example.test',
+          reason: 'matrix_space_join',
+        },
+      });
+    } finally {
+      if (existsSync(statePath)) unlinkSync(statePath);
+      if (previousStatePath === undefined) delete process.env.MATRIX_ONBOARDING_STATE_PATH;
+      else process.env.MATRIX_ONBOARDING_STATE_PATH = previousStatePath;
+    }
+  });
+
+  it('does not queue onboarding for other rooms or the bot account', () => {
+    resetEvents();
+    const previousStatePath = process.env.MATRIX_ONBOARDING_STATE_PATH;
+    const statePath = `/tmp/router-matrix-onboarding-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+    process.env.MATRIX_ONBOARDING_STATE_PATH = statePath;
+
+    try {
+      const handlers = new Map<any, (...args: any[]) => void>();
+      const platform = createPlatform({ spaceRoomId: '!space:mtrx.example.test' });
+      (platform as any).botUserId = '@router:mtrx.example.test';
+      (platform as any).client = {
+        on: vi.fn((eventName: any, handler: (...args: any[]) => void) => {
+          handlers.set(eventName, handler);
+        }),
+      };
+
+      (platform as any).setupEventListeners();
+      const membershipHandler = handlers.get(RoomMemberEvent.Membership);
+
+      membershipHandler?.(
+        { getRoomId: () => '!elsewhere:mtrx.example.test' },
+        {
+          userId: '@alice:matrix.org',
+          roomId: '!elsewhere:mtrx.example.test',
+          membership: KnownMembership.Join,
+        },
+      );
+      membershipHandler?.(
+        { getRoomId: () => '!space:mtrx.example.test' },
+        {
+          userId: '@router:mtrx.example.test',
+          roomId: '!space:mtrx.example.test',
+          membership: KnownMembership.Join,
+        },
+      );
+
+      expect(getEventsSince(0)).toHaveLength(0);
+    } finally {
+      if (existsSync(statePath)) unlinkSync(statePath);
+      if (previousStatePath === undefined) delete process.env.MATRIX_ONBOARDING_STATE_PATH;
+      else process.env.MATRIX_ONBOARDING_STATE_PATH = previousStatePath;
     }
   });
 });

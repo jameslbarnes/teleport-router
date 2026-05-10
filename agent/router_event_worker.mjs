@@ -80,6 +80,20 @@ function matrixMessageId(event) {
   return typeof data.message_id === 'string' && data.message_id ? data.message_id : null;
 }
 
+function onboardingKey(event) {
+  const data = event?.data || {};
+  if (event?.type !== 'platform_onboarding') return null;
+  if (!data.platform || !data.platform_user_id) return null;
+  return `${data.platform}:${data.platform_user_id}:${data.reason || 'onboarding'}`;
+}
+
+function dailyDigestKey(event) {
+  const data = event?.data || {};
+  if (event?.type !== 'daily_digest_requested') return null;
+  if (!data.date) return null;
+  return `${data.platform || 'matrix'}:${data.target || 'digest'}:${data.date}`;
+}
+
 function latestMatrixMentionIdsByRoom(events) {
   const latest = new Map();
   for (const event of events) {
@@ -116,11 +130,145 @@ function rememberHandledMatrixMessage(state, messageId, limit) {
   }
 }
 
+function handledOnboardingKeys(state) {
+  if (!Array.isArray(state.handled_onboarding_keys)) {
+    state.handled_onboarding_keys = [];
+  }
+  return state.handled_onboarding_keys;
+}
+
+function hasHandledOnboarding(state, key) {
+  return !!key && handledOnboardingKeys(state).includes(key);
+}
+
+function rememberHandledOnboarding(state, key, limit) {
+  if (!key) return;
+
+  const keys = handledOnboardingKeys(state);
+  const existing = keys.indexOf(key);
+  if (existing >= 0) keys.splice(existing, 1);
+  keys.push(key);
+
+  const max = Number.isFinite(limit) && limit > 0 ? limit : 2000;
+  if (keys.length > max) {
+    keys.splice(0, keys.length - max);
+  }
+}
+
+function handledDailyDigestKeys(state) {
+  if (!Array.isArray(state.handled_daily_digest_keys)) {
+    state.handled_daily_digest_keys = [];
+  }
+  return state.handled_daily_digest_keys;
+}
+
+function hasHandledDailyDigest(state, key) {
+  return !!key && handledDailyDigestKeys(state).includes(key);
+}
+
+function rememberHandledDailyDigest(state, key, limit) {
+  if (!key) return;
+
+  const keys = handledDailyDigestKeys(state);
+  const existing = keys.indexOf(key);
+  if (existing >= 0) keys.splice(existing, 1);
+  keys.push(key);
+
+  const max = Number.isFinite(limit) && limit > 0 ? limit : 366;
+  if (keys.length > max) {
+    keys.splice(0, keys.length - max);
+  }
+}
+
 async function connectClient(mcpUrl) {
   const client = new Client({ name: 'router-event-worker', version: '1.0.0' }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(mcpUrl);
   await client.connect(transport);
   return { client, transport };
+}
+
+async function runHermesPrompt(event, prompt, label) {
+  const env = {
+    ...process.env,
+    ROUTER_HOME: process.env.ROUTER_HOME || process.env.HERMES_HOME || '/data/router-agent',
+  };
+  env.HERMES_HOME = env.ROUTER_HOME;
+
+  let stdout;
+  let stderr;
+  try {
+    ({ stdout, stderr } = await execFileAsync(
+      'hermes',
+      ['chat', '-q', prompt, '--provider', 'anthropic', '-Q', '--yolo'],
+      {
+        env,
+        timeout: 180_000,
+        maxBuffer: 1024 * 1024,
+      },
+    ));
+  } catch (error) {
+    throw new Error(`hermes chat failed for ${label} ${event.id}: ${formatExecFailure(error)}`);
+  }
+
+  const summary = String(stdout || stderr || '').trim().split('\n').filter(Boolean).at(-1);
+  log(`${label} ${event.id} handled${summary ? `: ${summary.slice(0, 300)}` : ''}`);
+}
+
+async function runOnboardingChat(event) {
+  const data = event?.data || {};
+  const prompt = `You are Router, the Matrix-facing onboarding agent.
+
+A Matrix user has just joined the Shape Rotator Matrix space and should receive one private onboarding DM from the Router bot.
+
+Event:
+${JSON.stringify(event, null, 2)}
+
+Send exactly one private DM by calling router_platform_send_dm with:
+- platform = "matrix"
+- platform_user_id = event.data.platform_user_id
+- text = your onboarding message
+
+The DM must:
+- Welcome them briefly.
+- Explain that Router is a shared notebook for Claude conversations.
+- Say Router can create their identity inside the attested Router environment if they consent.
+- Explain the privacy model in plain language: Router runs in a TEE, stores only a hash of the Router secret key, and exposes attestation so they can verify the running code.
+- Include the attestation endpoint: ${process.env.ROUTER_PUBLIC_URL || process.env.BASE_URL || 'https://router.teleport.computer'}/api/attestation
+- Mention that the generated secret key will be sent in this Matrix DM, they should save it in a password manager, and they may delete the DM after saving it.
+- Tell them the exact next step: reply with \`onboard their_handle\` where the handle is 3-15 lowercase letters, numbers, or underscores, starting with a letter.
+- Offer the self-custody fallback: open ${process.env.ROUTER_PUBLIC_URL || process.env.BASE_URL || 'https://router.teleport.computer'}/join if they prefer to generate the key themselves.
+
+Do not create an identity yet. Do not ask them to use Router tools manually. After sending the DM, return a one-line summary.`;
+
+  await runHermesPrompt(event, prompt, 'Onboarding event');
+}
+
+async function runDailyDigestChat(event) {
+  const data = event?.data || {};
+  const date = data.date || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const since = data.since || '24h';
+  const prompt = `You are Router, the scheduled Matrix daily digest agent.
+
+Use the installed Hermes skill named "morning-digest" as the source of truth for the digest format, voice, and constraints. If your runtime does not automatically open that skill, read and follow the skill at $HERMES_HOME/skills/morning-digest/SKILL.md.
+
+Event:
+${JSON.stringify(event, null, 2)}
+
+Required workflow:
+- Search Router notebook activity by calling router_search with since="${since}", include_matrix=true, and a limit large enough to see the day.
+- Use 2-5 web searches for relevant recent external context, as required by the morning-digest skill.
+- Write the final digest according to the morning-digest skill. In particular: exactly 3 standalone paragraphs, each about one person's entry or contribution, each with a plain URL source, then one reframing question. Keep it concise for Matrix.
+- Post exactly once by calling router_post_daily_digest with date="${date}" and text=<the final digest body>.
+
+Hard rules:
+- Do not use router_platform_send for this digest.
+- Do not DM anyone.
+- Do not include tool logs, XML tags, headings, or process commentary in the posted digest body.
+- If router_post_daily_digest reports DAILY_DIGEST_ALREADY_POSTED, stop without trying another posting tool.
+
+After acting, return a one-line summary of what you did.`;
+
+  await runHermesPrompt(event, prompt, 'Daily digest event');
 }
 
 async function runAgentChat(event) {
@@ -152,6 +300,11 @@ Matrix context:
 - For cross-room Matrix questions, call router_search with include_matrix = true and a query or since window. Router can search non-DM Matrix rooms it has joined.
 - Do not search DMs broadly. Only search a DM when event.data.is_dm is true and you pass event.data.room_id for that current DM.
 
+Onboarding command:
+- If this is a Matrix DM and the text begins with "onboard " followed by a proposed handle, provision the identity by calling router_onboard_identity with platform="matrix", platform_user_id=event.data.sender_id, desired_handle=<the proposed handle>, display_name=event.data.sender_handle if useful, source="matrix_dm_onboard_command".
+- If provisioning succeeds, reply in the originating room with router_platform_send. Include the returned handle, secret_key, mcp_url, and attestation_url verbatim. Tell the user to save the key in a password manager, that Router stores only a hash, and that they may delete the Matrix message after saving it.
+- If the handle is invalid or taken, reply with the exact handle rule and ask for another \`onboard handle\`.
+
 Hard rules:
 - Do not ask the user to manually invoke Router tools.
 - link/help commands are already handled upstream; do nothing for those.
@@ -161,30 +314,7 @@ Hard rules:
 
 After acting, return a one-line summary of what you did.`;
 
-  const env = {
-    ...process.env,
-    ROUTER_HOME: process.env.ROUTER_HOME || process.env.HERMES_HOME || '/data/router-agent',
-  };
-  env.HERMES_HOME = env.ROUTER_HOME;
-
-  let stdout;
-  let stderr;
-  try {
-    ({ stdout, stderr } = await execFileAsync(
-      'hermes',
-      ['chat', '-q', prompt, '--provider', 'anthropic', '-Q', '--yolo'],
-      {
-        env,
-        timeout: 180_000,
-        maxBuffer: 1024 * 1024,
-      },
-    ));
-  } catch (error) {
-    throw new Error(`hermes chat failed for event ${event.id}: ${formatExecFailure(error)}`);
-  }
-
-  const summary = String(stdout || stderr || '').trim().split('\n').filter(Boolean).at(-1);
-  log(`Event ${event.id} handled${summary ? `: ${summary.slice(0, 300)}` : ''}`);
+  await runHermesPrompt(event, prompt, 'Event');
 }
 
 async function main() {
@@ -199,7 +329,10 @@ async function main() {
   const pollIntervalMs = Number.parseInt(process.env.ROUTER_EVENT_POLL_INTERVAL_MS || '2000', 10);
   const pollLimit = Number.parseInt(process.env.ROUTER_EVENT_LIMIT || '20', 10);
   const maxEventAgeMs = Number.parseInt(process.env.ROUTER_EVENT_MAX_AGE_MS || '300000', 10);
+  const digestMaxEventAgeMs = Number.parseInt(process.env.ROUTER_DIGEST_EVENT_MAX_AGE_MS || '43200000', 10);
   const handledMatrixMessageLimit = Number.parseInt(process.env.ROUTER_HANDLED_MATRIX_MESSAGE_IDS_LIMIT || '2000', 10);
+  const handledOnboardingLimit = Number.parseInt(process.env.ROUTER_HANDLED_ONBOARDING_KEYS_LIMIT || '2000', 10);
+  const handledDailyDigestLimit = Number.parseInt(process.env.ROUTER_HANDLED_DAILY_DIGEST_KEYS_LIMIT || '366', 10);
   const statePath = join(routerHome, 'router-event-worker-state.json');
 
   if (!secretKey) {
@@ -295,6 +428,80 @@ async function main() {
       const eventId = parseCursor(event.id, 0);
       const eventType = event.type;
       const data = event.data || {};
+
+      if (eventType === 'platform_onboarding') {
+        const key = onboardingKey(event);
+        if (hasHandledOnboarding(state, key)) {
+          log(`Skipping already-handled onboarding event ${eventId} for ${key}`);
+          cursor = Math.max(cursor, eventId);
+          state.cursor = cursor;
+          await saveState(statePath, state);
+          continue;
+        }
+
+        const ageMs = Date.now() - eventTimestamp(event);
+        if (maxEventAgeMs > 0 && ageMs > maxEventAgeMs) {
+          log(`Skipping stale onboarding event ${eventId}; age=${Math.round(ageMs / 1000)}s`);
+          cursor = Math.max(cursor, eventId);
+          state.cursor = cursor;
+          await saveState(statePath, state);
+          continue;
+        }
+
+        log(`Processing platform_onboarding ${eventId} for ${data.platform_user_id || 'unknown'} on ${data.platform || 'unknown'}`);
+
+        cursor = Math.max(cursor, eventId);
+        state.cursor = cursor;
+        await saveState(statePath, state);
+
+        try {
+          await runOnboardingChat(event);
+          rememberHandledOnboarding(state, key, handledOnboardingLimit);
+          await saveState(statePath, state);
+        } catch (error) {
+          log(`Onboarding event ${eventId} handler error: ${formatError(error)}`);
+          await sleep(Math.max(pollIntervalMs, 2000));
+          continue;
+        }
+        continue;
+      }
+
+      if (eventType === 'daily_digest_requested') {
+        const key = dailyDigestKey(event);
+        if (hasHandledDailyDigest(state, key)) {
+          log(`Skipping already-handled daily digest event ${eventId} for ${key}`);
+          cursor = Math.max(cursor, eventId);
+          state.cursor = cursor;
+          await saveState(statePath, state);
+          continue;
+        }
+
+        const ageMs = Date.now() - eventTimestamp(event);
+        if (digestMaxEventAgeMs > 0 && ageMs > digestMaxEventAgeMs) {
+          log(`Skipping stale daily digest event ${eventId}; age=${Math.round(ageMs / 1000)}s`);
+          cursor = Math.max(cursor, eventId);
+          state.cursor = cursor;
+          await saveState(statePath, state);
+          continue;
+        }
+
+        log(`Processing daily_digest_requested ${eventId} for ${data.date || 'unknown date'}`);
+
+        cursor = Math.max(cursor, eventId);
+        state.cursor = cursor;
+        await saveState(statePath, state);
+
+        try {
+          await runDailyDigestChat(event);
+          rememberHandledDailyDigest(state, key, handledDailyDigestLimit);
+          await saveState(statePath, state);
+        } catch (error) {
+          log(`Daily digest event ${eventId} handler error: ${formatError(error)}`);
+          await sleep(Math.max(pollIntervalMs, 2000));
+          continue;
+        }
+        continue;
+      }
 
       if (eventType !== 'platform_mention') {
         cursor = Math.max(cursor, eventId);

@@ -333,10 +333,30 @@ function isMatrixUserId(value: string): boolean {
   return /^@[^:\s]+:[^:\s]+$/.test(value);
 }
 
+function sameMatrixRoomId(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.split(':', 1)[0] === b.split(':', 1)[0];
+}
+
 function normalizeRouterHandle(value: string | undefined | null): string | null {
   const normalized = value?.replace(/^@/, '').trim().toLowerCase();
   return normalized || null;
 }
+
+type MatrixOnboardingStatus = 'queued' | 'sent' | 'skipped';
+
+interface MatrixOnboardingRecord {
+  status: MatrixOnboardingStatus;
+  queuedAt?: number;
+  sentAt?: number;
+  skippedAt?: number;
+  eventId?: number;
+  displayName?: string;
+  roomId?: string;
+  reason?: string;
+}
+
+type MatrixOnboardingState = Record<string, MatrixOnboardingRecord>;
 
 export function isMatrixMention(params: {
   isDM: boolean;
@@ -410,6 +430,79 @@ export class MatrixPlatform implements Platform {
 
   constructor(config: MatrixPlatformConfig) {
     this.config = config;
+  }
+
+  private getOnboardingStatePath(): string {
+    return process.env.MATRIX_ONBOARDING_STATE_PATH || '/data/matrix-onboarding-state.json';
+  }
+
+  private loadOnboardingState(): MatrixOnboardingState {
+    const path = this.getOnboardingStatePath();
+    if (!existsSync(path)) return {};
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as MatrixOnboardingState;
+    } catch (error) {
+      console.warn(`[Matrix] Failed to read onboarding state from ${path}:`, error);
+      return {};
+    }
+  }
+
+  private saveOnboardingState(state: MatrixOnboardingState): void {
+    const path = this.getOnboardingStatePath();
+    const dir = dirname(path);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  }
+
+  private isOnboardingCandidate(userId: string | null | undefined): userId is string {
+    if (!userId || !isMatrixUserId(userId)) return false;
+    return userId !== this.botUserId;
+  }
+
+  private queueMatrixOnboarding(userId: string, roomId: string, displayName?: string): void {
+    const state = this.loadOnboardingState();
+    const existing = state[userId];
+    if (existing?.status === 'queued' || existing?.status === 'sent' || existing?.status === 'skipped') {
+      return;
+    }
+
+    const event = pushEvent('platform_onboarding', {
+      platform: 'matrix',
+      platform_user_id: userId,
+      display_name: displayName || undefined,
+      space_room_id: this.config.spaceRoomId,
+      room_id: roomId,
+      reason: 'matrix_space_join',
+      timestamp: Date.now(),
+    });
+
+    state[userId] = {
+      status: 'queued',
+      queuedAt: Date.now(),
+      eventId: event.id,
+      displayName,
+      roomId,
+      reason: 'matrix_space_join',
+    };
+    this.saveOnboardingState(state);
+    console.log(`[Matrix] Queued Router onboarding for ${userId} from space ${roomId}`);
+  }
+
+  private handleSpaceMembershipForOnboarding(event: MatrixEvent, member: any): void {
+    if (!this.config.spaceRoomId) return;
+    if (member?.membership !== KnownMembership.Join) return;
+
+    const roomId = member?.roomId || event.getRoomId?.();
+    if (!sameMatrixRoomId(roomId, this.config.spaceRoomId)) return;
+
+    const userId = member?.userId || event.getStateKey?.();
+    if (!this.isOnboardingCandidate(userId)) return;
+
+    const displayName =
+      typeof member?.name === 'string' ? member.name :
+      typeof member?.rawDisplayName === 'string' ? member.rawDisplayName :
+      undefined;
+    this.queueMatrixOnboarding(userId, roomId, displayName);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────
@@ -1625,6 +1718,8 @@ export class MatrixPlatform implements Platform {
 
     // Auto-join on invite.
     this.client.on(RoomMemberEvent.Membership, (event: MatrixEvent, member: any) => {
+      this.handleSpaceMembershipForOnboarding(event, member);
+
       if (member.userId !== this.botUserId) return;
       if (member.membership !== KnownMembership.Invite) return;
       void this.joinInvitedRoom(member.roomId, 'member event');
