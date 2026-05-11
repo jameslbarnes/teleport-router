@@ -747,7 +747,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_post_daily_digest',
     name: 'router_post_daily_digest',
-    description: 'Moderator-only: post a completed Hermes-authored daily digest to the Matrix #digest room. Enforces one post per date.',
+    description: 'Moderator-only: post a completed daily digest to the Matrix #digest room. Enforces one post per date.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
