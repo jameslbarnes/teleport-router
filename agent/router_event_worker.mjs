@@ -31,6 +31,14 @@ function parseCursor(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseEnvInt(names, fallback) {
+  for (const name of names) {
+    const parsed = Number.parseInt(process.env[name] || '', 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return fallback;
+}
+
 function buildMcpUrl(baseUrl, secretKey) {
   const url = new URL(baseUrl);
   url.searchParams.set('key', secretKey);
@@ -187,12 +195,13 @@ async function connectClient(mcpUrl) {
   return { client, transport };
 }
 
-async function runHermesPrompt(event, prompt, label) {
+async function runHermesPrompt(event, prompt, label, options = {}) {
   const env = {
     ...process.env,
     ROUTER_HOME: process.env.ROUTER_HOME || process.env.HERMES_HOME || '/data/router-agent',
   };
   env.HERMES_HOME = env.ROUTER_HOME;
+  const timeoutMs = options.timeoutMs || parseEnvInt(['ROUTER_HERMES_CHAT_TIMEOUT_MS', 'HERMES_CHAT_TIMEOUT_MS'], 180_000);
 
   let stdout;
   let stderr;
@@ -202,12 +211,12 @@ async function runHermesPrompt(event, prompt, label) {
       ['chat', '-q', prompt, '--provider', 'anthropic', '-Q', '--yolo'],
       {
         env,
-        timeout: 180_000,
+        timeout: timeoutMs,
         maxBuffer: 1024 * 1024,
       },
     ));
   } catch (error) {
-    throw new Error(`hermes chat failed for ${label} ${event.id}: ${formatExecFailure(error)}`);
+    throw new Error(`hermes chat failed for ${label} ${event.id} after ${timeoutMs}ms: ${formatExecFailure(error)}`);
   }
 
   const summary = String(stdout || stderr || '').trim().split('\n').filter(Boolean).at(-1);
@@ -268,7 +277,8 @@ Hard rules:
 
 After acting, return a one-line summary of what you did.`;
 
-  await runHermesPrompt(event, prompt, 'Daily digest event');
+  const timeoutMs = parseEnvInt(['ROUTER_DIGEST_CHAT_TIMEOUT_MS', 'ROUTER_HERMES_DIGEST_TIMEOUT_MS'], 600_000);
+  await runHermesPrompt(event, prompt, 'Daily digest event', { timeoutMs });
 }
 
 async function runAgentChat(event) {
