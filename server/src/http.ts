@@ -34,6 +34,7 @@ import { MatrixPlatform, type MatrixHistoryMessage } from './platform/matrix.js'
 import { getDispatcher } from './hooks/dispatcher.js';
 import { registerAgentHooks } from './hooks/agent.js';
 import { generateDailyDigest, sendPersonalizedDigests, startCronJobs, stopCronJobs } from './hooks/cron.js';
+import { postDailyDigestToMatrix } from './daily-digest-post.js';
 
 // Security: Check if a URL points to internal/private IP ranges
 function isInternalUrl(urlString: string): boolean {
@@ -110,46 +111,6 @@ const BASE_URL = process.env.BASE_URL || 'https://router.teleport.computer';
 const MODERATOR_HANDLES = new Set(
   (process.env.MODERATOR_HANDLES || '').split(',').map(h => h.trim()).filter(Boolean)
 );
-
-interface DailyDigestPostRecord {
-  date: string;
-  roomId: string;
-  messageId: string;
-  postedAt: number;
-  postedBy?: string;
-}
-
-interface DailyDigestPostState {
-  posted: Record<string, DailyDigestPostRecord>;
-}
-
-function getDailyDigestPostStatePath(): string {
-  const explicitPath = process.env.ROUTER_DAILY_DIGEST_STATE_PATH || process.env.MATRIX_DIGEST_STATE_PATH;
-  if (explicitPath) return explicitPath;
-
-  try {
-    accessSync('/data', constants.W_OK);
-    return '/data/router-daily-digest-state.json';
-  } catch {
-    return join(process.env.TMPDIR || '/tmp', 'router-daily-digest-state.json');
-  }
-}
-
-function loadDailyDigestPostState(): DailyDigestPostState {
-  try {
-    const parsed = JSON.parse(readFileSync(getDailyDigestPostStatePath(), 'utf8'));
-    if (parsed && typeof parsed === 'object' && parsed.posted && typeof parsed.posted === 'object') {
-      return { posted: parsed.posted };
-    }
-  } catch {}
-  return { posted: {} };
-}
-
-function saveDailyDigestPostState(state: DailyDigestPostState): void {
-  const path = getDailyDigestPostStatePath();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-}
 
 // Tool description - single source of truth
 export const TOOL_DESCRIPTION = `Write to the shared notebook.
@@ -679,7 +640,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_poll_events',
     name: 'router_poll_events',
-    description: 'Poll for new events since a cursor. Returns events like entry_staged, entry_published, platform_message, platform_mention, platform_onboarding, and daily_digest_requested. Use this in a loop to react to what\'s happening in real time.',
+    description: 'Poll for new events since a cursor. Returns events like entry_staged, entry_published, platform_message, platform_mention, and platform_onboarding. Use this in a loop to react to what\'s happening in real time.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -4212,17 +4173,6 @@ function createMCPServer(secretKey: string) {
         };
       }
 
-      const state = loadDailyDigestPostState();
-      const existing = state.posted[date];
-      if (existing) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `DAILY_DIGEST_ALREADY_POSTED\ndate: ${date}\nroom_id: ${existing.roomId}\nmessage_id: ${existing.messageId}\nposted_at: ${new Date(existing.postedAt).toISOString()}`,
-          }],
-        };
-      }
-
       const matrix = getPlatform('matrix') as (MatrixPlatform & {
         ensureChannelRoom?: (channelId: string, channelName: string, description?: string) => Promise<string>;
       }) | undefined;
@@ -4240,29 +4190,20 @@ function createMCPServer(secretKey: string) {
       }
 
       try {
-        const roomId = await matrix.ensureChannelRoom('digest', 'Daily Digest', 'Daily summary of notebook activity');
-        const digestText = text.startsWith('# Daily Digest')
-          ? text
-          : `# Daily Digest — ${date}\n\n${text}`;
-        const messageId = await matrix.sendMessage(roomId, digestText);
-
-        state.posted[date] = {
-          date,
-          roomId,
-          messageId,
-          postedAt: Date.now(),
-          postedBy: requesterHandle,
-        };
-        try {
-          saveDailyDigestPostState(state);
-        } catch (stateErr) {
-          console.warn('[Digest] Posted daily digest but failed to persist idempotency state:', stateErr);
+        const result = await postDailyDigestToMatrix(matrix, date, text, requesterHandle);
+        if (result.status === 'already-posted') {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `DAILY_DIGEST_ALREADY_POSTED\ndate: ${date}\nroom_id: ${result.record.roomId}\nmessage_id: ${result.record.messageId}\nposted_at: ${new Date(result.record.postedAt).toISOString()}`,
+            }],
+          };
         }
 
         return {
           content: [{
             type: 'text' as const,
-            text: `DAILY_DIGEST_POSTED\ndate: ${date}\nroom_id: ${roomId}\nmessage_id: ${messageId}`,
+            text: `DAILY_DIGEST_POSTED\ndate: ${date}\nroom_id: ${result.record.roomId}\nmessage_id: ${result.record.messageId}`,
           }],
         };
       } catch (err: any) {

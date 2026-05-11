@@ -95,13 +95,6 @@ function onboardingKey(event) {
   return `${data.platform}:${data.platform_user_id}:${data.reason || 'onboarding'}`;
 }
 
-function dailyDigestKey(event) {
-  const data = event?.data || {};
-  if (event?.type !== 'daily_digest_requested') return null;
-  if (!data.date) return null;
-  return `${data.platform || 'matrix'}:${data.target || 'digest'}:${data.date}`;
-}
-
 function latestMatrixMentionIdsByRoom(events) {
   const latest = new Map();
   for (const event of events) {
@@ -158,31 +151,6 @@ function rememberHandledOnboarding(state, key, limit) {
   keys.push(key);
 
   const max = Number.isFinite(limit) && limit > 0 ? limit : 2000;
-  if (keys.length > max) {
-    keys.splice(0, keys.length - max);
-  }
-}
-
-function handledDailyDigestKeys(state) {
-  if (!Array.isArray(state.handled_daily_digest_keys)) {
-    state.handled_daily_digest_keys = [];
-  }
-  return state.handled_daily_digest_keys;
-}
-
-function hasHandledDailyDigest(state, key) {
-  return !!key && handledDailyDigestKeys(state).includes(key);
-}
-
-function rememberHandledDailyDigest(state, key, limit) {
-  if (!key) return;
-
-  const keys = handledDailyDigestKeys(state);
-  const existing = keys.indexOf(key);
-  if (existing >= 0) keys.splice(existing, 1);
-  keys.push(key);
-
-  const max = Number.isFinite(limit) && limit > 0 ? limit : 366;
   if (keys.length > max) {
     keys.splice(0, keys.length - max);
   }
@@ -252,35 +220,6 @@ Do not create an identity yet. Do not ask them to use Router tools manually. Aft
   await runHermesPrompt(event, prompt, 'Onboarding event');
 }
 
-async function runDailyDigestChat(event) {
-  const data = event?.data || {};
-  const date = data.date || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const since = data.since || '24h';
-  const prompt = `You are Router, the scheduled Matrix daily digest agent.
-
-Use the installed Hermes skill named "morning-digest" as the source of truth for the digest format, voice, and constraints. If your runtime does not automatically open that skill, read and follow the skill at $HERMES_HOME/skills/morning-digest/SKILL.md.
-
-Event:
-${JSON.stringify(event, null, 2)}
-
-Required workflow:
-- Search Router notebook activity by calling router_search with since="${since}", include_matrix=true, and a limit large enough to see the day.
-- Use 2-5 web searches for relevant recent external context, as required by the morning-digest skill.
-- Write the final digest according to the morning-digest skill. In particular: exactly 3 standalone paragraphs, each about one person's entry or contribution, each with a plain URL source, then one reframing question. Keep it concise for Matrix.
-- Post exactly once by calling router_post_daily_digest with date="${date}" and text=<the final digest body>.
-
-Hard rules:
-- Do not use router_platform_send for this digest.
-- Do not DM anyone.
-- Do not include tool logs, XML tags, headings, or process commentary in the posted digest body.
-- If router_post_daily_digest reports DAILY_DIGEST_ALREADY_POSTED, stop without trying another posting tool.
-
-After acting, return a one-line summary of what you did.`;
-
-  const timeoutMs = parseEnvInt(['ROUTER_DIGEST_CHAT_TIMEOUT_MS', 'ROUTER_HERMES_DIGEST_TIMEOUT_MS'], 600_000);
-  await runHermesPrompt(event, prompt, 'Daily digest event', { timeoutMs });
-}
-
 async function runAgentChat(event) {
   const data = event?.data || {};
   const text = data.text || '';
@@ -339,10 +278,8 @@ async function main() {
   const pollIntervalMs = Number.parseInt(process.env.ROUTER_EVENT_POLL_INTERVAL_MS || '2000', 10);
   const pollLimit = Number.parseInt(process.env.ROUTER_EVENT_LIMIT || '20', 10);
   const maxEventAgeMs = Number.parseInt(process.env.ROUTER_EVENT_MAX_AGE_MS || '300000', 10);
-  const digestMaxEventAgeMs = Number.parseInt(process.env.ROUTER_DIGEST_EVENT_MAX_AGE_MS || '43200000', 10);
   const handledMatrixMessageLimit = Number.parseInt(process.env.ROUTER_HANDLED_MATRIX_MESSAGE_IDS_LIMIT || '2000', 10);
   const handledOnboardingLimit = Number.parseInt(process.env.ROUTER_HANDLED_ONBOARDING_KEYS_LIMIT || '2000', 10);
-  const handledDailyDigestLimit = Number.parseInt(process.env.ROUTER_HANDLED_DAILY_DIGEST_KEYS_LIMIT || '366', 10);
   const statePath = join(routerHome, 'router-event-worker-state.json');
 
   if (!secretKey) {
@@ -470,43 +407,6 @@ async function main() {
           await saveState(statePath, state);
         } catch (error) {
           log(`Onboarding event ${eventId} handler error: ${formatError(error)}`);
-          await sleep(Math.max(pollIntervalMs, 2000));
-          continue;
-        }
-        continue;
-      }
-
-      if (eventType === 'daily_digest_requested') {
-        const key = dailyDigestKey(event);
-        if (hasHandledDailyDigest(state, key)) {
-          log(`Skipping already-handled daily digest event ${eventId} for ${key}`);
-          cursor = Math.max(cursor, eventId);
-          state.cursor = cursor;
-          await saveState(statePath, state);
-          continue;
-        }
-
-        const ageMs = Date.now() - eventTimestamp(event);
-        if (digestMaxEventAgeMs > 0 && ageMs > digestMaxEventAgeMs) {
-          log(`Skipping stale daily digest event ${eventId}; age=${Math.round(ageMs / 1000)}s`);
-          cursor = Math.max(cursor, eventId);
-          state.cursor = cursor;
-          await saveState(statePath, state);
-          continue;
-        }
-
-        log(`Processing daily_digest_requested ${eventId} for ${data.date || 'unknown date'}`);
-
-        cursor = Math.max(cursor, eventId);
-        state.cursor = cursor;
-        await saveState(statePath, state);
-
-        try {
-          await runDailyDigestChat(event);
-          rememberHandledDailyDigest(state, key, handledDailyDigestLimit);
-          await saveState(statePath, state);
-        } catch (error) {
-          log(`Daily digest event ${eventId} handler error: ${formatError(error)}`);
           await sleep(Math.max(pollIntervalMs, 2000));
           continue;
         }

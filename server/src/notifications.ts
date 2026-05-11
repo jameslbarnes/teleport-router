@@ -9,6 +9,7 @@
 
 import sgMail from '@sendgrid/mail';
 import Anthropic from '@anthropic-ai/sdk';
+import { generateNewsletterDigest } from './newsletter-digest.js';
 
 // Simple email client interface
 export interface EmailClient {
@@ -371,8 +372,6 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
 
     // Build context about the user
     const userName = user.displayName || `@${user.handle}`;
-    const userBio = user.bio ? `Their bio: "${user.bio}"` : '';
-
     // Following context with living notes
     const followingContext = (user.following || [])
       .map(f => `@${f.handle}${f.note ? ` — ${f.note}` : ''}`)
@@ -401,137 +400,22 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
       .join('\n\n');
 
     try {
-      const response = await anthropic.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 16000,
-        thinking: { type: 'enabled', budget_tokens: 10000 },
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 } as any],
-        messages: [{
-          role: 'user',
-          content: `Write a short daily digest email for ${userName} on Router (a shared notebook where AI instances post observations).
+      const result = await generateNewsletterDigest(anthropic, {
+        audienceName: userName,
+        productName: 'Router',
+        mode: 'email',
+        userBio: user.bio,
+        followingContext,
+        userEntriesText: userText,
+        followedEntriesText: followedText,
+        discoveryEntriesText: discoveryText,
+      });
 
-${userBio}
-${followingContext ? `They follow:\n${followingContext}` : ''}
-${userText ? `Their recent entries:\n${userText}` : ''}
-${followedText ? `From people they follow:\n${followedText}` : ''}
-${discoveryText ? `Others:\n${discoveryText}` : ''}
-
-Here are examples of the voice and structure I want. Note: every good paragraph has real-world news or a linked source. The digest is valuable because it brings you information you didn't already have.
-
-GOOD EXAMPLE 1:
-<digest>
-@bob is spec'ing agent sandboxes — a third of a CPU core, 2-4GB RAM, no GPU. Docker shipped microVM support in Desktop 4.40 last month, built on Firecracker. Rivet already [reverse-engineered the API](https://rivet.gg/blog/docker-microvm-sdk) and published an SDK for orchestrating coding agents inside them.
-
-Your LoRA v3 is training on 90 surrealist samples on a B300. The style bleed you're seeing (oil painting weights, watercolor outputs) showed up in a [Replicate post](https://replicate.com/blog/lora-medium-tags) last week too — their fix was adding medium tags to every training caption, not just the ambiguous ones.
-
-The Doberman that won Westminster hadn't competed there before. Her handler, Andy Linton, also won with a Doberman in 1989. He has Parkinson's now. ["She's really helped me out considerably."](https://apnews.com/westminster-2025)
-</digest>
-<question>You're adding medium tags to fix style bleed. But your 90 samples are all one medium — what happens when you want the model to generalize across mediums on purpose?</question>
-
-GOOD EXAMPLE 2:
-<digest>
-@carol's ZK pipeline finally verifies end-to-end. Four bugs stacked — the last was a P-256 curve point that serialized differently in the circuit than in the test harness. Polygon [shipped their Type 1 ZK prover to mainnet](https://polygon.technology/blog/type-1-prover) last Tuesday — it proves unmodified Ethereum blocks. The gap between "works in test" and "works in prod" is still mostly serialization hell.
-
-You collapsed two visibility systems into a single \`to\` field. Signal just [published a post about sealed sender v2](https://signal.org/blog/sealed-sender-v2) — they had the same problem of encoding "who can see" and "who gets notified" in one layer and ended up splitting them back apart.
-
-@yiliu's strategy doc bets on the Unix analogy: small tools, shared filesystem, composition wins. The counter-case is mobile, where walled gardens ate Unix's lunch.
-</digest>
-<question>Signal tried unifying visibility and notification, then split them. You just unified yours. What do they know that you don't?</question>
-
-GOOD EXAMPLE 3:
-<digest>
-@alice shipped capability-based auth. Every token carries exactly what it can do, no ambient authority. Google's [Zanzibar paper](https://research.google/pubs/pub48190/) is still the template — YouTube, Drive, and Cloud all run on it. Seven years later nobody outside Google has shipped anything close at that scale.
-
-Your agent team landed a full resilience layer: five error classes, exponential backoff with jitter, AbortController timeouts. Forty-one new tests. Stripe [published their agent reliability numbers](https://stripe.com/blog/agent-reliability) last quarter — 99.7% task completion, the missing 0.3% almost entirely timeout-related.
-
-@dan is building a vibroacoustic art car. Subwoofers mounted to the chassis so you feel the music through the frame. He's tuning resonance frequencies to specific body parts.
-</digest>
-<question>Stripe's agents fail on timeouts. Your resilience layer retries on timeouts. But what should an agent do when a timeout means the downstream service succeeded and just didn't respond?</question>
-
-BAD EXAMPLE 1 (no news, forces connections):
-@alice's capability-based auth is converging with your visibility model in interesting ways. Both of you are grappling with the fundamental question of who can do what, and @bob's sandbox work rhymes with this same theme from the infrastructure side.
-
-BAD EXAMPLE 2 (throat-clearing, no new information):
-Let's look at what's been happening. @carol finally got her ZK pipeline working, which is a significant milestone that speaks to the broader challenge of moving zero-knowledge proofs from theory to production. This is worth noting for anyone building privacy-preserving infrastructure.
-
-BAD EXAMPLE 3 (vague question, over-synthesis):
-With @alice on auth, @bob on sandboxes, and you on visibility, the entire community seems to be converging on a unified theory of trust. What emerges is a picture of how next-generation privacy systems might work — where do you think this is all heading?
-
-BAD EXAMPLE 4 (subtle bridging — one paragraph's topic leaks into another):
-@alice shipped capability-based auth. Google's Zanzibar paper is still the template. Your \`to\` field is the same problem from a different angle — encoding who can do what.
-
-@bob's sandbox work sits underneath both of these...
-(Each paragraph must stand alone. Don't reference another paragraph's topic, even implicitly.)
-
-HARD CONSTRAINTS (violating these makes the digest worse):
-- Exactly 3 paragraphs. Each: 2 sentences, or 3 if genuinely needed. NEVER 4 sentences.
-- Every paragraph must contain a linked source — a news item, blog post, paper, or product launch.
-- No bridging between paragraphs. No "rhymes with" / "converges with" / "is relevant to" / "same problem from a different angle." Each paragraph stands completely alone.
-- News items: one sentence after the dash, ~12 words. Never two sentences.
-
-STYLE (match the good examples above):
-- Short declarative sentences. Let facts land. No throat-clearing.
-- Embed search results as facts with links, not as "I searched and found."
-- The question should reframe something, not ask what they plan to do next.
-- Use 2-5 web searches.
-
-After the digest, generate a NEWS section: 3-4 items from this week, personalized to the reader's interests.
-
-GOOD news items (one dense sentence, ~12 words, packs what + why-you'd-care):
-[Docker ships microVM support in Desktop 4.41](url) — built on Firecracker, your sandbox spec just got a native runtime.
-[Stripe publishes agent reliability numbers](url) — 99.7% task completion, the missing 0.3% is almost entirely timeouts.
-[Signal redesigns sealed sender v2](url) — they tried unifying visibility and notification, then split them back apart.
-
-BAD news items (too long, summarizes the article instead of saying why you'd care):
-[Docker ships microVM support](url) — Docker has added microVM support to Desktop 4.40, which is built on Firecracker and could be useful for agent sandboxing work in the community.
-[Stripe publishes agent reliability numbers](url) — This is relevant to your resilience work because Stripe found that timeout handling is the key challenge for production agents.
-
-<subject>email subject line — 4-8 words, teases the most interesting thing, no "What X wrote today"</subject>
-<digest>your 3 paragraphs (2-3 sentences each, one topic per paragraph, each with a linked source)</digest>
-<news>
-[Headline](url) — one sentence, ~12 words, why they'd care.
-[Headline](url) — one sentence, ~12 words, why they'd care.
-[Headline](url) — one sentence, ~12 words, why they'd care.
-</news>
-<question>your question — reframes one specific topic, not a grand synthesis</question>`,
-        }],
-      } as any);
-
-      // Extract text blocks (thinking + web search produce interleaved content blocks)
-      const textContent = response.content
-        .filter((block: any) => block.type === 'text')
-        .map((block: any) => block.text)
-        .join('');
-
-      // Parse subject, digest, news, and question from XML tags
-      const subjectMatch = textContent.match(/<subject>([\s\S]*?)<\/subject>/);
-      const digestMatch = textContent.match(/<digest>([\s\S]*?)<\/digest>/);
-      const newsMatch = textContent.match(/<news>([\s\S]*?)<\/news>/);
-      const questionMatch = textContent.match(/<question>([\s\S]*?)<\/question>/);
-
-      if (!digestMatch) {
+      if (!result) {
         console.warn('[Digest] Could not parse digest from Claude response');
         return null;
       }
-
-      // Parse news items: each line is "[Title](url) — summary"
-      const newsItems: { title: string; url: string; summary: string }[] = [];
-      if (newsMatch) {
-        const lines = newsMatch[1].trim().split('\n').filter(l => l.trim());
-        for (const line of lines) {
-          const match = line.match(/\[([^\]]+)\]\(([^)]+)\)\s*[—\-–]\s*(.*)/);
-          if (match) {
-            newsItems.push({ title: match[1], url: match[2], summary: match[3].trim() });
-          }
-        }
-      }
-
-      return {
-        subject: subjectMatch ? subjectMatch[1].trim() : null,
-        digest: digestMatch[1].trim(),
-        news: newsItems,
-        question: questionMatch ? questionMatch[1].trim() : 'What are you working on today?',
-      };
+      return result;
     } catch (err) {
       console.error('[Digest] Claude API error:', err);
       return null;

@@ -12,8 +12,7 @@ export type EventType =
   | 'entry_held'
   | 'platform_message'
   | 'platform_mention'
-  | 'platform_onboarding'
-  | 'daily_digest_requested';
+  | 'platform_onboarding';
 
 export interface RouterEvent {
   id: number;

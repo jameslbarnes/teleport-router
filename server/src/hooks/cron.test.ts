@@ -17,7 +17,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   }),
 }));
 
-import { getEventsSince, resetEvents } from '../events.js';
+import { resetEvents } from '../events.js';
 import { registerPlatform } from '../platform/registry.js';
 import { generateDailyDigest, PERSONALIZED_DIGEST_MODEL, sendPersonalizedDigests } from './cron.js';
 
@@ -90,13 +90,17 @@ describe('generateDailyDigest', () => {
   beforeEach(() => {
     resetEvents();
     process.env.ANTHROPIC_API_KEY = 'test-key';
+    process.env.ROUTER_DAILY_DIGEST_STATE_PATH = `/tmp/router-digest-test-${Date.now()}-${Math.random()}.json`;
     messagesCreate.mockReset();
     messagesCreate.mockResolvedValue({
-      content: [{ type: 'text', text: 'Global digest body.' }],
+      content: [{
+        type: 'text',
+        text: '<subject>Digest subject</subject><digest>@alice shipped Matrix routing. [A source](https://example.com) confirms the context.</digest><news>\n[News item](https://example.com/news) - useful context.\n</news><question>What changes when delivery becomes deterministic?</question>',
+      }],
     });
   });
 
-  it('queues a Hermes-authored digest request for the Matrix #digest room', async () => {
+  it('posts a server-authored digest to the Matrix #digest room', async () => {
     const { sendMessage, ensureChannelRoom } = registerMatrixPlatform();
     const addDailySummary = vi.fn(async summary => ({ id: `daily-${summary.date}`, ...summary }));
     const storage = makeStorage({
@@ -118,35 +122,44 @@ describe('generateDailyDigest', () => {
     });
 
     await expect(generateDailyDigest(storage)).resolves.toMatchObject({
-      posted: false,
-      queued: true,
+      posted: true,
       entryCount: 2,
       includedEntryCount: 2,
-      eventId: 1,
+      roomId: '!digest:matrix.test',
+      messageId: '$msg',
     });
 
-    expect(ensureChannelRoom).not.toHaveBeenCalled();
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(ensureChannelRoom).toHaveBeenCalledWith('digest', 'Daily Digest', 'Daily summary of notebook activity');
+    expect(sendMessage).toHaveBeenCalledWith('!digest:matrix.test', expect.stringContaining('# Daily Digest'));
     expect(addDailySummary).not.toHaveBeenCalled();
-    expect(messagesCreate).not.toHaveBeenCalled();
-
-    const events = getEventsSince(0, 10);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      id: 1,
-      type: 'daily_digest_requested',
-      data: {
-        platform: 'matrix',
-        target: 'digest',
-        since: '24h',
-        entry_count: 2,
-        matrix_message_count: 0,
-        reason: 'daily_cron',
-      },
-    });
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    expect(messagesCreate.mock.calls[0][0].messages[0].content).toContain('Alice wrote about Matrix routing');
   });
 
-  it('excludes private addressed and AI-only entries from the queued activity count', async () => {
+  it('does not regenerate or repost a digest for a date that was already posted', async () => {
+    const { sendMessage } = registerMatrixPlatform();
+    const date = new Date(yesterdayAtNoon()).toISOString().slice(0, 10);
+    const storage = makeStorage({
+      getEntriesSince: vi.fn(async () => [
+        makeEntry({ id: 'public-feed', handle: 'alice', content: 'Alice wrote about Matrix routing.' }),
+      ]),
+    });
+
+    await expect(generateDailyDigest(storage, { date })).resolves.toMatchObject({
+      posted: true,
+      messageId: '$msg',
+    });
+    await expect(generateDailyDigest(storage, { date })).resolves.toMatchObject({
+      posted: false,
+      skipped: 'already-posted',
+      messageId: '$msg',
+    });
+
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('excludes private addressed and AI-only entries from the prompt', async () => {
     registerMatrixPlatform();
     const storage = makeStorage({
       getEntriesSince: vi.fn(async () => [
@@ -159,15 +172,14 @@ describe('generateDailyDigest', () => {
 
     await generateDailyDigest(storage);
 
-    const events = getEventsSince(0, 10);
-    expect(events[0].data.entry_count).toBe(1);
-    expect(JSON.stringify(events[0].data)).not.toContain('Private handle entry should not leak.');
-    expect(JSON.stringify(events[0].data)).not.toContain('Private email entry should not leak.');
-    expect(JSON.stringify(events[0].data)).not.toContain('AI only entry should not leak.');
-    expect(messagesCreate).not.toHaveBeenCalled();
+    const prompt = messagesCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('Public feed entry.');
+    expect(prompt).not.toContain('Private handle entry should not leak.');
+    expect(prompt).not.toContain('Private email entry should not leak.');
+    expect(prompt).not.toContain('AI only entry should not leak.');
   });
 
-  it('can queue a global digest from Matrix room activity when there are no notebook entries', async () => {
+  it('can post a global digest from Matrix room activity when there are no notebook entries', async () => {
     const { sendMessage, queryRecentMessages } = registerMatrixPlatform();
     queryRecentMessages.mockResolvedValue([
       {
@@ -187,27 +199,19 @@ describe('generateDailyDigest', () => {
     });
 
     await expect(generateDailyDigest(storage)).resolves.toMatchObject({
-      posted: false,
-      queued: true,
+      posted: true,
       entryCount: 0,
       includedEntryCount: 0,
       matrixMessageCount: 1,
     });
 
-    expect(sendMessage).not.toHaveBeenCalled();
-    const events = getEventsSince(0, 10);
-    expect(events[0]).toMatchObject({
-      type: 'daily_digest_requested',
-      data: {
-        entry_count: 0,
-        matrix_message_count: 1,
-      },
-    });
-    expect(JSON.stringify(events[0].data)).not.toContain('Matrix encryption and room discovery');
-    expect(messagesCreate).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const prompt = messagesCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('Matrix conversations');
+    expect(prompt).toContain('Matrix encryption and room discovery');
   });
 
-  it('does not save queued global digest requests into public daily summaries', async () => {
+  it('does not save global digest posts into public daily summaries', async () => {
     const { queryRecentMessages } = registerMatrixPlatform();
     queryRecentMessages.mockResolvedValue([
       {

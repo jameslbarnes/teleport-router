@@ -8,7 +8,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Storage, JournalEntry, User } from '../storage.js';
 import { MatrixPlatform, type MatrixHistoryMessage } from '../platform/matrix.js';
 import { getPlatform } from '../platform/registry.js';
-import { pushEvent } from '../events.js';
+import { getDailyDigestPostRecord, postDailyDigestToMatrix } from '../daily-digest-post.js';
+import { formatNewsletterDigestForMatrix, generateNewsletterDigest } from '../newsletter-digest.js';
 
 // ── Digest ───────────────────────────────────────────────────
 
@@ -35,6 +36,8 @@ export interface GlobalDigestResult {
   posted: boolean;
   queued?: boolean;
   eventId?: number;
+  roomId?: string;
+  messageId?: string;
   entryCount: number;
   includedEntryCount: number;
   matrixMessageCount?: number;
@@ -85,6 +88,21 @@ function formatMatrixMessagesForDigestPrompt(messages: MatrixHistoryMessage[], m
     .join('\n');
 }
 
+function formatEntryForDigestPrompt(entry: JournalEntry, max = 520): string {
+  const time = new Date(entry.timestamp).toISOString().slice(11, 16);
+  const author = entry.handle ? `@${entry.handle}` : entry.pseudonym;
+  const destination = entry.to && entry.to.length > 0 ? ` to ${entry.to.join(', ')}` : '';
+  const content = entry.content.replace(/\s+/g, ' ').trim();
+  return `[${time}] ${author}${destination}: ${content.slice(0, max)}${content.length > max ? '...' : ''}`;
+}
+
+function formatEntriesForDigestPrompt(entries: JournalEntry[], maxEntries = 80): string {
+  return entries
+    .slice(0, maxEntries)
+    .map(entry => formatEntryForDigestPrompt(entry))
+    .join('\n');
+}
+
 async function queryMatrixDigestMessages(
   matrix: MatrixPlatform,
   opts: {
@@ -119,14 +137,14 @@ async function queryMatrixDigestMessages(
 }
 
 /**
- * Queue a global daily digest request for the Router Hermes agent.
+ * Generate and post a global daily digest to the Matrix #digest room.
  * Called by the cron scheduler (typically 8am UTC).
  */
 export async function generateDailyDigest(
   storage: Storage,
   opts?: { date?: string },
 ): Promise<GlobalDigestResult> {
-  console.log('[Cron] Queueing global daily digest request...');
+  console.log('[Cron] Generating global daily digest...');
 
   const date = opts?.date || getYesterdayUtcDate();
   const { start: startOfDay, end: endOfDay } = getUtcDayRange(date);
@@ -152,36 +170,86 @@ export async function generateDailyDigest(
     return { posted: false, entryCount: 0, includedEntryCount: 0, matrixMessageCount: 0, date, skipped: 'no-public-activity' };
   }
 
-  try {
-    const event = pushEvent('daily_digest_requested', {
-      platform: 'matrix',
-      target: 'digest',
-      date,
-      since: '24h',
-      start: startOfDay,
-      end: endOfDay,
-      entry_count: yesterdayEntries.length,
-      matrix_message_count: matrixMessages.length,
-      requested_at: Date.now(),
-      reason: 'daily_cron',
-    });
-    console.log(`[Cron] Queued daily_digest_requested ${event.id} (${yesterdayEntries.length} entries, ${matrixMessages.length} Matrix messages)`);
-
+  const existingPost = getDailyDigestPostRecord(date);
+  if (existingPost) {
+    console.log(`[Cron] Global daily digest for ${date} already posted as ${existingPost.messageId}`);
     return {
       posted: false,
-      queued: true,
-      eventId: event.id,
+      roomId: existingPost.roomId,
+      messageId: existingPost.messageId,
+      entryCount: yesterdayEntries.length,
+      includedEntryCount: yesterdayEntries.length,
+      matrixMessageCount: matrixMessages.length,
+      date,
+      skipped: 'already-posted',
+    };
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.log('[Cron] Skipping global digest: ANTHROPIC_API_KEY is not configured');
+    return {
+      posted: false,
+      entryCount: yesterdayEntries.length,
+      includedEntryCount: yesterdayEntries.length,
+      matrixMessageCount: matrixMessages.length,
+      date,
+      skipped: 'anthropic-not-configured',
+    };
+  }
+
+  try {
+    const anthropic = new Anthropic({ apiKey });
+    const result = await generateNewsletterDigest(anthropic, {
+      audienceName: 'the Router Matrix #digest room',
+      productName: 'Router',
+      mode: 'matrix',
+      date,
+      discoveryEntriesText: formatEntriesForDigestPrompt(yesterdayEntries),
+      matrixMessagesText: formatMatrixMessagesForDigestPrompt(matrixMessages),
+    });
+    if (!result) {
+      throw new Error('Could not parse digest from Claude response');
+    }
+
+    const postAttempt = await postDailyDigestToMatrix(
+      matrix,
+      date,
+      formatNewsletterDigestForMatrix(result),
+      'server-cron',
+    );
+
+    if (postAttempt.status === 'already-posted') {
+      console.log(`[Cron] Global daily digest for ${date} already posted as ${postAttempt.record.messageId}`);
+      return {
+        posted: false,
+        roomId: postAttempt.record.roomId,
+        messageId: postAttempt.record.messageId,
+        entryCount: yesterdayEntries.length,
+        includedEntryCount: yesterdayEntries.length,
+        matrixMessageCount: matrixMessages.length,
+        date,
+        skipped: 'already-posted',
+      };
+    }
+
+    console.log(`[Cron] Posted global daily digest for ${date} to ${postAttempt.record.roomId} as ${postAttempt.record.messageId}`);
+
+    return {
+      posted: true,
+      roomId: postAttempt.record.roomId,
+      messageId: postAttempt.record.messageId,
       entryCount: yesterdayEntries.length,
       includedEntryCount: yesterdayEntries.length,
       matrixMessageCount: matrixMessages.length,
       date,
     };
   } catch (err) {
-    console.error('[Cron] Failed to queue global digest:', err);
+    console.error('[Cron] Failed to post global digest:', err);
     return {
       posted: false,
       entryCount: yesterdayEntries.length,
-      includedEntryCount: 0,
+      includedEntryCount: yesterdayEntries.length,
       matrixMessageCount: matrixMessages.length,
       date,
       failed: true,
