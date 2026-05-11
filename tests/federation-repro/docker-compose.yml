@@ -1,0 +1,117 @@
+# Two-homeserver federation harness for reproducing the megolm
+# rotation bug Router exhibits when a federation hiccup drops the
+# m.room_key to-device EDU.
+#
+# Topology (over docker network `fednet`):
+#
+#   peer queries hs-a:8448 → hs-a-proxy (nginx, terminates TLS) → hs-a-core:6167 (HTTP)
+#   peer queries hs-b:8448 → hs-b-proxy (nginx, terminates TLS) → hs-b-core:6167 (HTTP)
+#
+# Peers see the homeserver as hostname `hs-a` (default federation port 8448).
+# Each homeserver trusts the shared test CA for outbound federation.
+services:
+  hs-a-core:
+    image: ghcr.io/continuwuity/continuwuity:latest
+    networks:
+      fednet:
+        aliases: [hs-a-core]
+    ports:
+      - "8001:6167"  # client API exposed for tests
+    environment:
+      CONDUWUIT_SERVER_NAME: hs-a
+      CONDUWUIT_DATABASE_BACKEND: rocksdb
+      CONDUWUIT_DATABASE_PATH: /var/lib/conduwuit
+      CONDUWUIT_ADDRESS: "0.0.0.0"
+      CONDUWUIT_PORT: "6167"
+      CONDUWUIT_ALLOW_REGISTRATION: "true"
+      CONDUWUIT_REGISTRATION_TOKEN: "fedrepro"
+      CONDUWUIT_ALLOW_FEDERATION: "true"
+      CONDUWUIT_LOG: "info,conduwuit=debug"
+      SSL_CERT_FILE: "/certs/ca.pem"
+    volumes:
+      - hs-a-data:/var/lib/conduwuit
+      - ./certs:/certs:ro
+
+  hs-a:
+    image: nginx:alpine
+    networks:
+      fednet:
+        aliases: [hs-a]
+    depends_on: [hs-a-core]
+    volumes:
+      - ./scripts/nginx-hs-a.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/certs:ro
+
+  hs-b-core:
+    image: ghcr.io/continuwuity/continuwuity:latest
+    networks:
+      fednet:
+        aliases: [hs-b-core]
+    ports:
+      - "8002:6167"
+    environment:
+      CONDUWUIT_SERVER_NAME: hs-b
+      CONDUWUIT_DATABASE_BACKEND: rocksdb
+      CONDUWUIT_DATABASE_PATH: /var/lib/conduwuit
+      CONDUWUIT_ADDRESS: "0.0.0.0"
+      CONDUWUIT_PORT: "6167"
+      CONDUWUIT_ALLOW_REGISTRATION: "true"
+      CONDUWUIT_REGISTRATION_TOKEN: "fedrepro"
+      CONDUWUIT_ALLOW_FEDERATION: "true"
+      CONDUWUIT_LOG: "info,conduwuit=debug"
+      SSL_CERT_FILE: "/certs/ca.pem"
+    volumes:
+      - hs-b-data:/var/lib/conduwuit
+      - ./certs:/certs:ro
+
+  hs-b-real:
+    # The "real" TLS proxy for hs-b. Renamed from `hs-b` so the MITM
+    # below can take that alias and sit in front. When phase 3's MITM
+    # is disabled, hs-b-real plays the same role as hs-a (plain pass-
+    # through TLS termination).
+    image: nginx:alpine
+    networks:
+      fednet:
+        aliases: [hs-b-real]
+    depends_on: [hs-b-core]
+    volumes:
+      - ./scripts/nginx-hs-b.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/certs:ro
+
+  hs-b:
+    # Federation MITM. By default, pass-through (no traffic is altered).
+    # Set MITM_DROP_TYPES (comma-separated) to selectively drop EDUs of
+    # given to-device types from POST /_matrix/federation/v1/send/*
+    # requests in flight.
+    image: node:24-alpine
+    networks:
+      fednet:
+        aliases: [hs-b]
+    depends_on: [hs-b-real]
+    environment:
+      MITM_LISTEN_PORT: "8448"
+      MITM_UPSTREAM_HOST: hs-b-real
+      MITM_UPSTREAM_PORT: "8448"
+      MITM_TLS_CERT: /certs/hs-b.crt
+      MITM_TLS_KEY:  /certs/hs-b.key
+      MITM_UPSTREAM_CA: /certs/ca.pem
+      MITM_DROP_TYPES: ${MITM_DROP_TYPES:-}
+      MITM_LOG_BODIES: ${MITM_LOG_BODIES:-}
+      MITM_LOG_FILE: /shared/mitm.jsonl
+    volumes:
+      - ./certs:/certs:ro
+      - ./repro:/app:ro
+      - mitm-shared:/shared
+    working_dir: /app
+    command: ["node", "mitm.js"]
+    ports:
+      - "8403:8448"
+
+networks:
+  fednet:
+    driver: bridge
+
+volumes:
+  hs-a-data:
+  hs-b-data:
+  mitm-shared:
