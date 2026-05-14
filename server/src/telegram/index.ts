@@ -18,6 +18,10 @@ import { pushEvent } from '../events.js';
 // Re-export public types
 export type { TelegramConfig } from './types.js';
 
+// Re-export classifier for consumers
+export { shouldISpeak, isExplicitSummon, recordBotSpoke, getAdaptiveCooldown } from './classifier.js';
+export type { SpeakDecision, SpeakIntent, ClassifierScores } from './classifier.js';
+
 let bot: Telegraf | null = null;
 
 /**
@@ -126,7 +130,9 @@ export function startTelegramBot(
     console.error('[Telegram] Failed to set up bot identity:', err);
   });
 
-  // Listen for all messages and push to event queue
+  // Listen for all messages and push to event queue.
+  // Explicit @mentions and direct replies ALWAYS trigger a response.
+  // All other messages go through the classifier pipeline.
   bot.on('message', async (ctx) => {
     const text = 'text' in ctx.message ? ctx.message.text : null;
     if (!text) return;
@@ -137,13 +143,16 @@ export function startTelegramBot(
     const senderName = msg.from?.first_name || msg.from?.username || 'Unknown';
     const senderId = msg.from?.id;
 
-    // Check if bot is @mentioned
-    let isMention = false;
+    // Check if bot is explicitly summoned (@mentioned or replied to)
+    let isSummoned = false;
     try {
       const botInfo = await bot!.telegram.getMe();
-      isMention =
-        text.includes(`@${botInfo.username}`) ||
-        msg.reply_to_message?.from?.id === botInfo.id;
+      // Explicit @mention in message text
+      isSummoned = text.includes(`@${botInfo.username}`);
+      // Direct reply to one of the bot's messages
+      if (!isSummoned && msg.reply_to_message?.from?.id === botInfo.id) {
+        isSummoned = true;
+      }
     } catch {
       // Ignore — just treat as regular message
     }
@@ -159,9 +168,11 @@ export function startTelegramBot(
       reply_to_message_id: msg.reply_to_message?.message_id || null,
     };
 
-    if (isMention) {
+    if (isSummoned) {
+      // Always respond to explicit summons — bypass classifier entirely
       pushEvent('platform_mention', eventData);
     } else {
+      // Regular message — goes through classifier pipeline downstream
       pushEvent('platform_message', eventData);
     }
   });

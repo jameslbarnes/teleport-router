@@ -31,7 +31,7 @@ const SAVE_INTERVAL_MS = 5 * 60 * 1000; // Save every 5 minutes
 export interface BotState {
   /** Entry IDs the interjector has already surfaced. */
   surfacedEntryIds: string[];
-  /** Brief summaries of previously surfaced connections. */
+  /** Brief descriptions of previously surfaced connections. */
   surfacedSummaries: string[];
   /** Recently posted entries for dedup + curation context. */
   recentlyPosted: PostedEntry[];
@@ -41,6 +41,8 @@ export interface BotState {
   proactivePostTimestamps: number[];
   /** Last write-back timestamp. */
   lastWritebackTime: number;
+  /** Adaptive cooldown timestamps for the classifier. */
+  classifierSpeakTimestamps: number[];
 }
 
 const EMPTY_STATE: BotState = {
@@ -50,6 +52,7 @@ const EMPTY_STATE: BotState = {
   channelPostTimestamps: [],
   proactivePostTimestamps: [],
   lastWritebackTime: 0,
+  classifierSpeakTimestamps: [],
 };
 
 /** Load persisted state from disk, or return empty state. */
