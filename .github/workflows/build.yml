@@ -39,6 +39,38 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Run server tests
+        working-directory: server
+        run: npm test
+
+      - name: Build server
+        working-directory: server
+        run: npm run build
+
+      - name: Verify Shape Matrix bridge artifact
+        run: test -f server/dist/shape-matrix-bridge.js
+
+      - name: Validate compose topology
+        env:
+          GIT_SHA: ci
+          IMAGE_DIGEST: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          AGENT_IMAGE_DIGEST: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        run: node scripts/shape-compose-boundary-check.mjs
+
+      - name: Validate agent Matrix boundary
+        run: node scripts/shape-agent-boundary-check.mjs
+
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -126,6 +158,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install Phala CLI
         run: npm install -g phala
 
@@ -139,6 +176,15 @@ jobs:
           export GIT_SHA=$(echo "$GIT_SHA_FULL" | cut -c1-7)
           envsubst < docker-compose.template.yml > docker-compose.deploy.yml
           cat docker-compose.deploy.yml
+
+      - name: Log in to Docker Hub for deploy verification
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify generated deploy compose and image
+        run: SHAPE_COMPOSE_PULL_IMAGE=1 node scripts/shape-compose-boundary-check.mjs --check-image docker-compose.deploy.yml
 
       - name: Deploy to Phala Cloud
         run: |
@@ -200,7 +246,12 @@ jobs:
 
           # Redact secrets from metadata before committing
           if [ -f "$DIR/metadata-raw.json" ]; then
-            sed -E 's/(ANTHROPIC_API_KEY|SENDGRID_API_KEY|FIREBASE_SERVICE_ACCOUNT_BASE64|FIRECRAWL_API_KEY|CLOUDFLARE_API_TOKEN|TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_SECRET_KEY|ROUTER_SECRET_KEY|HERMES_SECRET_KEY|HERMES_AGENT_SECRET_KEY|GITHUB_TOKEN|GH_TOKEN)=[^",\\]*/\1=[REDACTED]/g' \
+            SECRET_ENV_RE='(ANTHROPIC_API_KEY|SENDGRID_API_KEY|FIREBASE_SERVICE_ACCOUNT_BASE64|FIRECRAWL_API_KEY|CLOUDFLARE_API_TOKEN|TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_SECRET_KEY|ROUTER_SECRET_KEY|HERMES_SECRET_KEY|HERMES_AGENT_SECRET_KEY|SHAPE_ROUTER_SECRET_KEY|MATRIX_SERVER_URL|MATRIX_HOMESERVER|MATRIX_SERVER_NAME|MATRIX_BOT_SECRET_KEY|MATRIX_ACCESS_TOKEN|MATRIX_USER_ID|MATRIX_DEVICE_ID|MATRIX_CRYPTO_SECRET|MATRIX_BOT_HANDLE|MATRIX_SPACE_ROOM_ID|MATRIX_REGISTRATION_TOKEN|MATRIX_SIGNUP_URL|GITHUB_TOKEN|GH_TOKEN)'
+            sed -E \
+              -e "s/(${SECRET_ENV_RE}=)[^\",\\\\[:space:]]*/\\1[REDACTED]/g" \
+              -e "s/(\"${SECRET_ENV_RE}\"[[:space:]]*:[[:space:]]*\")[^\"]*/\\1[REDACTED]/g" \
+              -e "s/(\\\\\"${SECRET_ENV_RE}\\\\\"[[:space:]]*:[[:space:]]*\\\\\")[^\\\\\"]*/\\1[REDACTED]/g" \
+              -e "s/(&#34;${SECRET_ENV_RE}&#34;[[:space:]]*:[[:space:]]*&#34;)[^&]*/\\1[REDACTED]/g" \
               "$DIR/metadata-raw.json" > "$DIR/metadata.json"
             rm "$DIR/metadata-raw.json"
           fi

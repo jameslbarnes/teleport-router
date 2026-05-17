@@ -19,23 +19,37 @@ services:
       - MODERATOR_API_KEY
       - SENDGRID_API_KEY
       - SENDGRID_FROM_EMAIL
-      # Route Matrix DMs/@mentions through the external Router agent instead
-      # of the legacy inline server-side mention handler.
-      - ROUTER_AGENT_HANDLES_MATRIX=1
-      # Matrix platform — agent connects to this homeserver to DM users,
-      # create rooms for introductions, and route notebook entries
-      - MATRIX_SERVER_URL
-      - MATRIX_SERVER_NAME
+    volumes:
+      - router-data:/data
+    restart: unless-stopped
+
+  shape-matrix-bridge:
+    image: docker.io/generalsemantics/teleport-router:${GIT_SHA}@${IMAGE_DIGEST}
+    command: ["node", "dist/shape-matrix-bridge.js"]
+    environment:
+      # Matrix is intentionally hosted by this bridge process, not by the
+      # public Router server. Notebook reads/writes go to the private Shape
+      # Router instance below.
+      - SHAPE_ROUTER_BASE_URL=https://shaperotator.teleport.computer
+      - SHAPE_ROUTER_SECRET_KEY
+      - SHAPE_MATRIX_BRIDGE_TAGS=shape-rotator,matrix
+      - SHAPE_MATRIX_PUBLISH_IMMEDIATELY=1
+      - SHAPE_MATRIX_ENABLE_ONBOARDING=0
+      - SHAPE_MATRIX_STARTUP_EVENT_GRACE_MS=5000
+      - ANTHROPIC_API_KEY
+      - MATRIX_SERVER_URL=https://mtrx.shaperotator.xyz
+      - MATRIX_SERVER_NAME=mtrx.shaperotator.xyz
       - MATRIX_BOT_SECRET_KEY
+      - MATRIX_ACCESS_TOKEN
+      - MATRIX_USER_ID
+      - MATRIX_DEVICE_ID
+      - MATRIX_CRYPTO_SECRET
       - MATRIX_BOT_HANDLE
       - MATRIX_SPACE_ROOM_ID=!4FL8uL5OEYLATG1VH4wC2CD3pfIV6BMFId9VT7rmm-g
       - MATRIX_REGISTRATION_TOKEN
-      - MATRIX_SIGNUP_URL
-      # One-shot recovery: rotate the Matrix device once if stale device keys
-      # are causing SAS MAC mismatches. The app records a marker in /data.
-      - MATRIX_FRESH_CRYPTO=once
+      - MATRIX_SIGNUP_URL=https://mtrx.shaperotator.xyz/signup/api
     volumes:
-      - router-data:/data
+      - shape-matrix-bridge-data:/data
     restart: unless-stopped
 
   router-agent:
@@ -99,5 +113,6 @@ services:
 
 volumes:
   router-data:
+  shape-matrix-bridge-data:
   cert-data-cf:
   hermes-cert-data-cf:
