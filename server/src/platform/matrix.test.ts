@@ -1376,6 +1376,37 @@ describe('MatrixPlatform message formatting', () => {
     });
   });
 
+  it('hydrates encrypted room state before sending into a newly joined room', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ event_id: '$event' });
+    const isEncryptionEnabledInRoom = vi.fn().mockResolvedValue(false);
+    const onCryptoEvent = vi.fn().mockResolvedValue(undefined);
+    const encryptionEvent = {
+      getContent: () => ({ algorithm: 'm.megolm.v1.aes-sha2' }),
+    };
+    const room = {
+      roomId: '!encrypted:mtrx.example.test',
+      currentState: {
+        getStateEvents: (type: string, stateKey: string) =>
+          type === EventType.RoomEncryption && stateKey === '' ? encryptionEvent : null,
+      },
+    };
+    const platform = createPlatform();
+    (platform as any).client = {
+      sendMessage,
+      getRoom: vi.fn().mockReturnValue(room),
+      getCrypto: vi.fn().mockReturnValue({ isEncryptionEnabledInRoom }),
+      cryptoBackend: { onCryptoEvent },
+    };
+
+    await expect(platform.sendMessage('!encrypted:mtrx.example.test', 'encrypted reply')).resolves.toBe('$event');
+
+    expect(isEncryptionEnabledInRoom).toHaveBeenCalledWith('!encrypted:mtrx.example.test');
+    expect(onCryptoEvent).toHaveBeenCalledWith(room, encryptionEvent);
+    expect(sendMessage).toHaveBeenCalledWith('!encrypted:mtrx.example.test', expect.objectContaining({
+      body: 'encrypted reply',
+    }));
+  });
+
   it('uses the shared Markdown renderer for visible spark context messages', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ event_id: '$event' });
     const sendStateEvent = vi.fn().mockResolvedValue({ event_id: '$state' });

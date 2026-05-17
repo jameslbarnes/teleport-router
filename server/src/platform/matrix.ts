@@ -943,6 +943,7 @@ export class MatrixPlatform implements Platform {
   async sendMessage(roomId: string, text: string, opts?: SendMessageOptions): Promise<string> {
     if (!this.client) throw new Error('Matrix client not started');
 
+    await this.ensureRoomEncryptionConfigured(roomId);
     const result = await this.client.sendMessage(roomId, await this.createMessageContent(text, opts));
     return result.event_id!;
   }
@@ -1589,6 +1590,26 @@ export class MatrixPlatform implements Platform {
 
   private roomIsEncrypted(room: Room | null): boolean {
     return !!this.getRoomStateEvent(room, 'm.room.encryption', '');
+  }
+
+  private async ensureRoomEncryptionConfigured(roomId: string): Promise<void> {
+    if (!this.client) return;
+
+    const room = this.client.getRoom?.(roomId) || null;
+    if (!this.roomIsEncrypted(room)) return;
+
+    try {
+      const crypto = this.client.getCrypto?.();
+      if (await crypto?.isEncryptionEnabledInRoom?.(roomId)) return;
+    } catch {
+      // Fall through and hydrate the room from state below.
+    }
+
+    const encryptionEvent = this.getRoomStateEvent(room, EventType.RoomEncryption, '');
+    const cryptoBackend = (this.client as any).cryptoBackend;
+    if (!room || !encryptionEvent || typeof cryptoBackend?.onCryptoEvent !== 'function') return;
+
+    await cryptoBackend.onCryptoEvent(room, encryptionEvent);
   }
 
   private roomIsInConfiguredSpace(room: Room | null): boolean {
