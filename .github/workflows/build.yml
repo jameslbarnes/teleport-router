@@ -116,6 +116,9 @@ jobs:
     needs: build
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-latest
+    concurrency:
+      group: production-phala-deploy
+      cancel-in-progress: false
     permissions:
       contents: write
 
@@ -139,9 +142,32 @@ jobs:
 
       - name: Deploy to Phala Cloud
         run: |
+          set -euo pipefail
           # Compose-only deploy — encrypted env vars are set in Phala dashboard
           # and persist across deploys. CI only updates the image tag.
-          phala deploy --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml
+          for attempt in {1..20}; do
+            echo "Phala deploy attempt ${attempt}/20"
+            set +e
+            phala deploy --wait --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml 2>&1 | tee /tmp/phala-deploy.log
+            status=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+
+            if grep -q "Another operation is already in progress" /tmp/phala-deploy.log; then
+              if [ "$attempt" -eq 20 ]; then
+                echo "Phala deploy is still locked after ${attempt} attempts"
+                exit "$status"
+              fi
+              echo "Phala reports an operation in progress; waiting 60s before retrying"
+              sleep 60
+              continue
+            fi
+
+            exit "$status"
+          done
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
 
