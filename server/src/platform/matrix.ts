@@ -60,7 +60,11 @@ import {
 export interface MatrixPlatformConfig {
   serverUrl: string;
   serverName: string;
-  botSecretKey: string;
+  botSecretKey?: string;
+  accessToken?: string;
+  userId?: string;
+  deviceId?: string;
+  cryptoSecret?: string;
   botHandle: string;
   spaceRoomId?: string;
   registrationToken?: string;
@@ -70,6 +74,7 @@ export interface MatrixPlatformConfig {
   cryptoStoreName?: string;
   cryptoStorePassword?: string;
   baseUrl?: string;
+  ignoreMessagesBefore?: number;
   resolveLinkedPlatformId?: (platform: string, routerHandle: string) => Promise<string | null>;
   resolveLinkedRouterHandle?: (platform: string, platformUserId: string) => Promise<string | null>;
 }
@@ -99,6 +104,15 @@ export interface MatrixHistoryQueryOptions {
   roomIds?: string[];
   perRoomLimit?: number;
   botScope?: boolean;
+}
+
+export function deriveMatrixBotPassword(config: Pick<MatrixPlatformConfig, 'accessToken' | 'botSecretKey' | 'serverName'>): string | null {
+  if (config.accessToken?.trim()) return null;
+  return config.botSecretKey
+    ? createHmac('sha256', config.botSecretKey)
+      .update(`matrix:${config.serverName}`)
+      .digest('base64url')
+    : null;
 }
 
 // Custom Matrix event types for tight notebook integration
@@ -551,10 +565,8 @@ export class MatrixPlatform implements Platform {
 
     await restoreCryptoStore({ filePath: snapshotPath });
 
-    const password = createHmac('sha256', this.config.botSecretKey)
-      .update(`matrix:${this.config.serverName}`)
-      .digest('base64url');
-
+    const directAccessToken = this.config.accessToken?.trim();
+    const password = deriveMatrixBotPassword(this.config);
     const username = this.config.botHandle;
 
     // Credential persistence: without this, every restart calls /login and
@@ -568,22 +580,31 @@ export class MatrixPlatform implements Platform {
     let userId: string;
     let deviceId: string;
 
-    const existingCreds = this.loadCredentials(credsPath);
-    if (existingCreds && await this.validateCredentials(existingCreds)) {
-      console.log(`[Matrix] Reusing persisted credentials, device=${existingCreds.device_id}`);
-      accessToken = existingCreds.access_token;
-      userId = existingCreds.user_id;
-      deviceId = existingCreds.device_id;
+    if (directAccessToken) {
+      const provided = await this.credentialsFromAccessToken(directAccessToken);
+      accessToken = provided.access_token;
+      userId = this.config.userId || provided.user_id;
+      deviceId = this.config.deviceId || provided.device_id;
+      console.log(`[Matrix] Using provided access token, device=${deviceId}`);
     } else {
-      try {
-        const fresh = await this.obtainFreshCredentials(username, password);
-        accessToken = fresh.access_token;
-        userId = fresh.user_id;
-        deviceId = fresh.device_id;
-        this.saveCredentials(credsPath, fresh);
-        console.log(`[Matrix] Obtained fresh credentials, device=${deviceId}`);
-      } catch (e: any) {
-        throw new Error(`Matrix auth failed: ${e.message}`);
+      if (!password) throw new Error('Matrix botSecretKey or accessToken is required');
+      const existingCreds = this.loadCredentials(credsPath);
+      if (existingCreds && await this.validateCredentials(existingCreds)) {
+        console.log(`[Matrix] Reusing persisted credentials, device=${existingCreds.device_id}`);
+        accessToken = existingCreds.access_token;
+        userId = existingCreds.user_id;
+        deviceId = existingCreds.device_id;
+      } else {
+        try {
+          const fresh = await this.obtainFreshCredentials(username, password);
+          accessToken = fresh.access_token;
+          userId = fresh.user_id;
+          deviceId = fresh.device_id;
+          this.saveCredentials(credsPath, fresh);
+          console.log(`[Matrix] Obtained fresh credentials, device=${deviceId}`);
+        } catch (e: any) {
+          throw new Error(`Matrix auth failed: ${e.message}`);
+        }
       }
     }
 
@@ -591,7 +612,8 @@ export class MatrixPlatform implements Platform {
 
     // Crypto callbacks — getSecretStorageKey is called when SSSS needs to unlock
     // a secret. We derive keys from the bot's Router secret key.
-    const stableSecret = this.config.botSecretKey;
+    const stableSecret = this.config.cryptoSecret || directAccessToken || this.config.botSecretKey;
+    if (!stableSecret) throw new Error('Matrix cryptoSecret, botSecretKey, or accessToken is required');
     const cryptoCallbacks: any = {
       getSecretStorageKey: async ({ keys }: { keys: Record<string, any> }): Promise<[string, Uint8Array] | null> => {
         const keyIds = Object.keys(keys);
@@ -677,9 +699,13 @@ export class MatrixPlatform implements Platform {
     // Bootstrap cross-signing and secret storage — makes the bot a first-class
     // Matrix citizen that Element clients trust like any other verified user.
     // This is a one-time operation; subsequent startups find existing keys.
-    this.bootstrapCryptoIdentity(username, password).catch(err => {
-      console.warn('[Matrix] Cross-signing bootstrap failed (non-fatal):', err.message);
-    });
+    if (password) {
+      this.bootstrapCryptoIdentity(username, password).catch(err => {
+        console.warn('[Matrix] Cross-signing bootstrap failed (non-fatal):', err.message);
+      });
+    } else {
+      console.log('[Matrix] Skipping password-based cross-signing bootstrap in access-token mode');
+    }
 
     // Delete orphan devices from prior restarts — before credential persistence
     // landed, every restart created a new device. Element caches all of them
@@ -689,10 +715,14 @@ export class MatrixPlatform implements Platform {
     // MUST complete before start() returns, otherwise clients verifying the
     // bot right after boot will still see the ghost devices in their cached
     // device list and SAS MAC validation will fail against phantoms.
-    try {
-      await this.cleanupOrphanDevices(userId, deviceId, accessToken, username, password);
-    } catch (err: any) {
-      console.warn('[Matrix] Orphan device cleanup failed (non-fatal):', err.message);
+    if (password) {
+      try {
+        await this.cleanupOrphanDevices(userId, deviceId, accessToken, username, password);
+      } catch (err: any) {
+        console.warn('[Matrix] Orphan device cleanup failed (non-fatal):', err.message);
+      }
+    } else {
+      console.log('[Matrix] Skipping password-based orphan device cleanup in access-token mode');
     }
 
     console.log(`[Matrix] Authenticated as ${userId}, syncing...`);
@@ -753,6 +783,22 @@ export class MatrixPlatform implements Platform {
     } catch {
       return false;
     }
+  }
+
+  /** Validate an externally provisioned Matrix access token. */
+  private async credentialsFromAccessToken(accessToken: string): Promise<{ access_token: string; user_id: string; device_id: string }> {
+    const resp = await fetch(`${this.config.serverUrl}/_matrix/client/v3/account/whoami`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+    const data = await resp.json().catch(() => null) as any;
+    if (!resp.ok) {
+      throw new Error(`Matrix access token whoami failed: ${resp.status} ${data?.error || JSON.stringify(data)}`);
+    }
+    const userId = this.config.userId || data?.user_id;
+    const deviceId = this.config.deviceId || data?.device_id;
+    if (!userId) throw new Error('Matrix access token did not return user_id; set MATRIX_USER_ID');
+    if (!deviceId) throw new Error('Matrix access token did not return device_id; set MATRIX_DEVICE_ID');
+    return { access_token: accessToken, user_id: userId, device_id: deviceId };
   }
 
   /** Run the login / signup / register flow to get fresh credentials. */
@@ -1779,6 +1825,14 @@ export class MatrixPlatform implements Platform {
     const text = content.body || '';
     const sender = event.getSender()!;
     const roomId = event.getRoomId()!;
+    const timestamp = event.getTs();
+
+    if (this.config.ignoreMessagesBefore && timestamp < this.config.ignoreMessagesBefore) {
+      if (eventId) {
+        this.processedMessageEvents.add(eventId);
+      }
+      return;
+    }
 
     // Resolve handle from Matrix user ID
     const handleMatch = sender.match(/^@([^:]+):/);
@@ -1833,7 +1887,7 @@ export class MatrixPlatform implements Platform {
       sender_id: sender,
       sender_handle: handle,
       text,
-      timestamp: event.getTs(),
+      timestamp,
       is_dm: isDM,
     };
 
@@ -1947,7 +2001,7 @@ export class MatrixPlatform implements Platform {
           createSecretStorageKey: async () => {
             // Derive a stable recovery key from the bot secret so it survives restarts
             return await crypto.createRecoveryKeyFromPassphrase(
-              `router-ssss-${this.config.botSecretKey}`
+              `router-ssss-${this.config.cryptoSecret || this.config.botSecretKey || password}`
             );
           },
         });

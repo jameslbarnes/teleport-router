@@ -39,6 +39,11 @@ function parseEnvInt(names, fallback) {
   return fallback;
 }
 
+function matrixHandlingEnabled() {
+  const raw = process.env.ROUTER_AGENT_HANDLES_MATRIX || '';
+  return ['1', 'true', 'yes', 'remote'].includes(raw.trim().toLowerCase());
+}
+
 function buildMcpUrl(baseUrl, secretKey) {
   const url = new URL(baseUrl);
   url.searchParams.set('key', secretKey);
@@ -281,6 +286,7 @@ async function main() {
   const handledMatrixMessageLimit = Number.parseInt(process.env.ROUTER_HANDLED_MATRIX_MESSAGE_IDS_LIMIT || '2000', 10);
   const handledOnboardingLimit = Number.parseInt(process.env.ROUTER_HANDLED_ONBOARDING_KEYS_LIMIT || '2000', 10);
   const statePath = join(routerHome, 'router-event-worker-state.json');
+  const handleMatrixEvents = matrixHandlingEnabled();
 
   if (!secretKey) {
     throw new Error('ROUTER_SECRET_KEY is required');
@@ -377,6 +383,14 @@ async function main() {
       const data = event.data || {};
 
       if (eventType === 'platform_onboarding') {
+        if (data.platform === 'matrix' && !handleMatrixEvents) {
+          log(`Skipping Matrix onboarding event ${eventId}; ROUTER_AGENT_HANDLES_MATRIX is disabled`);
+          cursor = Math.max(cursor, eventId);
+          state.cursor = cursor;
+          await saveState(statePath, state);
+          continue;
+        }
+
         const key = onboardingKey(event);
         if (hasHandledOnboarding(state, key)) {
           log(`Skipping already-handled onboarding event ${eventId} for ${key}`);
@@ -422,6 +436,14 @@ async function main() {
 
       if (data.platform !== 'matrix') {
         log(`Skipping event ${eventId} on unsupported platform ${data.platform}`);
+        cursor = Math.max(cursor, eventId);
+        state.cursor = cursor;
+        await saveState(statePath, state);
+        continue;
+      }
+
+      if (!handleMatrixEvents) {
+        log(`Skipping Matrix mention ${eventId}; ROUTER_AGENT_HANDLES_MATRIX is disabled`);
         cursor = Math.max(cursor, eventId);
         state.cursor = cursor;
         await saveState(statePath, state);
