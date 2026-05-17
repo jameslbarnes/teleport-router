@@ -73,11 +73,29 @@ while [ "$SECONDS" -lt "$deadline" ]; do
         echo "Shape Matrix bridge container is not listed in TEE metadata yet"
       elif [[ "$bridge_uptime" == "Up Less than"* ]]; then
         echo "Shape Matrix bridge is still too fresh/restarting: ${bridge_uptime}"
-      elif curl -fsS --max-time 20 "https://${TEE_HOST}/logs/dstack-shape-matrix-bridge-1?text&bare&timestamps&tail=160" >"$bridge_log_file"; then
-        if grep -Eq 'Error: .* is required|Matrix auth failed|Matrix access token whoami failed|Signup wrapper failed|Registration failed' "$bridge_log_file"; then
-          echo "Shape Matrix bridge logs contain a startup/auth failure"
-        elif grep -Fq "[shape-matrix-bridge] Private Router auth OK" "$bridge_log_file" &&
-          grep -Fq "[Matrix] Initial sync complete" "$bridge_log_file"; then
+      elif curl -fsS --max-time 20 "https://${TEE_HOST}/logs/dstack-shape-matrix-bridge-1?text&bare&timestamps&tail=${BRIDGE_LOG_TAIL:-1000}" >"$bridge_log_file"; then
+        auth_failure_line="$(
+          grep -En 'Error: .* is required|Matrix auth failed|Matrix access token whoami failed|Signup wrapper failed|Registration failed' "$bridge_log_file" |
+            tail -n1 |
+            cut -d: -f1 || true
+        )"
+        private_auth_line="$(
+          grep -Fn "[shape-matrix-bridge] Private Router auth OK" "$bridge_log_file" |
+            tail -n1 |
+            cut -d: -f1 || true
+        )"
+        matrix_sync_line="$(
+          grep -Fn "[Matrix] Initial sync complete" "$bridge_log_file" |
+            tail -n1 |
+            cut -d: -f1 || true
+        )"
+        auth_failure_line="${auth_failure_line:-0}"
+        private_auth_line="${private_auth_line:-0}"
+        matrix_sync_line="${matrix_sync_line:-0}"
+
+        if [ "$auth_failure_line" -gt "$private_auth_line" ] || [ "$auth_failure_line" -gt "$matrix_sync_line" ]; then
+          echo "Shape Matrix bridge logs contain a startup/auth failure after the latest readiness signal"
+        elif [ "$private_auth_line" -gt 0 ] && [ "$matrix_sync_line" -gt 0 ]; then
           bridge_ok=1
           echo "Shape Matrix bridge authenticated to private Router and completed Matrix sync"
         else
