@@ -11,6 +11,9 @@ on:
         options:
           - status
           - restart
+          - api-force-restart
+          - api-stop
+          - api-start
 
 jobs:
   phala-recovery:
@@ -40,6 +43,14 @@ jobs:
           phala api "/cvms/${PHALA_APP_ID}/events" \
             -q '{items: [.items[:10][] | {event_type,status,timestamp,message}], total, next_cursor}' || true
 
+      - name: Show CVM runtime state
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}/state" || true
+
       - name: Restart CVM
         if: inputs.action == 'restart'
         env:
@@ -49,8 +60,42 @@ jobs:
           set -euo pipefail
           timeout 900s phala cvms restart "${PHALA_APP_ID}" --json
 
-      - name: Status after restart request
-        if: inputs.action == 'restart'
+      - name: Force restart CVM through API
+        if: inputs.action == 'api-force-restart'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}/restart" \
+            -X POST \
+            -d '{"force":true}' \
+            -i
+
+      - name: Stop CVM through API
+        if: inputs.action == 'api-stop'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}/stop" \
+            -X POST \
+            -i
+
+      - name: Start CVM through API
+        if: inputs.action == 'api-start'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}/start" \
+            -X POST \
+            -i
+
+      - name: Status after recovery action
+        if: inputs.action != 'status'
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
           PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
