@@ -16,7 +16,8 @@ metadata_file="$(mktemp)"
 status_file="$(mktemp)"
 router_health_file="$(mktemp)"
 hermes_health_file="$(mktemp)"
-trap 'rm -f "$metadata_file" "$status_file" "$router_health_file" "$hermes_health_file"' EXIT
+bridge_log_file="$(mktemp)"
+trap 'rm -f "$metadata_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file"' EXIT
 
 deadline=$((SECONDS + VERIFY_TIMEOUT_SECONDS))
 attempt=0
@@ -34,6 +35,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 
   metadata_ok=0
   containers_ok=0
+  bridge_ok=1
   health_ok=0
 
   if curl -fsS --max-time 30 "https://${TEE_HOST}/" >"$metadata_file"; then
@@ -52,6 +54,39 @@ while [ "$SECONDS" -lt "$deadline" ]; do
       containers_ok=1
       echo "TEE metadata reports no exited containers"
     fi
+
+    if grep -q "shape-matrix-bridge" "$metadata_file"; then
+      bridge_ok=0
+      bridge_uptime="$(
+        awk '
+          /dstack-shape-matrix-bridge-1/ {
+            getline
+            gsub(/<[^>]+>/, "")
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            print
+            exit
+          }
+        ' "$metadata_file"
+      )"
+
+      if [ -z "$bridge_uptime" ]; then
+        echo "Shape Matrix bridge container is not listed in TEE metadata yet"
+      elif [[ "$bridge_uptime" == "Up Less than"* ]]; then
+        echo "Shape Matrix bridge is still too fresh/restarting: ${bridge_uptime}"
+      elif curl -fsS --max-time 20 "https://${TEE_HOST}/logs/dstack-shape-matrix-bridge-1?text&bare&timestamps&tail=160" >"$bridge_log_file"; then
+        if grep -Eq 'Error: .* is required|Matrix auth failed|Matrix access token whoami failed|Signup wrapper failed|Registration failed' "$bridge_log_file"; then
+          echo "Shape Matrix bridge logs contain a startup/auth failure"
+        elif grep -Fq "[shape-matrix-bridge] Private Router auth OK" "$bridge_log_file" &&
+          grep -Fq "[Matrix] Initial sync complete" "$bridge_log_file"; then
+          bridge_ok=1
+          echo "Shape Matrix bridge authenticated to private Router and completed Matrix sync"
+        else
+          echo "Shape Matrix bridge logs do not yet show private Router auth and Matrix initial sync"
+        fi
+      else
+        echo "Shape Matrix bridge logs are not reachable yet"
+      fi
+    fi
   else
     echo "TEE metadata endpoint is not reachable yet"
   fi
@@ -66,7 +101,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     echo "Public health endpoints are not healthy yet"
   fi
 
-  if [ "$metadata_ok" -eq 1 ] && [ "$containers_ok" -eq 1 ] && [ "$health_ok" -eq 1 ]; then
+  if [ "$metadata_ok" -eq 1 ] && [ "$containers_ok" -eq 1 ] && [ "$bridge_ok" -eq 1 ] && [ "$health_ok" -eq 1 ]; then
     echo "Deployment verified"
     exit 0
   fi

@@ -177,6 +177,74 @@ jobs:
           envsubst < docker-compose.template.yml > docker-compose.deploy.yml
           cat docker-compose.deploy.yml
 
+      - name: Generate Phala env file
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          SENDGRID_FROM_EMAIL: ${{ secrets.SENDGRID_FROM_EMAIL }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          HERMES_AGENT_SECRET_KEY: ${{ secrets.HERMES_AGENT_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          NEAR_AI_API_KEY: ${{ secrets.NEAR_AI_API_KEY }}
+          NAMECHEAP_API_KEY: ${{ secrets.NAMECHEAP_API_KEY }}
+          NAMECHEAP_CLIENT_IP: ${{ secrets.NAMECHEAP_CLIENT_IP }}
+          ROUTER_AGENT_GITHUB_TOKEN: ${{ secrets.ROUTER_AGENT_GITHUB_TOKEN }}
+          SHAPE_ROUTER_SECRET_KEY: ${{ secrets.SHAPE_ROUTER_SECRET_KEY }}
+          MATRIX_BOT_SECRET_KEY: ${{ secrets.MATRIX_BOT_SECRET_KEY }}
+          MATRIX_BOT_HANDLE: ${{ secrets.MATRIX_BOT_HANDLE }}
+          MATRIX_REGISTRATION_TOKEN: ${{ secrets.MATRIX_REGISTRATION_TOKEN }}
+        run: |
+          set -euo pipefail
+          env_file=/tmp/phala.env
+          : > "$env_file"
+          chmod 600 "$env_file"
+
+          write_env() {
+            local name="$1"
+            local value="${!name:-}"
+            if [ -n "$value" ]; then
+              printf '%s=%s\n' "$name" "$value" >> "$env_file"
+            fi
+          }
+
+          write_env BASE_URL
+          write_env FIREBASE_SERVICE_ACCOUNT_BASE64
+          write_env ANTHROPIC_API_KEY
+          write_env SENDGRID_API_KEY
+          write_env SENDGRID_FROM_EMAIL
+          write_env CLOUDFLARE_API_TOKEN
+          write_env HERMES_AGENT_SECRET_KEY
+          write_env TELEGRAM_BOT_TOKEN
+          write_env NEAR_AI_API_KEY
+          write_env NAMECHEAP_API_KEY
+          write_env NAMECHEAP_CLIENT_IP
+          write_env SHAPE_ROUTER_SECRET_KEY
+          write_env MATRIX_BOT_SECRET_KEY
+          write_env MATRIX_BOT_HANDLE
+          write_env MATRIX_REGISTRATION_TOKEN
+
+          if [ -n "$HERMES_AGENT_SECRET_KEY" ]; then
+            printf 'ROUTER_SECRET_KEY=%s\n' "$HERMES_AGENT_SECRET_KEY" >> "$env_file"
+            printf 'HERMES_SECRET_KEY=%s\n' "$HERMES_AGENT_SECRET_KEY" >> "$env_file"
+          fi
+          if [ -n "$ROUTER_AGENT_GITHUB_TOKEN" ]; then
+            printf 'GITHUB_TOKEN=%s\n' "$ROUTER_AGENT_GITHUB_TOKEN" >> "$env_file"
+          fi
+          if [ -n "$MATRIX_BOT_SECRET_KEY" ]; then
+            printf 'MATRIX_CRYPTO_SECRET=%s\n' "$MATRIX_BOT_SECRET_KEY" >> "$env_file"
+          fi
+
+          for required in HERMES_AGENT_SECRET_KEY SHAPE_ROUTER_SECRET_KEY MATRIX_BOT_SECRET_KEY MATRIX_REGISTRATION_TOKEN; do
+            if ! grep -q "^${required}=." "$env_file"; then
+              echo "Missing required Phala env: ${required}"
+              exit 1
+            fi
+          done
+
+          echo "Phala env file generated with $(wc -l < "$env_file") entries"
+
       - name: Log in to Docker Hub for deploy verification
         uses: docker/login-action@v3
         with:
@@ -194,7 +262,7 @@ jobs:
           for attempt in {1..20}; do
             echo "Phala deploy attempt ${attempt}/20"
             set +e
-            phala deploy --wait --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml 2>&1 | tee /tmp/phala-deploy.log
+            phala deploy --wait --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml -e /tmp/phala.env 2>&1 | tee /tmp/phala-deploy.log
             status=${PIPESTATUS[0]}
             set -e
 
@@ -219,7 +287,7 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f docker-compose.deploy.yml
+        run: rm -f docker-compose.deploy.yml /tmp/phala.env
 
       - name: Verify Phala deployment
         env:
