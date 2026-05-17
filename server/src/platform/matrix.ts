@@ -952,6 +952,11 @@ export class MatrixPlatform implements Platform {
     return this.sendMessage(roomId, text, opts);
   }
 
+  async sendEncryptedDM(userId: string, text: string, opts?: SendMessageOptions): Promise<string> {
+    const roomId = await this.findOrCreateEncryptedDM(userId);
+    return this.sendMessage(roomId, text, opts);
+  }
+
   async sendPendingEntryReviewDM(userId: string, text: string, entryId: string): Promise<string> {
     if (!this.client) throw new Error('Matrix client not started');
 
@@ -1582,6 +1587,10 @@ export class MatrixPlatform implements Platform {
     return event as MatrixEvent;
   }
 
+  private roomIsEncrypted(room: Room | null): boolean {
+    return !!this.getRoomStateEvent(room, 'm.room.encryption', '');
+  }
+
   private roomIsInConfiguredSpace(room: Room | null): boolean {
     if (!room || !this.config.spaceRoomId) return false;
     if (room.roomId === this.config.spaceRoomId) return false;
@@ -1895,6 +1904,7 @@ export class MatrixPlatform implements Platform {
       text,
       timestamp,
       is_dm: isDM,
+      is_encrypted: this.roomIsEncrypted(room),
     };
 
     if (replyToEntryId) {
@@ -2077,11 +2087,13 @@ export class MatrixPlatform implements Platform {
       && (!this.botUserId || room.getMember(this.botUserId)?.membership === KnownMembership.Join);
   }
 
-  private findExistingDirectRoom(userId: string, directRoomIds: string[]): Room | null {
+  private findExistingDirectRoom(userId: string, directRoomIds: string[], opts?: { encryptedOnly?: boolean }): Room | null {
     if (!this.client) return null;
 
     const rooms = this.client.getRooms?.() || [];
-    const candidates = rooms.filter(room => this.isJoinedOneToOneRoomWith(room, userId));
+    const candidates = rooms
+      .filter(room => this.isJoinedOneToOneRoomWith(room, userId))
+      .filter(room => !opts?.encryptedOnly || this.roomIsEncrypted(room));
     if (candidates.length === 0) return null;
 
     const byRecentActivity = (a: Room, b: Room) => b.getLastActiveTimestamp() - a.getLastActiveTimestamp();
@@ -2114,6 +2126,33 @@ export class MatrixPlatform implements Platform {
     }
 
     // Create new DM
+    const room = await this.createRoom('', {
+      type: 'dm',
+      invite: [userId],
+      encrypted: true,
+    });
+
+    await this.markRoomAsDirect(userId, room.id);
+    return room.id;
+  }
+
+  private async findOrCreateEncryptedDM(userId: string): Promise<string> {
+    if (!this.client) throw new Error('Matrix client not started');
+
+    const directRoomIds = this.getDirectRoomMap()[userId] || [];
+    const existingDirectRoom = this.findExistingDirectRoom(userId, directRoomIds, { encryptedOnly: true });
+    if (existingDirectRoom) {
+      await this.markRoomAsDirect(userId, existingDirectRoom.roomId);
+      return existingDirectRoom.roomId;
+    }
+
+    for (const roomId of directRoomIds) {
+      const room = this.client.getRoom(roomId);
+      if (room?.getMyMembership() === KnownMembership.Join && this.roomIsEncrypted(room)) {
+        return room.roomId;
+      }
+    }
+
     const room = await this.createRoom('', {
       type: 'dm',
       invite: [userId],

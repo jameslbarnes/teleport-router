@@ -557,14 +557,23 @@ async function sendMatrixDM(matrix: MatrixPlatform, matrixUserId: string, text: 
   await matrix.sendDM(matrixUserId, truncate(text, matrix.maxMessageLength), { format: 'markdown' });
 }
 
+async function sendEncryptedMatrixDM(matrix: MatrixPlatform, matrixUserId: string, text: string): Promise<void> {
+  const sender = (matrix as any).sendEncryptedDM;
+  if (typeof sender === 'function') {
+    await sender.call(matrix, matrixUserId, truncate(text, matrix.maxMessageLength), { format: 'markdown' });
+    return;
+  }
+  await sendMatrixDM(matrix, matrixUserId, text);
+}
+
 async function sendPrivateMatrixReply(matrix: MatrixPlatform, event: RouterEvent, text: string): Promise<void> {
   const matrixUserId = String(event.data?.sender_id || '');
-  if (event.data?.is_dm) {
+  if (event.data?.is_dm && event.data?.is_encrypted !== false) {
     await sendReply(matrix, event, text);
     return;
   }
   if (matrixUserId) {
-    await sendMatrixDM(matrix, matrixUserId, text);
+    await sendEncryptedMatrixDM(matrix, matrixUserId, text);
     await sendReply(matrix, event, 'I sent you a DM for private Router account setup.');
   }
 }
@@ -643,6 +652,10 @@ async function handleAccountCommand(matrix: MatrixPlatform, event: RouterEvent, 
     const requestedHandle = parseRequestedHandle(text);
     if (!event.data?.is_dm) {
       await sendPrivateMatrixReply(matrix, event, 'DM me `create <handle>` to create a private Shape Router account. I will never post Router credentials in a public room.');
+      return true;
+    }
+    if (event.data?.is_encrypted === false) {
+      await sendPrivateMatrixReply(matrix, event, 'For new private Router credentials, use this encrypted DM. Reply here with `create <handle>`.');
       return true;
     }
     const allowed = await canProvisionFromMatrix(matrix, matrixUserId);

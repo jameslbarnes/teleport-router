@@ -298,6 +298,40 @@ describe('Shape Matrix bridge helpers', () => {
     );
   });
 
+  it('does not send new Router credentials into an unencrypted Matrix DM', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    const fetchCalls: Array<{ url: string; body?: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify({ linked: false }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+      sendEncryptedDM: vi.fn(async () => '$encrypted-dm'),
+    };
+    const event = matrixMentionEvent('create alice_router', true);
+    event.data.is_encrypted = false;
+
+    await handleMention(matrix as any, null, event);
+
+    expect(fetchCalls.some(call => call.url.includes('/api/matrix/provision'))).toBe(false);
+    expect(matrix.sendEncryptedDM).toHaveBeenCalledWith(
+      '@alice:matrix.test',
+      expect.stringContaining('encrypted DM'),
+      expect.anything(),
+    );
+    expect(matrix.sendMessage).not.toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('Secret key:'),
+      expect.anything(),
+    );
+  });
+
   it('does not post new Router credentials in public Matrix rooms', async () => {
     process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
     process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
@@ -569,6 +603,7 @@ function matrixMentionEvent(text: string, isDM = false): RouterEvent {
       sender_handle: 'alice',
       text,
       is_dm: isDM,
+      is_encrypted: isDM,
     },
   };
 }

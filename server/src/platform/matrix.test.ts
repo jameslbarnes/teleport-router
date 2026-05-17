@@ -1130,6 +1130,43 @@ describe('MatrixPlatform agent trigger reactions', () => {
     });
   });
 
+  it('includes Matrix room encryption state on incoming DM events', async () => {
+    resetEvents();
+    const sendEvent = vi.fn().mockResolvedValue({ event_id: '$reaction' });
+    const platform = createPlatform();
+    (platform as any).botUserId = '@router:mtrx.example.test';
+    (platform as any).client = {
+      getRoom: vi.fn().mockReturnValue({
+        ...fakeRoom(['@router:mtrx.example.test', '@alice:mtrx.example.test']),
+        currentState: {
+          getStateEvents: vi.fn((eventType: string, stateKey: string) =>
+            eventType === 'm.room.encryption' && stateKey === ''
+              ? { getContent: () => ({ algorithm: 'm.megolm.v1.aes-sha2' }) }
+              : null,
+          ),
+        },
+      }),
+      getAccountData: vi.fn().mockReturnValue(undefined),
+      setAccountData: vi.fn().mockResolvedValue({}),
+      sendEvent,
+    };
+
+    (platform as any).handleIncomingMessageEvent(fakeIncomingEvent({
+      id: '$encrypted-dm',
+      text: 'start',
+    }));
+
+    const events = getEventsSince(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'platform_mention',
+      data: {
+        is_dm: true,
+        is_encrypted: true,
+      },
+    });
+  });
+
   it('queues structured mentions in space-child rooms as non-DM platform mentions', async () => {
     resetEvents();
     const sendEvent = vi.fn().mockResolvedValue({ event_id: '$reaction' });
