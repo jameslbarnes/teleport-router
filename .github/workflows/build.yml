@@ -175,8 +175,17 @@ jobs:
         if: always()
         run: rm -f docker-compose.deploy.yml
 
-      - name: Wait for TEE to restart
-        run: sleep 30
+      - name: Verify Phala deployment
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+          EXPECTED_GIT_SHA: ${{ github.sha }}
+          EXPECTED_IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          EXPECTED_AGENT_IMAGE_DIGEST: ${{ needs.build.outputs.agent_digest }}
+        run: |
+          set -euo pipefail
+          export EXPECTED_GIT_SHA="$(echo "$EXPECTED_GIT_SHA" | cut -c1-7)"
+          bash scripts/verify-phala-deploy.sh
 
       - name: Archive evidences
         run: |
