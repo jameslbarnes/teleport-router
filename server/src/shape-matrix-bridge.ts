@@ -417,16 +417,20 @@ async function searchShapeRouter(mcpClient: Client | null, query: string, limit 
   if (!cleanQuery) return 'Give me a search phrase or ask `help` for commands.';
 
   if (mcpClient) {
-    const result = await mcpClient.callTool({
-      name: 'router_search',
-      arguments: { query: cleanQuery, limit },
-    });
-    const contentItems = Array.isArray((result as any).content) ? (result as any).content : [];
-    return contentItems
-      .map((item: any) => item?.type === 'text' ? String(item.text || '') : '')
-      .filter(Boolean)
-      .join('\n')
-      .trim() || 'No results found.';
+    try {
+      const result = await mcpClient.callTool({
+        name: 'router_search',
+        arguments: { query: cleanQuery, limit },
+      });
+      const contentItems = Array.isArray((result as any).content) ? (result as any).content : [];
+      return contentItems
+        .map((item: any) => item?.type === 'text' ? String(item.text || '') : '')
+        .filter(Boolean)
+        .join('\n')
+        .trim() || 'No results found.';
+    } catch (error) {
+      log(`Private MCP search failed; falling back to HTTP search: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   const fetchLimit = Math.max(limit, parsePositiveInt('SHAPE_MATRIX_HTTP_SEARCH_POOL_LIMIT', 100));

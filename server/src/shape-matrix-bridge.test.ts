@@ -540,6 +540,39 @@ describe('Shape Matrix bridge helpers', () => {
     );
   });
 
+  it('falls back to private Router HTTP search when an MCP session expires', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      entries: [
+        { id: 'entry-expired', summary: 'Expired MCP fallback note', content: 'Contains stale session fallback detail.', tags: ['shape-rotator', 'matrix'] },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+    };
+    const mcpClient = {
+      callTool: vi.fn(async () => {
+        throw new Error('Streamable HTTP error: Session not found — please re-initialize.');
+      }),
+    };
+
+    await handleMention(matrix as any, mcpClient as any, matrixMentionEvent('search fallback'));
+
+    expect(mcpClient.callTool).toHaveBeenCalledWith({
+      name: 'router_search',
+      arguments: { query: 'fallback', limit: 5 },
+    });
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('[entry-expired] Expired MCP fallback note'),
+      expect.anything(),
+    );
+  });
+
   it('handles Matrix room summaries by reading Matrix context and writing private Router entries', async () => {
     process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
     process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
