@@ -34,6 +34,7 @@ describe('Shape Matrix bridge helpers', () => {
     delete process.env.MATRIX_BOT_HANDLE;
     delete process.env.MATRIX_BOT_SECRET_KEY;
     delete process.env.SHAPE_MATRIX_SUMMARY_WINDOW_MS;
+    delete process.env.SHAPE_MATRIX_REQUIRE_SPACE_MEMBERSHIP_FOR_PROVISION;
     delete process.env.SHAPE_ROUTER_SECRET_KEY;
     delete process.env.SHAPE_ROUTER_BASE_URL;
     anthropicCreateMock.mockReset();
@@ -175,6 +176,197 @@ describe('Shape Matrix bridge helpers', () => {
     expect(built.content).toContain('shape-matrix-live-smoke source phrase must stay auditable.');
   });
 
+  it('offers private account setup for unlinked Matrix DMs', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      linked: false,
+      matrixUserId: '@alice:matrix.test',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+      sendDM: vi.fn(async () => '$dm'),
+    };
+
+    await handleMention(matrix as any, null, matrixMentionEvent('start', true));
+
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('link existing'),
+      expect.anything(),
+    );
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('create <handle>'),
+      expect.anything(),
+    );
+  });
+
+  it('reports the linked private Router handle for linked Matrix users', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      linked: true,
+      handle: 'alice_router',
+      matrixBinding: { userId: '@alice:matrix.test', boundAt: 123 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+    };
+
+    await handleMention(matrix as any, null, matrixMentionEvent('link', true));
+
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('@alice_router'),
+      expect.anything(),
+    );
+  });
+
+  it('creates a private Matrix link code for existing Router accounts', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    const fetchCalls: Array<{ url: string; body?: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (url.includes('/api/matrix/link-status')) {
+        return new Response(JSON.stringify({ linked: false }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ code: 'MATRIX-ABC123', expiresAt: Date.now() + 600_000 }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+      sendDM: vi.fn(async () => '$dm'),
+    };
+
+    await handleMention(matrix as any, null, matrixMentionEvent('link existing', true));
+
+    expect(fetchCalls.some(call => call.url === 'https://shape.test/api/matrix/link-code?key=shape-key')).toBe(true);
+    expect(fetchCalls.find(call => call.url.includes('/api/matrix/link-code'))?.body.matrix_user_id).toBe('@alice:matrix.test');
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('MATRIX-ABC123'),
+      expect.anything(),
+    );
+  });
+
+  it('provisions a new private Router account only in Matrix DM', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+    process.env.SHAPE_MATRIX_REQUIRE_SPACE_MEMBERSHIP_FOR_PROVISION = '0';
+
+    const fetchCalls: Array<{ url: string; body?: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (url.includes('/api/matrix/link-status')) {
+        return new Response(JSON.stringify({ linked: false }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        user: { handle: 'alice_router', matrixBinding: { userId: '@alice:matrix.test' } },
+        secret_key: 'shape-secret-key',
+        setup_url: 'https://shape.test/setup',
+        mcp_url: 'https://shape.test/mcp/sse?key=shape-secret-key',
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+    };
+
+    await handleMention(matrix as any, null, matrixMentionEvent('create alice_router', true));
+
+    expect(fetchCalls.find(call => call.url.includes('/api/matrix/provision'))?.body).toMatchObject({
+      matrix_user_id: '@alice:matrix.test',
+      handle: 'alice_router',
+    });
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('shape-secret-key'),
+      expect.anything(),
+    );
+  });
+
+  it('does not post new Router credentials in public Matrix rooms', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      linked: false,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+      sendDM: vi.fn(async () => '$dm'),
+    };
+
+    await handleMention(matrix as any, null, matrixMentionEvent('create alice_router', false));
+
+    expect(matrix.sendDM).toHaveBeenCalledWith(
+      '@alice:matrix.test',
+      expect.stringContaining('DM me `create <handle>`'),
+      expect.anything(),
+    );
+    expect(matrix.sendMessage).not.toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('Secret key:'),
+      expect.anything(),
+    );
+  });
+
+  it('files a private Router approval request when Matrix auto-provisioning is not allowed', async () => {
+    process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
+    process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
+
+    const fetchCalls: Array<{ url: string; body?: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (url.includes('/api/matrix/link-status')) {
+        return new Response(JSON.stringify({ linked: false }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        entry: {
+          id: 'approval-request',
+          summary: 'Matrix Router account approval needed',
+          tags: ['matrix-provision-request', 'shape-rotator', 'matrix'],
+          publishAt: null,
+        },
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const matrix = {
+      maxMessageLength: 65536,
+      sendMessage: vi.fn(async () => '$reply'),
+      isUserInConfiguredSpace: vi.fn(() => false),
+    };
+
+    await handleMention(matrix as any, null, matrixMentionEvent('create alice_router', true));
+
+    expect(fetchCalls.some(call => call.url.includes('/api/matrix/provision'))).toBe(false);
+    const requestCall = fetchCalls.find(call => call.url.includes('/api/entries?key=shape-key'))!;
+    expect(requestCall.body.tags).toEqual(['matrix-provision-request', 'shape-rotator', 'matrix']);
+    expect(requestCall.body.content).toContain('Matrix user: @alice:matrix.test');
+    expect(requestCall.body.content).toContain('Requested Router handle: @alice_router');
+    expect(matrix.sendMessage).toHaveBeenCalledWith(
+      '!room:matrix.test',
+      expect.stringContaining('organizer approval request'),
+      expect.anything(),
+    );
+  });
+
   it('handles Matrix save commands by writing private Router entries with provenance', async () => {
     process.env.SHAPE_ROUTER_BASE_URL = 'https://shape.test';
     process.env.SHAPE_ROUTER_SECRET_KEY = 'shape-key';
@@ -202,11 +394,12 @@ describe('Shape Matrix bridge helpers', () => {
 
     await handleMention(matrix as any, null, matrixMentionEvent('save we decided to use private Router'));
 
-    expect(fetchCalls[0].url).toBe('https://shape.test/api/entries?key=shape-key');
-    expect(fetchCalls[0].body.tags).toEqual(['matrix-note', 'shape-rotator', 'matrix']);
-    expect(fetchCalls[0].body.content).toContain('Source: Matrix room');
-    expect(fetchCalls[0].body.content).toContain('Room ID: !room:matrix.test');
-    expect(fetchCalls[0].body.content).toContain('Organizer: @alice');
+    const writeCall = fetchCalls.find(call => call.url.includes('/api/entries?key=shape-key'))!;
+    expect(writeCall.url).toBe('https://shape.test/api/entries?key=shape-key');
+    expect(writeCall.body.tags).toEqual(['matrix-note', 'shape-rotator', 'matrix']);
+    expect(writeCall.body.content).toContain('Source: Matrix room');
+    expect(writeCall.body.content).toContain('Room ID: !room:matrix.test');
+    expect(writeCall.body.content).toContain('Organizer: @alice');
     expect(sent[0][1]).toContain('Saved to private Shape Router');
     expect(sent[0][1]).toContain('https://shape.test/entry?id=entry-save');
   });
@@ -233,11 +426,11 @@ describe('Shape Matrix bridge helpers', () => {
 
     await handleMention(matrix as any, null, matrixMentionEvent('save DM-only note for private Router', true));
 
-    expect(fetchCalls).toHaveLength(1);
-    expect(fetchCalls[0].url).toBe('https://shape.test/api/entries?key=shape-key');
-    expect(fetchCalls[0].body.content).toContain('Source: Matrix DM');
-    expect(fetchCalls[0].body.content).toContain('DM-only note for private Router');
-    expect(fetchCalls[0].url).not.toContain('router.teleport.computer');
+    const writeCall = fetchCalls.find(call => call.url.includes('/api/entries?key=shape-key'))!;
+    expect(writeCall.url).toBe('https://shape.test/api/entries?key=shape-key');
+    expect(writeCall.body.content).toContain('Source: Matrix DM');
+    expect(writeCall.body.content).toContain('DM-only note for private Router');
+    expect(writeCall.url).not.toContain('router.teleport.computer');
     expect(matrix.sendMessage).toHaveBeenCalledWith(
       '!room:matrix.test',
       expect.stringContaining('Saved to private Shape Router'),
@@ -351,9 +544,10 @@ describe('Shape Matrix bridge helpers', () => {
       includeDMs: false,
       viewerUserId: '@alice:matrix.test',
     }));
-    expect(fetchCalls[0].body.tags).toEqual(['matrix-summary', 'shape-rotator', 'matrix']);
-    expect(fetchCalls[0].body.content).toContain('Source: Matrix room "Shape General"');
-    expect(fetchCalls[0].body.content).toContain('broadcast only a digest');
+    const writeCall = fetchCalls.find(call => call.url.includes('/api/entries?key=shape-key'))!;
+    expect(writeCall.body.tags).toEqual(['matrix-summary', 'shape-rotator', 'matrix']);
+    expect(writeCall.body.content).toContain('Source: Matrix room "Shape General"');
+    expect(writeCall.body.content).toContain('broadcast only a digest');
     expect(matrix.sendMessage).toHaveBeenCalledWith(
       '!room:matrix.test',
       expect.stringContaining('Saved Matrix room context to private Shape Router'),

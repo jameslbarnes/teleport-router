@@ -1412,6 +1412,12 @@ export class MatrixPlatform implements Platform {
     return `@${routerHandle}:${this.config.serverName}`;
   }
 
+  isUserInConfiguredSpace(userId: string): boolean {
+    if (!this.config.spaceRoomId || !this.client) return false;
+    const spaceRoom = this.client.getRoom(this.config.spaceRoomId);
+    return this.roomHasMember(spaceRoom, userId);
+  }
+
   // ── Formatting ─────────────────────────────────────────────
 
   formatContent(markdown: string): string {

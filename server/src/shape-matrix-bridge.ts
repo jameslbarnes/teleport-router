@@ -31,6 +31,15 @@ export type PrivateEntry = {
   publishAt?: number | null;
 };
 
+export type ShapeMatrixLinkStatus = {
+  linked: boolean;
+  handle?: string;
+  matrixBinding?: {
+    userId: string;
+    boundAt?: number;
+  };
+};
+
 const DEFAULT_SHAPE_ROUTER_URL = 'https://shaperotator.teleport.computer';
 const DEFAULT_MATRIX_SERVER_URL = 'https://mtrx.shaperotator.xyz';
 const DEFAULT_MATRIX_SPACE_ROOM_ID = '!4FL8uL5OEYLATG1VH4wC2CD3pfIV6BMFId9VT7rmm-g';
@@ -234,6 +243,60 @@ async function shapeFetch(path: string, init: RequestInit = {}): Promise<any> {
   return body;
 }
 
+async function getShapeMatrixLinkStatus(matrixUserId: string): Promise<ShapeMatrixLinkStatus> {
+  const query = `/api/matrix/link-status?matrix_user_id=${encodeURIComponent(matrixUserId)}`;
+  return shapeFetch(query) as Promise<ShapeMatrixLinkStatus>;
+}
+
+async function getShapeMatrixUserId(routerHandle: string): Promise<string | null> {
+  const query = `/api/matrix/link-status?handle=${encodeURIComponent(routerHandle.replace(/^@/, ''))}`;
+  const status = await shapeFetch(query) as ShapeMatrixLinkStatus;
+  return status.matrixBinding?.userId || null;
+}
+
+async function createShapeMatrixLinkCode(matrixUserId: string): Promise<{ code?: string; expiresAt?: number; alreadyLinked?: boolean; handle?: string }> {
+  return shapeFetch('/api/matrix/link-code', {
+    method: 'POST',
+    body: JSON.stringify({ matrix_user_id: matrixUserId }),
+  });
+}
+
+async function provisionShapeMatrixAccount(args: {
+  matrixUserId: string;
+  handle?: string;
+  displayName?: string;
+}): Promise<{
+  user: { handle: string; matrixBinding?: { userId: string; boundAt?: number } };
+  secret_key: string;
+  setup_url: string;
+  mcp_url: string;
+}> {
+  return shapeFetch('/api/matrix/provision', {
+    method: 'POST',
+    body: JSON.stringify({
+      matrix_user_id: args.matrixUserId,
+      handle: args.handle,
+      display_name: args.displayName,
+    }),
+  });
+}
+
+function parseRequestedHandle(text: string): string | undefined {
+  const match = text.match(/\b(?:create|new|provision)\s+(?:@?([a-zA-Z][a-zA-Z0-9_]{2,14}))\b/);
+  return match?.[1]?.toLowerCase();
+}
+
+async function resolveShapeRouterHandle(matrixUserId: string | undefined): Promise<string | null> {
+  if (!matrixUserId) return null;
+  try {
+    const status = await getShapeMatrixLinkStatus(matrixUserId);
+    return status.linked ? status.handle || null : null;
+  } catch (error) {
+    log(`Matrix link resolution failed for ${matrixUserId}: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 async function configureShapeBotProfile(): Promise<void> {
   if (!parseBool('SHAPE_ROUTER_CONFIGURE_BOT_PROFILE', true)) return;
   const displayName = process.env.SHAPE_ROUTER_BOT_DISPLAY_NAME || 'Shape Matrix Bridge';
@@ -283,6 +346,36 @@ async function createShapeEntry(args: {
   }
 
   return created.entry;
+}
+
+async function createShapeMatrixProvisionRequest(args: {
+  matrixUserId: string;
+  event: RouterEvent;
+  requestedHandle?: string;
+}): Promise<PrivateEntry> {
+  const displayName = String(args.event.data?.display_name || args.event.data?.sender_handle || '').trim();
+  const roomId = String(args.event.data?.room_id || 'unknown');
+  const messageId = String(args.event.data?.message_id || 'unknown');
+  const requestedAt = new Date(args.event.timestamp || Date.now()).toISOString();
+  const content = [
+    'A Matrix user asked the Shape Router bot to create a private Router account, but automatic provisioning was not allowed.',
+    '',
+    `Matrix user: ${args.matrixUserId}`,
+    displayName ? `Matrix display name: ${displayName}` : '',
+    args.requestedHandle ? `Requested Router handle: @${args.requestedHandle}` : 'Requested Router handle: none',
+    `Matrix room: ${roomId}`,
+    `Matrix event: ${messageId}`,
+    `Requested at: ${requestedAt}`,
+    '',
+    'Organizer action: verify Shape Matrix membership, then create or approve a private Router account and link this Matrix MXID.',
+  ].filter(Boolean).join('\n');
+
+  return createShapeEntry({
+    summary: `Matrix Router account approval needed for ${args.matrixUserId}`,
+    content,
+    tags: ['matrix-provision-request'],
+    oneliner: 'Matrix account request',
+  });
 }
 
 async function connectShapeMcp(): Promise<Client | null> {
@@ -460,6 +553,29 @@ async function sendReply(matrix: MatrixPlatform, event: RouterEvent, text: strin
   });
 }
 
+async function sendMatrixDM(matrix: MatrixPlatform, matrixUserId: string, text: string): Promise<void> {
+  await matrix.sendDM(matrixUserId, truncate(text, matrix.maxMessageLength), { format: 'markdown' });
+}
+
+async function sendPrivateMatrixReply(matrix: MatrixPlatform, event: RouterEvent, text: string): Promise<void> {
+  const matrixUserId = String(event.data?.sender_id || '');
+  if (event.data?.is_dm) {
+    await sendReply(matrix, event, text);
+    return;
+  }
+  if (matrixUserId) {
+    await sendMatrixDM(matrix, matrixUserId, text);
+    await sendReply(matrix, event, 'I sent you a DM for private Router account setup.');
+  }
+}
+
+async function canProvisionFromMatrix(matrix: MatrixPlatform, matrixUserId: string): Promise<boolean> {
+  if (!parseBool('SHAPE_MATRIX_REQUIRE_SPACE_MEMBERSHIP_FOR_PROVISION', true)) return true;
+  const checker = (matrix as any).isUserInConfiguredSpace;
+  if (typeof checker !== 'function') return false;
+  return !!checker.call(matrix, matrixUserId);
+}
+
 async function handleOnboarding(matrix: MatrixPlatform, event: RouterEvent): Promise<void> {
   const userId = String(event.data?.platform_user_id || '');
   if (!userId) return;
@@ -476,6 +592,100 @@ async function handleOnboarding(matrix: MatrixPlatform, event: RouterEvent): Pro
   await matrix.sendDM(userId, text, { format: 'markdown' });
 }
 
+async function handleAccountCommand(matrix: MatrixPlatform, event: RouterEvent, text: string, command: string): Promise<boolean> {
+  const matrixUserId = String(event.data?.sender_id || '');
+  if (!matrixUserId) return false;
+
+  const normalized = text.toLowerCase();
+  const isAccountCommand = command === 'start'
+    || command === 'account'
+    || command === 'whoami'
+    || command === 'link'
+    || command === 'connect'
+    || command === 'create'
+    || command === 'new'
+    || command === 'provision';
+  if (!isAccountCommand) return false;
+
+  const status = await getShapeMatrixLinkStatus(matrixUserId).catch(error => {
+    throw new Error(`Could not read private Router Matrix link status: ${error instanceof Error ? error.message : String(error)}`);
+  });
+
+  if (status.linked && status.handle) {
+    await sendPrivateMatrixReply(matrix, event, `This Matrix account is linked to private Shape Router handle @${status.handle}.`);
+    return true;
+  }
+
+  const wantsExisting = normalized.includes('existing') || normalized.includes('code') || command === 'connect';
+  const wantsCreate = command === 'create' || command === 'new' || command === 'provision' || normalized.includes('create new');
+
+  if (wantsExisting) {
+    const link = await createShapeMatrixLinkCode(matrixUserId);
+    if (link.alreadyLinked && link.handle) {
+      await sendPrivateMatrixReply(matrix, event, `This Matrix account is already linked to private Shape Router handle @${link.handle}.`);
+      return true;
+    }
+    if (!link.code) {
+      await sendPrivateMatrixReply(matrix, event, 'I could not create a Matrix link code. Try again in a moment.');
+      return true;
+    }
+    await sendPrivateMatrixReply(matrix, event, [
+      `Your private Shape Router link code: **${link.code}**`,
+      '',
+      'In your private Router MCP client, ask Claude to link Matrix with this code, or call the `router_link_matrix` tool directly.',
+      '',
+      'This code expires in 10 minutes.',
+    ].join('\n'));
+    return true;
+  }
+
+  if (wantsCreate) {
+    const requestedHandle = parseRequestedHandle(text);
+    if (!event.data?.is_dm) {
+      await sendPrivateMatrixReply(matrix, event, 'DM me `create <handle>` to create a private Shape Router account. I will never post Router credentials in a public room.');
+      return true;
+    }
+    const allowed = await canProvisionFromMatrix(matrix, matrixUserId);
+    if (!allowed) {
+      try {
+        await createShapeMatrixProvisionRequest({ matrixUserId, event, requestedHandle });
+        await sendReply(matrix, event, 'I could not verify this Matrix account for automatic private Router account creation, so I filed an organizer approval request in the private Shape Router.');
+      } catch (error) {
+        log(`Could not create Matrix Router approval request for ${matrixUserId}: ${error instanceof Error ? error.message : String(error)}`);
+        await sendReply(matrix, event, 'I can only create private Shape Router accounts for verified Shape Rotator Matrix space members. I could not file an approval request, so ask an organizer if this looks wrong.');
+      }
+      return true;
+    }
+    const provisioned = await provisionShapeMatrixAccount({
+      matrixUserId,
+      handle: requestedHandle,
+      displayName: String(event.data?.display_name || '').trim() || undefined,
+    });
+    await sendReply(matrix, event, [
+      `Created private Shape Router account @${provisioned.user.handle} and linked it to this Matrix account.`,
+      '',
+      'Secret key:',
+      `\`${provisioned.secret_key}\``,
+      '',
+      `Setup: ${provisioned.setup_url}`,
+      `MCP: ${provisioned.mcp_url}`,
+      '',
+      'Save the key now. Router cannot recover it later.',
+    ].join('\n'));
+    return true;
+  }
+
+  await sendPrivateMatrixReply(matrix, event, [
+    'Private Shape Router account setup:',
+    '',
+    '- `link existing`: get a code to link this Matrix account to an existing private Router handle',
+    '- `create <handle>`: create a new private Router account linked to this Matrix account',
+    '',
+    'New Router credentials are only sent in Matrix DMs.',
+  ].join('\n'));
+  return true;
+}
+
 export async function handleMention(matrix: MatrixPlatform, mcpClient: Client | null, event: RouterEvent): Promise<void> {
   const data = event.data || {};
   const roomId = String(data.room_id || '');
@@ -484,10 +694,23 @@ export async function handleMention(matrix: MatrixPlatform, mcpClient: Client | 
 
   if (!roomId || !text) return;
 
+  if (await handleAccountCommand(matrix, event, text, command)) {
+    return;
+  }
+
+  const linkedSenderHandle = await resolveShapeRouterHandle(typeof data.sender_id === 'string' ? data.sender_id : undefined);
+  const attributionEvent = linkedSenderHandle
+    ? { ...event, data: { ...data, sender_handle: linkedSenderHandle } }
+    : event;
+
   if (command === 'help') {
     await sendReply(matrix, event, [
       'Shape Router commands:',
       '',
+      ...(linkedSenderHandle ? [`Linked private Router account: @${linkedSenderHandle}`, ''] : []),
+      '- `start` or `link`: private Router account setup',
+      '- `link existing`: get a code to link this Matrix account to an existing private Router handle',
+      '- `create <handle>`: create a private Router account linked to this Matrix account',
       '- `search <query>`: search the private Shape Router notebook',
       '- `save <text>` or `sync <text>`: save a Matrix note to the private Router',
       '- `summarize this room [24h|7d]`: save recent Matrix room context to the private Router',
@@ -500,7 +723,7 @@ export async function handleMention(matrix: MatrixPlatform, mcpClient: Client | 
     const body = text.replace(/^\S+\s*/, '').trim() || String(data.text || '').trim();
     const entry = await createShapeEntry({
       summary: truncate(body.split('\n')[0] || 'Matrix note saved to Shape Router', 300),
-      content: buildProvenanceContent(event, body),
+      content: buildProvenanceContent(attributionEvent, body),
       tags: ['matrix-note'],
       oneliner: 'Matrix note',
     });
@@ -522,7 +745,7 @@ export async function handleMention(matrix: MatrixPlatform, mcpClient: Client | 
     const entry = await createShapeEntry({
       summary: built.summary,
       content: [
-        buildProvenanceContent(event, built.content),
+        buildProvenanceContent(attributionEvent, built.content),
       ].join('\n'),
       tags: ['matrix-summary'],
       oneliner: 'Matrix summary',
@@ -559,6 +782,17 @@ async function main(): Promise<void> {
     registrationToken: process.env.MATRIX_REGISTRATION_TOKEN,
     signupUrl: matrixSignupUrl(homeserverUrl),
     ignoreMessagesBefore,
+    resolveLinkedRouterHandle: async (platform, platformUserId) => {
+      if (platform !== 'matrix') return null;
+      return resolveShapeRouterHandle(platformUserId);
+    },
+    resolveLinkedPlatformId: async (platform, routerHandle) => {
+      if (platform !== 'matrix') return null;
+      return getShapeMatrixUserId(routerHandle).catch(error => {
+        log(`Matrix platform ID resolution failed for @${routerHandle}: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      });
+    },
   });
 
   log(`Starting Matrix bridge for private Router ${shapeBaseUrl()}`);

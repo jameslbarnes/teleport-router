@@ -18,7 +18,7 @@ separate broadcaster path.
 Shape Rotator Matrix server
   -> shape-matrix-bridge process
      -> Matrix E2EE transport from teleport-router/server/src/platform/matrix.ts
-     -> private Router HTTP API for writes
+     -> private Router HTTP API for writes and Matrix account linking
      -> private Router MCP router_search for search
   -> https://shaperotator.teleport.computer
 ```
@@ -46,7 +46,10 @@ MATRIX_SIGNUP_URL=https://mtrx.shaperotator.xyz/signup/api
 
 `SHAPE_ROUTER_SECRET_KEY` must belong to a bot/service account in the Shape
 Router instance. The bridge patches that profile on startup with
-`stagingDelayMs=0` unless `SHAPE_ROUTER_CONFIGURE_BOT_PROFILE=0`.
+`stagingDelayMs=0` unless `SHAPE_ROUTER_CONFIGURE_BOT_PROFILE=0`. For Matrix
+account linking and provisioning, that private Router account must either be a
+team admin or its handle must be listed in the private Router server env
+`MATRIX_LINK_SERVICE_HANDLES`.
 
 Alternatively, use a pre-provisioned Matrix session instead of password/signup:
 
@@ -157,6 +160,10 @@ The bridge responds to Matrix DMs and mentions:
 
 ```text
 help
+start
+link
+link existing
+create <handle>
 search <query>
 save <text>
 sync <text>
@@ -169,6 +176,25 @@ summarize this room 7d
 Streamable HTTP endpoint at `/mcp/`. The live `/api` listing still advertises
 legacy SSE for compatibility, but the Shape setup UI exposes `/mcp/` for modern
 clients.
+
+`start` / `link` are Matrix-first private Router onboarding commands. If the
+Matrix account is already linked, the bot reports the private Router handle. If
+it is not linked, the bot offers:
+
+- `link existing`: creates a short-lived private Router link code. The user
+  redeems it from an authenticated private Router account with
+  `router_link_matrix` or `POST /api/identity/link-matrix`.
+- `create <handle>`: creates a private Router account for an authorized Shape
+  Matrix space member and immediately links the Matrix MXID. The bridge only
+  returns the generated private Router secret key in a Matrix DM, never in a
+  public room.
+
+Auto-provisioning checks Matrix space membership by default. Set
+`SHAPE_MATRIX_REQUIRE_SPACE_MEMBERSHIP_FOR_PROVISION=0` only for local tests or a
+different explicit authorization gate. If the bridge cannot verify that the
+Matrix user is authorized for automatic account creation, it writes a
+`matrix-provision-request` entry to the private Router for organizer approval
+instead of calling the provisioning endpoint.
 
 `save` / `sync` / `record` create private Shape Router entries with provenance:
 Matrix room or DM, room ID, Matrix event ID, organizer/sender, and capture time.
