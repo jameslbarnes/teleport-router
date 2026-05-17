@@ -1,10 +1,5 @@
 version: '3.8'
 
-# Generated deploy snapshot. CI regenerates this from
-# docker-compose.template.yml with fresh image digests before Phala deploy.
-# Do not manually deploy this stale pinned file unless the server image digest
-# is known to include dist/shape-matrix-bridge.js.
-
 services:
   router:
     image: docker.io/generalsemantics/teleport-router:9081484@sha256:ed09f91306096b769d90f2dc59f1b17673235defa379b5fde8ce039b74ef0a93
@@ -22,37 +17,9 @@ services:
       - ANTHROPIC_API_KEY
       - SENDGRID_API_KEY
       - SENDGRID_FROM_EMAIL
+      - ROUTER_AGENT_HANDLES_MATRIX=1
     volumes:
       - router-data:/data
-    restart: unless-stopped
-
-  shape-matrix-bridge:
-    image: docker.io/generalsemantics/teleport-router:9081484@sha256:ed09f91306096b769d90f2dc59f1b17673235defa379b5fde8ce039b74ef0a93
-    command: ["node", "dist/shape-matrix-bridge.js"]
-    environment:
-      # Matrix is intentionally hosted by this bridge process, not by the
-      # public Router server. Notebook reads/writes go to the private Shape
-      # Router instance below.
-      - SHAPE_ROUTER_BASE_URL=https://shaperotator.teleport.computer
-      - SHAPE_ROUTER_SECRET_KEY
-      - SHAPE_MATRIX_BRIDGE_TAGS=shape-rotator,matrix
-      - SHAPE_MATRIX_PUBLISH_IMMEDIATELY=1
-      - SHAPE_MATRIX_ENABLE_ONBOARDING=0
-      - SHAPE_MATRIX_STARTUP_EVENT_GRACE_MS=5000
-      - ANTHROPIC_API_KEY
-      - MATRIX_SERVER_URL=https://mtrx.shaperotator.xyz
-      - MATRIX_SERVER_NAME=mtrx.shaperotator.xyz
-      - MATRIX_BOT_SECRET_KEY
-      - MATRIX_ACCESS_TOKEN
-      - MATRIX_USER_ID
-      - MATRIX_DEVICE_ID
-      - MATRIX_CRYPTO_SECRET
-      - MATRIX_BOT_HANDLE
-      - MATRIX_SPACE_ROOM_ID=!4FL8uL5OEYLATG1VH4wC2CD3pfIV6BMFId9VT7rmm-g
-      - MATRIX_REGISTRATION_TOKEN
-      - MATRIX_SIGNUP_URL=https://mtrx.shaperotator.xyz/signup/api
-    volumes:
-      - shape-matrix-bridge-data:/data
     restart: unless-stopped
 
   router-agent:
@@ -116,6 +83,5 @@ services:
 
 volumes:
   router-data:
-  shape-matrix-bridge-data:
   cert-data-cf:
   hermes-cert-data-cf:

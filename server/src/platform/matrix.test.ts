@@ -1,12 +1,8 @@
 import { existsSync, unlinkSync } from 'fs';
 import { ClientEvent, EventType, KnownMembership, RelationType, RoomEvent, RoomMemberEvent } from 'matrix-js-sdk';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MatrixPlatform, ROUTER_CHANNEL_STATE, ROUTER_SPARK_EVENT, buildRouterDiscoBallAvatarPng, deriveMatrixBotPassword, isMatrixMention } from './matrix.js';
+import { describe, expect, it, vi } from 'vitest';
+import { MatrixPlatform, ROUTER_CHANNEL_STATE, ROUTER_SPARK_EVENT, buildRouterDiscoBallAvatarPng, isMatrixMention } from './matrix.js';
 import { getEventsSince, resetEvents } from '../events.js';
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
 
 describe('isMatrixMention', () => {
   const botUserId = '@router:mtrx.shaperotator.xyz';
@@ -87,23 +83,6 @@ describe('Router disco ball avatar', () => {
   });
 });
 
-describe('MatrixPlatform auth mode selection', () => {
-  it('uses access-token mode when both access token and bot secret are configured', () => {
-    expect(deriveMatrixBotPassword({
-      serverName: 'mtrx.example.test',
-      botSecretKey: 'stale-password-secret',
-      accessToken: 'provisioned-access-token',
-    })).toBeNull();
-  });
-
-  it('derives a password only when no access token is configured', () => {
-    expect(deriveMatrixBotPassword({
-      serverName: 'mtrx.example.test',
-      botSecretKey: 'password-secret',
-    })).toMatch(/^[A-Za-z0-9_-]+$/);
-  });
-});
-
 describe('MatrixPlatform identity resolution', () => {
   const createPlatform = (overrides: Partial<ConstructorParameters<typeof MatrixPlatform>[0]> = {}) => new MatrixPlatform({
     serverUrl: 'https://mtrx.example.test',
@@ -131,31 +110,6 @@ describe('MatrixPlatform identity resolution', () => {
 
     await expect(platform.resolveRouterHandle('@specularist:matrix.org')).resolves.toBe('james');
     await expect(platform.resolveRouterHandle('@alice:mtrx.example.test')).resolves.toBe('alice');
-  });
-
-  it('validates externally provisioned Matrix access tokens through whoami', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      user_id: '@shape-router-bridge:mtrx.example.test',
-      device_id: 'DEVICE',
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-    vi.stubGlobal('fetch', fetchMock);
-
-    const platform = createPlatform({
-      botSecretKey: undefined,
-      accessToken: 'access-token',
-      botHandle: 'shape-router-bridge',
-    });
-
-    await expect((platform as any).credentialsFromAccessToken('access-token')).resolves.toEqual({
-      access_token: 'access-token',
-      user_id: '@shape-router-bridge:mtrx.example.test',
-      device_id: 'DEVICE',
-    });
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://mtrx.example.test/_matrix/client/v3/account/whoami',
-      { headers: { Authorization: 'Bearer access-token' } },
-    );
-    vi.unstubAllGlobals();
   });
 });
 
@@ -1081,7 +1035,6 @@ describe('MatrixPlatform agent trigger reactions', () => {
     text: string;
     sender?: string;
     roomId?: string;
-    timestamp?: number;
     content?: Record<string, any>;
   }) => ({
     getType: () => EventType.RoomMessage,
@@ -1089,7 +1042,7 @@ describe('MatrixPlatform agent trigger reactions', () => {
     getRoomId: () => overrides.roomId || '!room:mtrx.example.test',
     getId: () => overrides.id,
     getContent: () => ({ body: overrides.text, ...(overrides.content || {}) }),
-    getTs: () => overrides.timestamp ?? Date.now(),
+    getTs: () => Date.now(),
   });
 
   const fakeRoom = (members = ['@router:mtrx.example.test', '@alice:mtrx.example.test', '@bob:mtrx.example.test']) => ({
@@ -1130,52 +1083,6 @@ describe('MatrixPlatform agent trigger reactions', () => {
     });
   });
 
-  it('queues structured mentions in space-child rooms as non-DM platform mentions', async () => {
-    resetEvents();
-    const sendEvent = vi.fn().mockResolvedValue({ event_id: '$reaction' });
-    const platform = createPlatform({ spaceRoomId: '!space:mtrx.example.test' });
-    (platform as any).botUserId = '@router:mtrx.example.test';
-    (platform as any).client = {
-      getRoom: vi.fn().mockReturnValue({
-        ...fakeRoom(['@router:mtrx.example.test', '@alice:mtrx.example.test']),
-        currentState: {
-          getStateEvents: vi.fn((eventType: string, stateKey: string) =>
-            eventType === EventType.SpaceParent && stateKey === '!space:mtrx.example.test'
-              ? { getContent: () => ({ via: ['mtrx.example.test'] }) }
-              : null,
-          ),
-        },
-      }),
-      getAccountData: vi.fn().mockReturnValue(undefined),
-      sendEvent,
-    };
-
-    (platform as any).handleIncomingMessageEvent(fakeIncomingEvent({
-      id: '$structured-mention',
-      text: '@router search shape-matrix-live-smoke',
-      content: {
-        'm.mentions': { user_ids: ['@router:mtrx.example.test'] },
-      },
-    }));
-
-    await vi.waitFor(() => {
-      expect(sendEvent).toHaveBeenCalled();
-    });
-
-    const events = getEventsSince(0);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      type: 'platform_mention',
-      data: {
-        platform: 'matrix',
-        room_id: '!room:mtrx.example.test',
-        message_id: '$structured-mention',
-        text: '@router search shape-matrix-live-smoke',
-        is_dm: false,
-      },
-    });
-  });
-
   it('does not react to ordinary Matrix messages that do not trigger the agent', async () => {
     const sendEvent = vi.fn().mockResolvedValue({ event_id: '$reaction' });
     const platform = createPlatform();
@@ -1193,29 +1100,6 @@ describe('MatrixPlatform agent trigger reactions', () => {
 
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(sendEvent).not.toHaveBeenCalled();
-  });
-
-  it('ignores Matrix messages older than the configured startup cutoff', async () => {
-    resetEvents();
-    const sendEvent = vi.fn().mockResolvedValue({ event_id: '$reaction' });
-    const platform = createPlatform({ ignoreMessagesBefore: 10_000 });
-    (platform as any).botUserId = '@router:mtrx.example.test';
-    (platform as any).client = {
-      getRoom: vi.fn().mockReturnValue(fakeRoom()),
-      getAccountData: vi.fn().mockReturnValue(undefined),
-      sendEvent,
-    };
-
-    (platform as any).handleIncomingMessageEvent(fakeIncomingEvent({
-      id: '$old-mention',
-      text: '@router replayed old sync message',
-      timestamp: 9_000,
-    }));
-
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(sendEvent).not.toHaveBeenCalled();
-    expect(getEventsSince(0)).toHaveLength(0);
-    expect((platform as any).processedMessageEvents.has('$old-mention')).toBe(true);
   });
 
   it('includes pending entry IDs when users reply to pending review messages', () => {
