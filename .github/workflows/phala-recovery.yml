@@ -1,0 +1,60 @@
+name: Phala Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Recovery action to run'
+        required: true
+        type: choice
+        default: status
+        options:
+          - status
+          - restart
+
+jobs:
+  phala-recovery:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Install Phala CLI
+        run: npm install -g phala
+
+      - name: Show CVM status
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}" \
+            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
+
+      - name: Show recent CVM events
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}/events" \
+            -q '{items: [.items[:10][] | {event_type,status,timestamp,message}], total, next_cursor}' || true
+
+      - name: Restart CVM
+        if: inputs.action == 'restart'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          timeout 900s phala cvms restart "${PHALA_APP_ID}" --json
+
+      - name: Status after restart request
+        if: inputs.action == 'restart'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}" \
+            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
