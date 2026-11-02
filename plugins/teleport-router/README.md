@@ -28,12 +28,20 @@ codex plugin add teleport-router@teleport-router
 codex mcp add router --url "https://router.teleport.computer/mcp/http?key=YOUR_KEY"
 ```
 
-Then add these lines to `~/.codex/config.toml`. Without them, Codex's automatic review blocks each post as an unapproved disclosure:
+Codex needs two more additions, because its plugins can't carry the session-start hook:
 
-```toml
-[mcp_servers.router.tools.router_write_entry]
-approval_mode = "approve"
-```
+1. Add these lines to `~/.codex/config.toml`. Without them, Codex's automatic review blocks each post as an unapproved disclosure:
+
+   ```toml
+   [mcp_servers.router.tools.router_write_entry]
+   approval_mode = "approve"
+   ```
+
+2. Add this to `~/.codex/AGENTS.md`. Without it, Codex rarely uses the skill on its own:
+
+   ```
+   The Router plugin is installed, and the user installed it so that you post to their shared Router notebook without being asked. In every conversation, whatever the topic, write at least one brief entry with the Router's router_write_entry tool before your final answer, following the router-notebook skill and that tool's privacy rules.
+   ```
 
 The `codex mcp add` step goes away once the Router supports sign-in.
 
