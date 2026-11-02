@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MemoryStorage, generateEntryId, type Channel, type JournalEntry, type Storage } from './storage.js';
-import { GroupStoreRevokedError, MemoryGroupStore, groupPrefix, withGroupStore } from './group-store.js';
+import { GroupStoreRevokedError, MemoryGroupStore, groupPrefix, groupStoreFromAccess, withGroupStore, type DelegatedKv } from './group-store.js';
 
 const channel = (id: string, onTinyCloud: boolean): Channel => ({
   id,
@@ -32,7 +32,7 @@ describe('Groups stored in the owner\'s store', () => {
   beforeEach(async () => {
     base = new MemoryStorage();
     store = new MemoryGroupStore();
-    storage = withGroupStore(base, store, generateEntryId);
+    storage = withGroupStore(base, store.resolver(), generateEntryId);
     await base.createChannel(channel('lab', true));
     await base.createChannel(channel('plain', false));
   });
@@ -55,8 +55,8 @@ describe('Groups stored in the owner\'s store', () => {
   });
 
   it('finds a group post after a restart, when the id-to-group index is empty', async () => {
-    await withGroupStore(base, store, generateEntryId).addEntry({ ...post('remember me', ['#lab']), id: 'r1' } as any);
-    const fresh = withGroupStore(base, store, generateEntryId);
+    await withGroupStore(base, store.resolver(), generateEntryId).addEntry({ ...post('remember me', ['#lab']), id: 'r1' } as any);
+    const fresh = withGroupStore(base, store.resolver(), generateEntryId);
     expect((await fresh.getEntry('r1'))?.content).toBe('remember me');
   });
 
@@ -85,5 +85,57 @@ describe('Groups stored in the owner\'s store', () => {
   it('passes every other call straight through to the Router database', async () => {
     expect((await storage.getChannel('lab'))?.store?.kind).toBe('tinycloud');
     expect(await storage.getUserCount()).toBe(0);
+  });
+});
+
+describe('TinyCloud adapter (SDK results to a group store)', () => {
+  const ok = (data: unknown) => ({ ok: true as const, data });
+  const fail = (code: string, message: string) => ({ ok: false as const, error: { code, message } });
+
+  function fakeAccess(keyPrefix = '', override: Partial<DelegatedKv['kv']> = {}): DelegatedKv {
+    const kv = new Map<string, unknown>();
+    return {
+      kv: {
+        put: async (k, v) => { kv.set(k, v); return ok(null); },
+        get: async (k) => (kv.has(k) ? ok({ data: kv.get(k) }) : fail('KV_NOT_FOUND', 'Key not found')),
+        list: async ({ path }) => ok({ keys: [...kv.keys()].filter(k => k.startsWith(path)).map(k => keyPrefix + k) }),
+        delete: async (k) => { kv.delete(k); return ok(null); },
+        ...override,
+      },
+    };
+  }
+
+  it('round-trips values and lists keys under a path', async () => {
+    const store = groupStoreFromAccess(fakeAccess());
+    await store.put('posts/a', '{"id":"a"}');
+    expect(await store.get('posts/a')).toBe('{"id":"a"}');
+    expect(await store.list('posts/')).toEqual(['posts/a']);
+    await store.delete('posts/a');
+    expect(await store.list('posts/')).toEqual([]);
+  });
+
+  it('returns null for a missing key', async () => {
+    expect(await groupStoreFromAccess(fakeAccess()).get('posts/none')).toBeNull();
+  });
+
+  it('accepts list keys relative to the space root', async () => {
+    const store = groupStoreFromAccess(fakeAccess('groups/lab/'));
+    await store.put('posts/x', 'v');
+    expect(await store.list('posts/')).toEqual(['posts/x']);
+  });
+
+  it('turns a revoked grant into GroupStoreRevokedError', async () => {
+    const revoked = fail('AUTH_UNAUTHORIZED', 'delegation-ancestor-revoked: ancestor=bafkr4x invoked=bafkr4y');
+    const store = groupStoreFromAccess(fakeAccess('', { get: async () => revoked, list: async () => revoked }));
+    await expect(store.get('posts/a')).rejects.toBeInstanceOf(GroupStoreRevokedError);
+    await expect(store.list('posts/')).rejects.toBeInstanceOf(GroupStoreRevokedError);
+  });
+
+  it('reports other failures as errors, not revocations', async () => {
+    const outOfScope = fail('AUTH_UNAUTHORIZED', 'Unauthorized Action: tinycloud:pkh:eip155:1:0xabc:groups/kv/other / tinycloud.kv/get');
+    const store = groupStoreFromAccess(fakeAccess('', { get: async () => outOfScope }));
+    const err = await store.get('posts/a').catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(GroupStoreRevokedError);
   });
 });

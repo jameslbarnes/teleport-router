@@ -24,7 +24,8 @@ import {
 import Anthropic from '@anthropic-ai/sdk';
 import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, isValidHandle, normalizeHandle } from './identity.js';
 import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
-import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, type GroupStore } from './group-store.js';
+import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
+import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -971,20 +972,53 @@ const PORT = process.env.PORT || 3000;
 
 const useFirestore = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS;
 const useStagedMemory = process.env.STAGED_STORAGE === 'memory';
-/** Where group posts live (see group-store.ts). Off unless TINYCLOUD_GROUPS is set. */
-function makeGroupStore(): GroupStore | null {
+/**
+ * Where group posts live (see group-store.ts). Off unless TINYCLOUD_GROUPS is set:
+ * "memory" for tests and local runs, "tinycloud" for owners' TinyCloud spaces.
+ */
+type TinyCloudGroups = ReturnType<typeof tinyCloudGroups>;
+interface Groups { resolver: GroupStoreResolver; tinycloud?: () => Promise<TinyCloudGroups> }
+function makeGroups(): Groups | null {
   switch (process.env.TINYCLOUD_GROUPS) {
     case undefined:
     case '':
       return null;
     case 'memory':
-      return new MemoryGroupStore();
+      return { resolver: new MemoryGroupStore().resolver() };
+    case 'tinycloud': {
+      const privateKey = process.env.TINYCLOUD_ROUTER_KEY;
+      if (!privateKey) throw new Error('TINYCLOUD_GROUPS=tinycloud needs TINYCLOUD_ROUTER_KEY, the Router\'s own TinyCloud key.');
+      const host = process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz';
+      // Loaded on first use, so servers without TinyCloud groups never load the SDK
+      let loaded: Promise<TinyCloudGroups> | null = null;
+      const load = () => (loaded ??= import('./tinycloud-group-store.js').then(m => m.tinyCloudGroups({ privateKey, host })));
+      return { resolver: async (channel) => (await load()).resolver(channel), tinycloud: load };
+    }
     default:
       throw new Error(`Unknown TINYCLOUD_GROUPS value: ${process.env.TINYCLOUD_GROUPS}`);
   }
 }
-const groupStore = makeGroupStore();
-const withGroups = (base: Storage): Storage => (groupStore ? withGroupStore(base, groupStore, generateEntryId) : base);
+const groups = makeGroups();
+const withGroups = (base: Storage): Storage => (groups ? withGroupStore(base, groups.resolver, generateEntryId) : base);
+
+/**
+ * A TinyCloud group needs its owner's grant to this Router, covering exactly the
+ * group's folder with the actions the Router uses. Returns an error message, or
+ * the owner's space id.
+ */
+async function checkGroupGrant(wire: string | undefined, prefix: string): Promise<{ error: string } | { space: string }> {
+  if (!wire) return { error: 'A TinyCloud group needs tinycloud_delegation: the owner\'s grant to this Router for the group\'s folder.' };
+  const tc = await groups!.tinycloud!();
+  let grant;
+  try { grant = tc.inspectGrant(wire); } catch { return { error: 'tinycloud_delegation is not a valid TinyCloud grant.' }; }
+  const routerDid = await tc.routerDid();
+  if (grant.delegateDID !== routerDid) return { error: `The grant is for ${grant.delegateDID}, not this Router (${routerDid}).` };
+  if (grant.path !== prefix) return { error: `The grant covers "${grant.path}", but this group\'s folder is "${prefix}".` };
+  const missing = GROUP_GRANT_ACTIONS.filter(a => !grant.actions.includes(a));
+  if (missing.length) return { error: `The grant is missing ${missing.join(', ')}.` };
+  if (grant.expiry && grant.expiry.getTime() <= Date.now()) return { error: 'The grant has expired.' };
+  return { space: grant.spaceId };
+}
 const storage = useFirestore
   ? new StagedStorage(STAGING_DELAY_MS, withGroups(new FirestoreStorage()))
   : useStagedMemory
@@ -6247,7 +6281,7 @@ const server = createServer(async (req, res) => {
         req.on('end', () => resolve(data));
       });
 
-      let parsed: { secret_key?: string; id?: string; name?: string; description?: string; visibility?: 'public' | 'private'; join_rule?: 'open' | 'invite'; storage?: 'router' | 'tinycloud' };
+      let parsed: { secret_key?: string; id?: string; name?: string; description?: string; visibility?: 'public' | 'private'; join_rule?: 'open' | 'invite'; storage?: 'router' | 'tinycloud'; tinycloud_delegation?: string };
       try { parsed = JSON.parse(body); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
 
       if (!parsed.secret_key || !isValidSecretKey(parsed.secret_key)) {
@@ -6279,15 +6313,29 @@ const server = createServer(async (req, res) => {
       try {
         // A group whose posts live in the owner's TinyCloud space is always invite-only
         const onTinyCloud = parsed.storage === 'tinycloud';
-        if (onTinyCloud && !groupStore) {
+        if (onTinyCloud && !groups) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: 'Groups stored on TinyCloud are not enabled on this server.' }));
           return;
         }
+        let groupStoreConfig: Channel['store'];
+        if (onTinyCloud) {
+          groupStoreConfig = { kind: 'tinycloud', prefix: groupPrefix(parsed.id) };
+          if (groups!.tinycloud) {
+            const checked = await checkGroupGrant(parsed.tinycloud_delegation, groupStoreConfig.prefix);
+            if ('error' in checked) {
+              res.writeHead(400);
+              res.end(JSON.stringify({ error: checked.error }));
+              return;
+            }
+            groupStoreConfig.delegation = parsed.tinycloud_delegation;
+            groupStoreConfig.space = checked.space;
+          }
+        }
         const restJoinRule = onTinyCloud ? 'invite' : parsed.join_rule || (parsed.visibility === 'private' ? 'invite' : 'open');
         const restVisibility = onTinyCloud ? 'private' : parsed.visibility || (restJoinRule === 'invite' ? 'private' : 'public');
         const channel = await storage.createChannel({
-          ...(onTinyCloud ? { store: { kind: 'tinycloud' as const, prefix: groupPrefix(parsed.id) } } : {}),
+          ...(groupStoreConfig ? { store: groupStoreConfig } : {}),
           id: parsed.id,
           name: parsed.name,
           description: parsed.description,
@@ -6673,6 +6721,19 @@ const server = createServer(async (req, res) => {
 
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, message: `Invitation sent to @${targetHandle}` }));
+      return;
+    }
+
+    // GET /api/tinycloud/router - the identity a group owner grants access to
+    if (req.method === 'GET' && url.pathname === '/api/tinycloud/router') {
+      if (!groups?.tinycloud) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'TinyCloud groups are not enabled on this server.' }));
+        return;
+      }
+      const tc = await groups.tinycloud();
+      res.writeHead(200);
+      res.end(JSON.stringify({ did: await tc.routerDid(), host: tc.host, folder: 'groups/<channel-id>/', actions: GROUP_GRANT_ACTIONS }));
       return;
     }
 
@@ -8735,7 +8796,8 @@ async function seedDefaultChannels() {
   }
 }
 
-server.listen(PORT, async () => {
+// LISTEN_HOST (optional) binds one interface, e.g. 127.0.0.1 or a tailnet IP for local demos; unset = all
+server.listen(Number(PORT), process.env.LISTEN_HOST || undefined, async () => {
   console.log(`Router server running on port ${PORT}`);
   seedDefaultChannels();
 

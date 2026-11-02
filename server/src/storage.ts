@@ -183,7 +183,12 @@ export interface Channel {
   skills: Skill[];               // channel-scoped skills
   subscribers: ChannelSubscriber[];
   // Group posts stored in the owner's TinyCloud space instead of the Router database (see group-store.ts)
-  store?: { kind: 'tinycloud'; prefix: string };
+  store?: {
+    kind: 'tinycloud';
+    prefix: string;       // groups/<id>/ in the owner's space
+    delegation?: string;  // the owner's serialized grant to the Router (bound to the Router's key)
+    space?: string;       // owner's TinyCloud space id
+  };
 }
 
 export interface ChannelInvite {
