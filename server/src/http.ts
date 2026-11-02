@@ -6240,8 +6240,10 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /api/channels/:id - Channel info
-    if (req.method === 'GET' && url.pathname.startsWith('/api/channels/') && !url.pathname.includes('/entries') && !url.pathname.includes('/skills')) {
-      const channelId = decodeURIComponent(url.pathname.slice('/api/channels/'.length));
+    // Exactly /api/channels/<id>; matching on substrings hid channels named "skills-…" or "entries-…"
+    const channelInfoMatch = url.pathname.match(/^\/api\/channels\/([^/]+)$/);
+    if (req.method === 'GET' && channelInfoMatch) {
+      const channelId = decodeURIComponent(channelInfoMatch[1]);
       const channel = await storage.getChannel(channelId);
 
       if (!channel) {
@@ -6356,8 +6358,8 @@ const server = createServer(async (req, res) => {
     }
 
     // PUT /api/channels/:id - Update channel (admin only)
-    if (req.method === 'PUT' && url.pathname.startsWith('/api/channels/') && !url.pathname.includes('/skills')) {
-      const channelId = decodeURIComponent(url.pathname.slice('/api/channels/'.length));
+    if (req.method === 'PUT' && channelInfoMatch) {
+      const channelId = decodeURIComponent(channelInfoMatch[1]);
       const body = await new Promise<string>((resolve) => {
         let data = '';
         req.on('data', chunk => data += chunk);
@@ -6407,8 +6409,8 @@ const server = createServer(async (req, res) => {
     }
 
     // DELETE /api/channels/:id - Delete channel (admin only)
-    if (req.method === 'DELETE' && url.pathname.startsWith('/api/channels/') && !url.pathname.includes('/skills')) {
-      const channelId = decodeURIComponent(url.pathname.slice('/api/channels/'.length));
+    if (req.method === 'DELETE' && channelInfoMatch) {
+      const channelId = decodeURIComponent(channelInfoMatch[1]);
       const secretKey = url.searchParams.get('secret_key');
 
       if (!secretKey || !isValidSecretKey(secretKey)) {

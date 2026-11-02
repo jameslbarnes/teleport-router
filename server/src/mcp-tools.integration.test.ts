@@ -650,6 +650,14 @@ describe('MCP Tool Integration Tests', () => {
       expect(created.joinRule).toBe('open');
     });
 
+    it('channel routes: a channel named "skills-…" opens (routes used to match by substring)', async () => {
+      const id = `skills-${Date.now().toString(36).slice(-6)}`;
+      await post('/api/channels', { secret_key: MODERATOR_KEY, id, name: 'Named like a sub-route', join_rule: 'open' });
+      const res = await fetch(`${base()}/api/channels/${id}`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).id).toBe(id);
+    });
+
     it('review: a manual hold does not reveal the content to moderators', async () => {
       const entryId = await write(regularClient, 'Manually held text that review must hide');
       expect(await callTool(modClient, 'router_hold_entry', { entry_id: entryId, reason: 'test' })).toContain('held indefinitely');
