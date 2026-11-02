@@ -722,7 +722,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_review_staged',
     name: 'router_review_staged',
-    description: 'Review entries currently in the staging buffer. Moderators see all pending entries; regular users see only their own. Use this to evaluate entries before they publish — for content moderation, quality review, or checking your own pending posts.',
+    description: 'Review entries currently in the staging buffer. Everyone sees their own pending entries. Moderators also see entries held by moderation; only entries held by automated review show their content, and other pending entries stay private to their authors until they publish. Use this to evaluate held entries, or to check your own pending posts.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -740,7 +740,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_hold_entry',
     name: 'router_hold_entry',
-    description: 'Hold a staged entry indefinitely, preventing it from auto-publishing. The entry stays in the buffer forever until manually released or deleted. Use this for content moderation when an entry contains sensitive content that should not be published without review. The author will be notified.',
+    description: 'Hold a staged entry indefinitely, preventing it from auto-publishing. The entry stays in the buffer until released or deleted. Use this for content moderation when an entry should not publish without its author checking it. Holding does not reveal the entry\'s content to moderators. The author will be notified.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -762,7 +762,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_release_entry',
     name: 'router_release_entry',
-    description: 'Release a held entry for immediate publication. Use this after reviewing a held entry and determining it is safe to publish.',
+    description: 'Moderators only. Release a held entry. It goes back on its original schedule: it publishes when its staging window ends (immediately, if that has already passed), and its author can still delete it until then. Only held entries can be released; holds made before original publish times were recorded can only be published by their author. Releasing your own pending entry publishes it immediately. Use this after reviewing a held entry and determining it is safe to publish.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -976,6 +976,43 @@ const storage = useFirestore
     ? new StagedStorage(STAGING_DELAY_MS, new MemoryStorage())
   : new MemoryStorage();
 const STATIC_DIR = join(process.cwd(), '..');
+
+/**
+ * True only when the viewer wrote the entry. Each side must be present: a viewer
+ * without a handle must not "match" an entry without one (undefined === undefined).
+ */
+function isEntryAuthor(
+  entry: { pseudonym?: string; handle?: string },
+  viewerPseudonym: string | undefined,
+  viewerHandle: string | null | undefined,
+): boolean {
+  return (!!viewerPseudonym && entry.pseudonym === viewerPseudonym)
+    || (!!viewerHandle && entry.handle === viewerHandle);
+}
+
+/**
+ * Staged entries are private to their author until they publish. Everyone else,
+ * recipients and moderators included, gets "not found". Moderators review held
+ * entries through router_review_staged instead.
+ */
+function isHiddenWhilePending(entryId: string, isAuthor: boolean): boolean {
+  return !isAuthor && storage instanceof StagedStorage && storage.isPending(entryId);
+}
+
+/** Held by moderation: marked held, or pushed ~forever (automated HOLDs before moderationHeldBy existed). */
+const HELD_THRESHOLD_MS = 365.25 * 24 * 60 * 60 * 1000 * 100; // ~100 years
+function isModerationHeld(entry: JournalEntry, now = Date.now()): boolean {
+  return !!entry.moderationHeld || (entry.publishAt ?? 0) - now > HELD_THRESHOLD_MS;
+}
+
+/**
+ * Held by automated review, the only waiting entries moderators may read. A manual
+ * hold by a moderator does not unlock the content, so holding can't be used to peek.
+ */
+function isHeldByAutomatedReview(entry: JournalEntry, now = Date.now()): boolean {
+  if (entry.moderationHeldBy) return entry.moderationHeldBy === 'automated';
+  return !entry.moderationHeld && isModerationHeld(entry, now);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // PENDING ENTRY RECOVERY (survive restarts)
@@ -1816,7 +1853,7 @@ function createMCPServer(secretKey: string) {
       const channelAccessCache = new Map<string, boolean>();
       for (const e of entryResults) {
         const normalized = normalizeEntry(e);
-        const isAuthor = e.pseudonym === pseudonym || e.handle === viewerHandle;
+        const isAuthor = isEntryAuthor(e, pseudonym, viewerHandle);
         if (await canView(normalized, viewerHandle, viewerEmail, isAuthor, storage, channelAccessCache)) {
           filteredEntries.push(e);
         }
@@ -2078,19 +2115,16 @@ function createMCPServer(secretKey: string) {
           if (modText) {
             const verdict = modText.trim();
             if (verdict.startsWith('BLOCK')) {
-              const reason = verdict.includes(':')
-                ? verdict.split(':').slice(1).join(':').trim()
-                : 'Blocked by automated review.';
               await storage.deleteEntry(saved.id);
-              console.log(`[Moderation] ${saved.id} BLOCK — ${reason}`);
+              console.log(`[Moderation] ${saved.id} BLOCK`); // the verdict's reason paraphrases the entry: keep it out of logs
               // Don't notify — silently drop spam/injection
             } else if (verdict.startsWith('HOLD')) {
               const reason = verdict.includes(':')
                 ? verdict.split(':').slice(1).join(':').trim()
                 : 'Flagged by automated review.';
               const FOREVER = Date.now() + (999999 * 365.25 * 24 * 60 * 60 * 1000);
-              storage.updateEntryPublishAt(saved.id, FOREVER);
-              console.log(`[Moderation] ${saved.id} HOLD — ${reason}`);
+              storage.holdEntry(saved.id, reason, FOREVER, 'automated');
+              console.log(`[Moderation] ${saved.id} HOLD`); // reason paraphrases the entry: keep it out of logs
 
               // Notify author via email
               if (currentUser?.email && currentUser.emailVerified && emailClient) {
@@ -2230,8 +2264,9 @@ function createMCPServer(secretKey: string) {
         const currentUser = await storage.getUserByKeyHash(keyHash);
         const viewerHandle = currentUser?.handle;
         const viewerEmail = currentUser?.email;
-        const isAuthor = entry.pseudonym === pseudonym || entry.handle === viewerHandle;
-        const allowed = await canView(entry, viewerHandle, viewerEmail, isAuthor, storage, new Map<string, boolean>());
+        const isAuthor = isEntryAuthor(entry, pseudonym, viewerHandle);
+        const allowed = !isHiddenWhilePending(entryId, isAuthor)
+          && await canView(entry, viewerHandle, viewerEmail, isAuthor, storage, new Map<string, boolean>());
         if (!allowed) {
           return {
             content: [{ type: 'text' as const, text: `Entry not found: ${entryId}` }],
@@ -2253,7 +2288,11 @@ function createMCPServer(secretKey: string) {
 
       // Try to find as a conversation
       const conversation = await storage.getConversation(entryId);
-      if (conversation) {
+      const conversationHidden = conversation
+        && conversation.pseudonym !== pseudonym
+        && storage instanceof StagedStorage
+        && storage.isConversationPending(entryId);
+      if (conversation && !conversationHidden) {
         const date = new Date(conversation.timestamp).toISOString().split('T')[0];
         return {
           content: [{
@@ -3222,7 +3261,7 @@ function createMCPServer(secretKey: string) {
           }
 
           try {
-            await storage.useInvite(inviteToken);
+            await storage.useInvite(inviteToken, { channelId, handle: currentUser.handle });
           } catch (err: any) {
             return {
               content: [{ type: 'text' as const, text: `Invalid invite: ${err.message}` }],
@@ -3360,6 +3399,7 @@ function createMCPServer(secretKey: string) {
           createdBy: currentUser.handle,
           createdAt: Date.now(),
           maxUses: 1,
+          forHandle: targetHandle,
           uses: 0,
         };
         await storage.createInvite(invite);
@@ -3965,12 +4005,13 @@ function createMCPServer(secretKey: string) {
       const isModerator = handle && MODERATOR_HANDLES.has(handle);
       const filterAuthor = (args as { author?: string })?.author;
 
+      const now = Date.now();
       let entries = storage.getAllPendingEntries();
 
-      // Non-moderators can only see their own entries
-      if (!isModerator) {
-        entries = entries.filter(e => e.pseudonym === pseudonym || e.handle === handle);
-      } else if (filterAuthor) {
+      // Everyone sees their own waiting entries. Moderators also see entries held
+      // by moderation, never other people's ordinary waiting entries.
+      entries = entries.filter(e => isEntryAuthor(e, pseudonym, handle) || (isModerator && isModerationHeld(e, now)));
+      if (isModerator && filterAuthor) {
         entries = entries.filter(e => e.handle === filterAuthor);
       }
 
@@ -3980,17 +4021,19 @@ function createMCPServer(secretKey: string) {
         };
       }
 
-      const now = Date.now();
-      const HOLD_THRESHOLD = 365.25 * 24 * 60 * 60 * 1000 * 100; // ~100 years
       const lines = entries.map(e => {
         const author = e.handle ? `@${e.handle}` : e.pseudonym;
         const timeUntilPublish = (e.publishAt ?? 0) - now;
-        const isHeld = timeUntilPublish > HOLD_THRESHOLD;
+        const isHeld = isModerationHeld(e, now);
         const timeStr = isHeld
           ? 'HELD (indefinite)'
           : timeUntilPublish > 0
             ? `publishes in ${Math.round(timeUntilPublish / 60000)} min`
             : 'publishing soon';
+        if (!isEntryAuthor(e, pseudonym, handle) && !isHeldByAutomatedReview(e, now)) {
+          const heldBy = e.moderationHeldBy ? ` by @${e.moderationHeldBy}` : '';
+          return `[${e.id}] ${author} (${timeStr}${heldBy}):\n(content hidden: only entries held by automated review can be read before they publish)`;
+        }
         return `[${e.id}] ${author} (${timeStr}):\n${e.content.slice(0, 500)}${e.content.length > 500 ? '...' : ''}`;
       });
 
@@ -4036,7 +4079,7 @@ function createMCPServer(secretKey: string) {
 
       // Push publishAt to ~999999 years from now and mark as moderation-held
       const FOREVER = Date.now() + (999999 * 365.25 * 24 * 60 * 60 * 1000);
-      const updated = storage.holdEntry(entryId, reason, FOREVER);
+      const updated = storage.holdEntry(entryId, reason, FOREVER, handle || pseudonym);
 
       if (!updated) {
         return {
@@ -4078,7 +4121,7 @@ function createMCPServer(secretKey: string) {
         }
       }
 
-      console.log(`[Moderation] Entry ${entryId} held by @${handle || pseudonym}. Reason: ${reason}`);
+      console.log(`[Moderation] Entry ${entryId} held by @${handle || pseudonym}`);
 
       return {
         content: [{ type: 'text' as const, text: `Entry ${entryId} has been held indefinitely. It will not auto-publish. Author has been notified${entry?.handle ? ` (@${entry.handle})` : ''}.${reason ? ` Reason: ${reason}` : ''}` }],
@@ -4117,6 +4160,34 @@ function createMCPServer(secretKey: string) {
           content: [{ type: 'text' as const, text: `Entry ${entryId} is not in the staging buffer.` }],
           isError: true,
         };
+      }
+
+      // Moderators may only release held entries, and only back onto the entry's
+      // original schedule. A waiting entry belongs to its author until it publishes;
+      // cutting the author's delete window short is not a moderation action.
+      const pendingEntry = await storage.getEntry(entryId);
+      const ownEntry = !!pendingEntry && isEntryAuthor(pendingEntry, pseudonym, handle);
+      if (pendingEntry && !ownEntry) {
+        if (!isModerationHeld(pendingEntry)) {
+          return {
+            content: [{ type: 'text' as const, text: `Entry ${entryId} is not held. It will publish on its own schedule; only held entries can be released.` }],
+            isError: true,
+          };
+        }
+        const publishAt = storage.releaseHold(entryId);
+        if (publishAt === null) {
+          return {
+            content: [{ type: 'text' as const, text: `Entry ${entryId} was held before original publish times were recorded, so releasing it could publish it before its author's window ends. Only its author can publish it.` }],
+            isError: true,
+          };
+        }
+        if (publishAt > Date.now()) {
+          console.log(`[Moderation] Entry ${entryId} released by @${handle || pseudonym} (back on schedule)`);
+          const minutes = Math.max(1, Math.round((publishAt - Date.now()) / 60000));
+          return {
+            content: [{ type: 'text' as const, text: `Entry ${entryId} has been released. It is back on its original schedule and publishes in ${minutes} min, unless its author deletes it first.` }],
+          };
+        }
       }
 
       // Publish immediately via existing publishEntry method
@@ -4831,12 +4902,14 @@ const server = createServer(async (req, res) => {
         const user = await storage.getUserByKeyHash(keyHash);
         userHandle = user?.handle;
         userEmail = user?.email;
-        isAuthor = entry.pseudonym === userPseudonym || entry.handle === user?.handle;
+        isAuthor = isEntryAuthor(entry, userPseudonym, user?.handle);
       }
 
-      // Check visibility permissions (async for #channel resolution)
+      // Check visibility permissions (async for #channel resolution).
+      // A waiting entry is private to its author until it publishes.
       const normalized = normalizeEntry(entry);
-      if (!await canView(normalized, userHandle, userEmail, isAuthor, storage, new Map<string, boolean>())) {
+      if (isHiddenWhilePending(entryId, isAuthor)
+        || !await canView(normalized, userHandle, userEmail, isAuthor, storage, new Map<string, boolean>())) {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'Entry not found' }));
         return;
@@ -4876,23 +4949,29 @@ const server = createServer(async (req, res) => {
         userEmail = user?.email;
       }
 
-      // Get replies and filter by visibility (async for #channel resolution)
+      // A waiting parent is private to its author: don't confirm it exists
+      if (isHiddenWhilePending(entryId, isEntryAuthor(parentEntry, userPseudonym, userHandle))) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Entry not found' }));
+        return;
+      }
+
+      // Get replies and filter by visibility (async for #channel resolution).
+      // Waiting replies are shown only to their own author.
       const allReplies = await storage.getRepliesTo(entryId, limit);
       const normalizedReplies = allReplies.map(normalizeEntry);
       const visibleReplies: JournalEntry[] = [];
       const channelAccessCache = new Map<string, boolean>();
       for (const e of normalizedReplies) {
-        const isAuthor = e.pseudonym === userPseudonym || e.handle === userHandle;
+        const isAuthor = isEntryAuthor(e, userPseudonym, userHandle);
+        if (isHiddenWhilePending(e.id, isAuthor)) continue;
         if (await canView(e, userHandle, userEmail, isAuthor, storage, channelAccessCache)) {
           visibleReplies.push(e);
         }
       }
 
       // Strip hidden content
-      const replies = visibleReplies.map(e => {
-        const isAuthor = e.pseudonym === userPseudonym || e.handle === userHandle;
-        return stripHiddenContent(e, isAuthor);
-      });
+      const replies = visibleReplies.map(e => stripHiddenContent(e, isEntryAuthor(e, userPseudonym, userHandle)));
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ entryId, replies, count: replies.length }));
@@ -5675,8 +5754,12 @@ const server = createServer(async (req, res) => {
         isAuthor = conversation.pseudonym === userPseudonym;
       }
 
-      // Check if it's a pending conversation - only owner can view
-      if (conversation.publishAt && conversation.publishAt > Date.now()) {
+      // Check if it's a pending conversation - only owner can view. Pending means
+      // still in the buffer, even if its publish time has just passed.
+      const conversationPending = storage instanceof StagedStorage
+        ? storage.isConversationPending(conversationId)
+        : !!conversation.publishAt && conversation.publishAt > Date.now();
+      if (conversationPending) {
         if (!isAuthor) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: 'Conversation not found' }));
@@ -6332,7 +6415,7 @@ const server = createServer(async (req, res) => {
           return;
         }
         try {
-          await storage.useInvite(parsed.invite_token);
+          await storage.useInvite(parsed.invite_token, { channelId, handle: user.handle });
         } catch (err: any) {
           res.writeHead(403);
           res.end(JSON.stringify({ error: err.message }));
@@ -6543,6 +6626,7 @@ const server = createServer(async (req, res) => {
         createdBy: user.handle,
         createdAt: Date.now(),
         maxUses: 1,
+        forHandle: targetHandle,
         uses: 0,
       };
       await storage.createInvite(invite);
@@ -6599,7 +6683,13 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      const entries = await storage.getChannelEntries(channelId, limit);
+      // Waiting entries stay private to their author until they publish
+      const viewerKey = url.searchParams.get('secret_key');
+      const hasViewerKey = !!viewerKey && isValidSecretKey(viewerKey);
+      const viewerPseudonym = hasViewerKey ? derivePseudonym(viewerKey!) : undefined;
+      const viewerHandle = hasViewerKey ? (await storage.getUserByKeyHash(hashSecretKey(viewerKey!)))?.handle : undefined;
+      const entries = (await storage.getChannelEntries(channelId, limit))
+        .filter(e => !isHiddenWhilePending(e.id, isEntryAuthor(e, viewerPseudonym, viewerHandle)));
       res.writeHead(200);
       res.end(JSON.stringify({ entries }));
       return;

@@ -37,6 +37,8 @@ export interface JournalEntry {
   // Moderation state for staged entries only. Must not persist to published storage.
   moderationHeld?: boolean;
   moderationHoldReason?: string;
+  moderationHeldBy?: string;   // 'automated' for automated review, else the moderator's handle
+  scheduledPublishAt?: number; // publishAt before the hold; a release never publishes earlier
 }
 
 export interface Summary {
@@ -190,6 +192,32 @@ export interface ChannelInvite {
   expiresAt?: number;
   maxUses?: number;
   uses: number;
+  forHandle?: string;            // personal invite: only this handle may use it
+}
+
+/** Who is using an invite, and for which channel. Checked before the invite is consumed. */
+export interface InviteUse {
+  channelId: string;
+  handle: string;
+}
+
+/**
+ * An invite opens only the channel it was made for, and a personal invite only
+ * for its recipient. Throws before anything is consumed.
+ */
+export function checkInviteUse(invite: ChannelInvite, use: InviteUse): void {
+  if (invite.expiresAt && Date.now() > invite.expiresAt) {
+    throw new Error('Invite has expired.');
+  }
+  if (invite.maxUses && invite.uses >= invite.maxUses) {
+    throw new Error('Invite has reached maximum uses.');
+  }
+  if (invite.channelId !== use.channelId) {
+    throw new Error('Invite is not valid for this channel.');
+  }
+  if (invite.forHandle && invite.forHandle.toLowerCase() !== use.handle.toLowerCase()) {
+    throw new Error('Invite is not valid for this account.');
+  }
 }
 
 /** Validate channel ID: lowercase alphanumeric + hyphens, 2-30 chars, no leading/trailing hyphens */
@@ -386,7 +414,7 @@ export interface Storage {
   getInvite(token: string): Promise<ChannelInvite | null>;
 
   /** Use an invite (increment uses, return the channel) */
-  useInvite(token: string): Promise<Channel>;
+  useInvite(token: string, use: InviteUse): Promise<Channel>;
 
   /** Get entries for a channel */
   getChannelEntries(channelId: string, limit?: number): Promise<JournalEntry[]>;
@@ -729,15 +757,10 @@ export class MemoryStorage implements Storage {
     return this.invites.get(token) || null;
   }
 
-  async useInvite(token: string): Promise<Channel> {
+  async useInvite(token: string, use: InviteUse): Promise<Channel> {
     const invite = this.invites.get(token);
     if (!invite) throw new Error('Invite not found.');
-    if (invite.expiresAt && Date.now() > invite.expiresAt) {
-      throw new Error('Invite has expired.');
-    }
-    if (invite.maxUses && invite.uses >= invite.maxUses) {
-      throw new Error('Invite has reached maximum uses.');
-    }
+    checkInviteUse(invite, use);
     invite.uses++;
     const channel = this.channels.get(invite.channelId);
     if (!channel) throw new Error(`Channel "${invite.channelId}" not found.`);
@@ -1593,18 +1616,17 @@ export class FirestoreStorage implements Storage {
     return { token: doc.id, ...doc.data() } as ChannelInvite;
   }
 
-  async useInvite(token: string): Promise<Channel> {
+  async useInvite(token: string, use: InviteUse): Promise<Channel> {
     const inviteRef = this.db.collection(this.invitesCollection).doc(token);
-    const inviteDoc = await inviteRef.get();
-    if (!inviteDoc.exists) throw new Error('Invite not found.');
-    const invite = { token: inviteDoc.id, ...inviteDoc.data() } as ChannelInvite;
-    if (invite.expiresAt && Date.now() > invite.expiresAt) {
-      throw new Error('Invite has expired.');
-    }
-    if (invite.maxUses && invite.uses >= invite.maxUses) {
-      throw new Error('Invite has reached maximum uses.');
-    }
-    await inviteRef.update({ uses: invite.uses + 1 });
+    // Check and count in one transaction, so concurrent joins can't overrun maxUses
+    const invite = await this.db.runTransaction(async (tx) => {
+      const inviteDoc = await tx.get(inviteRef);
+      if (!inviteDoc.exists) throw new Error('Invite not found.');
+      const found = { token: inviteDoc.id, ...inviteDoc.data() } as ChannelInvite;
+      checkInviteUse(found, use);
+      tx.update(inviteRef, { uses: found.uses + 1 });
+      return found;
+    });
     const channel = await this.getChannel(invite.channelId);
     if (!channel) throw new Error(`Channel "${invite.channelId}" not found.`);
     return channel;
@@ -1710,8 +1732,8 @@ export class StagedStorage implements Storage {
     // Publish ready entries
     for (const [id, entry] of this.pending) {
       if (entry.publishAt && entry.publishAt <= now) {
-        // Move to Firestore without publishAt field
-        const { publishAt, moderationHeld, moderationHoldReason, ...publishedEntry } = entry;
+        // Move to Firestore without staging-only fields
+        const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
         const saved = await this.published.addEntry(publishedEntry);
         this.pending.delete(id);
 
@@ -1846,8 +1868,8 @@ export class StagedStorage implements Storage {
     const entry = this.pending.get(id);
     if (!entry) return null;
 
-    // Move to Firestore without publishAt field
-    const { publishAt, moderationHeld, moderationHoldReason, ...publishedEntry } = entry;
+    // Move to Firestore without staging-only fields
+    const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
     const saved = await this.published.addEntry(publishedEntry);
     this.pending.delete(id);
 
@@ -1898,15 +1920,37 @@ export class StagedStorage implements Storage {
   }
 
   /**
-   * Mark a pending entry as held by moderation.
+   * Mark a pending entry as held by moderation. `heldBy` is 'automated' for
+   * automated review, otherwise the moderator's handle. The original publish time
+   * is kept so a release can't publish the entry before the author's window ends.
    */
-  holdEntry(id: string, reason: string, holdUntil: number): boolean {
+  holdEntry(id: string, reason: string, holdUntil: number, heldBy?: string): boolean {
     const entry = this.pending.get(id);
     if (!entry) return false;
+    entry.scheduledPublishAt ??= entry.publishAt;
     entry.publishAt = holdUntil;
     entry.moderationHeld = true;
     entry.moderationHoldReason = reason;
+    entry.moderationHeldBy = heldBy;
     return true;
+  }
+
+  /**
+   * Lift a moderation hold. The entry goes back to its original schedule: it
+   * publishes then, or at the next publish tick if that time has passed.
+   * Returns the new publish time, or null if the entry isn't pending or its
+   * original schedule is unknown (held before scheduledPublishAt was recorded;
+   * staging delays vary per user, so it can't be safely guessed).
+   */
+  releaseHold(id: string): number | null {
+    const entry = this.pending.get(id);
+    if (!entry || entry.scheduledPublishAt === undefined) return null;
+    entry.publishAt = Math.max(entry.scheduledPublishAt, Date.now());
+    delete entry.moderationHeld;
+    delete entry.moderationHoldReason;
+    delete entry.moderationHeldBy;
+    delete entry.scheduledPublishAt;
+    return entry.publishAt;
   }
 
   /**
@@ -1989,26 +2033,9 @@ export class StagedStorage implements Storage {
   }
 
   async getEntriesAddressedTo(handle: string, email?: string, limit = 50): Promise<JournalEntry[]> {
-    // Get from published storage
-    const published = await this.published.getEntriesAddressedTo(handle, email, limit);
-
-    // Also include pending entries addressed to this user
-    const handlePattern = `@${handle}`;
-    const pendingMatches: JournalEntry[] = [];
-    for (const entry of this.pending.values()) {
-      if (entry.to && entry.to.some(dest =>
-        dest === handlePattern ||
-        dest === handle ||
-        (email && dest.toLowerCase() === email.toLowerCase())
-      )) {
-        pendingMatches.push(entry);
-      }
-    }
-
-    // Merge, sort, and limit
-    return [...pendingMatches, ...published]
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
+    // Published entries only. A waiting entry is private to its author until it
+    // publishes, which is also when recipients are notified.
+    return this.published.getEntriesAddressedTo(handle, email, limit);
   }
 
   async getRepliesTo(entryId: string, limit = 50): Promise<JournalEntry[]> {
@@ -2198,8 +2225,8 @@ export class StagedStorage implements Storage {
     return this.published.getInvite(token);
   }
 
-  async useInvite(token: string): Promise<Channel> {
-    return this.published.useInvite(token);
+  async useInvite(token: string, use: InviteUse): Promise<Channel> {
+    return this.published.useInvite(token, use);
   }
 
   async getChannelEntries(channelId: string, limit = 50): Promise<JournalEntry[]> {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MemoryStorage, StagedStorage, isValidChannelId, encodePageCursor } from './storage.js';
 import type { Channel, ChannelInvite } from './storage.js';
 import { hashSecretKey } from './identity.js';
@@ -712,7 +712,7 @@ describe('MemoryStorage Channels', () => {
       };
       await storage.createInvite(invite);
 
-      const channel = await storage.useInvite('use-me');
+      const channel = await storage.useInvite('use-me', { channelId: 'private-ch', handle: 'bob' });
       expect(channel.id).toBe('private-ch');
 
       const updated = await storage.getInvite('use-me');
@@ -729,7 +729,7 @@ describe('MemoryStorage Channels', () => {
         uses: 0,
       };
       await storage.createInvite(invite);
-      await expect(storage.useInvite('expired')).rejects.toThrow('expired');
+      await expect(storage.useInvite('expired', { channelId: 'private-ch', handle: 'bob' })).rejects.toThrow('expired');
     });
 
     it('should reject invite at max uses', async () => {
@@ -742,7 +742,26 @@ describe('MemoryStorage Channels', () => {
         uses: 1,
       };
       await storage.createInvite(invite);
-      await expect(storage.useInvite('maxed')).rejects.toThrow('maximum uses');
+      await expect(storage.useInvite('maxed', { channelId: 'private-ch', handle: 'bob' })).rejects.toThrow('maximum uses');
+    });
+
+    it('should refuse an invite for a different channel, without using it up', async () => {
+      await storage.createChannel(makeChannel({ id: 'other-ch', visibility: 'private' }));
+      await storage.createInvite({ token: 'for-private', channelId: 'private-ch', createdBy: 'alice', createdAt: Date.now(), maxUses: 1, uses: 0 });
+
+      await expect(storage.useInvite('for-private', { channelId: 'other-ch', handle: 'bob' })).rejects.toThrow('not valid for this channel');
+      expect((await storage.getInvite('for-private'))!.uses).toBe(0);
+
+      const channel = await storage.useInvite('for-private', { channelId: 'private-ch', handle: 'bob' });
+      expect(channel.id).toBe('private-ch');
+    });
+
+    it('should let only its recipient use a personal invite', async () => {
+      await storage.createInvite({ token: 'for-carol', channelId: 'private-ch', createdBy: 'alice', createdAt: Date.now(), maxUses: 1, uses: 0, forHandle: 'carol' });
+
+      await expect(storage.useInvite('for-carol', { channelId: 'private-ch', handle: 'bob' })).rejects.toThrow('not valid for this account');
+      expect((await storage.getInvite('for-carol'))!.uses).toBe(0);
+      await expect(storage.useInvite('for-carol', { channelId: 'private-ch', handle: 'Carol' })).resolves.toMatchObject({ id: 'private-ch' });
     });
 
     it('should return null for non-existent invite', async () => {
@@ -1105,5 +1124,86 @@ describe('MemoryStorage Channels', () => {
       // Clean up
       storage.stop();
     });
+  });
+});
+
+// Memory-backed, so these run without Firestore (the StagedStorage block above needs it).
+describe('StagedStorage holds and releases', () => {
+  const FOREVER = () => Date.now() + (999999 * 365.25 * 24 * 60 * 60 * 1000);
+  const waiting = (content: string) => ({
+    pseudonym: 'User#aaa',
+    handle: 'alice',
+    client: 'desktop' as const,
+    content,
+    timestamp: Date.now(),
+  });
+
+  it('a released hold goes back to its original publish time', async () => {
+    const storage = new StagedStorage(60 * 60 * 1000, new MemoryStorage());
+    const entry = await storage.addEntry(waiting('Held, then released'));
+    const originalPublishAt = entry.publishAt!;
+
+    storage.holdEntry(entry.id, 'review', FOREVER(), 'automated');
+    expect((await storage.getEntry(entry.id))?.scheduledPublishAt).toBe(originalPublishAt);
+
+    expect(storage.releaseHold(entry.id)).toBe(originalPublishAt);
+    const released = await storage.getEntry(entry.id);
+    expect(released?.publishAt).toBe(originalPublishAt);
+    expect(released?.moderationHeld).toBeUndefined();
+    expect(released?.moderationHeldBy).toBeUndefined();
+    expect(released?.scheduledPublishAt).toBeUndefined();
+    expect(storage.isPending(entry.id)).toBe(true);
+
+    storage.stop();
+  });
+
+  it('after a release the entry publishes when its original window ends, not before', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-02T00:00:00Z'));
+      const storage = new StagedStorage(60 * 60 * 1000, new MemoryStorage());
+      const entry = await storage.addEntry(waiting('Released ten minutes in'));
+      storage.holdEntry(entry.id, 'review', FOREVER(), 'automated');
+
+      vi.setSystemTime(new Date('2026-11-02T00:10:00Z'));
+      storage.releaseHold(entry.id);
+      await (storage as any).publishReadyEntries();
+      expect(storage.isPending(entry.id)).toBe(true);
+
+      vi.setSystemTime(new Date('2026-11-02T01:00:01Z'));
+      await (storage as any).publishReadyEntries();
+      expect(storage.isPending(entry.id)).toBe(false);
+
+      storage.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a hold with no recorded schedule cannot be released (holds restored from before the change)', async () => {
+    const storage = new StagedStorage(60 * 60 * 1000, new MemoryStorage());
+    const heldUntil = FOREVER();
+    storage.restorePendingState({
+      entries: [{ id: 'legacy-held', ...waiting('Held before schedules were recorded'), publishAt: heldUntil }],
+      conversations: [],
+    });
+
+    expect(storage.releaseHold('legacy-held')).toBeNull();
+    expect((await storage.getEntry('legacy-held'))?.publishAt).toBe(heldUntil);
+
+    storage.stop();
+  });
+
+  it('publishing strips the staging-only hold fields', async () => {
+    const storage = new StagedStorage(60 * 60 * 1000, new MemoryStorage());
+    const entry = await storage.addEntry(waiting('Held by a moderator, then published by its author'));
+    storage.holdEntry(entry.id, 'review', FOREVER(), 'mod');
+
+    const published = await storage.publishEntry(entry.id);
+    for (const field of ['publishAt', 'moderationHeld', 'moderationHoldReason', 'moderationHeldBy', 'scheduledPublishAt']) {
+      expect(published).not.toHaveProperty(field);
+    }
+
+    storage.stop();
   });
 });
