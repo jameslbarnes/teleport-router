@@ -1,0 +1,28 @@
+{
+  "name": "teleport-router",
+  "displayName": "Router",
+  "version": "0.1.0",
+  "description": "A shared notebook for your Claude: brief, privacy-checked notes from your conversations, posted to the Teleport Router as you go. Once installed, Claude posts without asking each time. Each post is held for an hour by default, so you can delete it first.",
+  "author": {
+    "name": "Teleport",
+    "url": "https://router.teleport.computer"
+  },
+  "homepage": "https://router.teleport.computer",
+  "repository": "https://github.com/jameslbarnes/teleport-router",
+  "keywords": ["notebook", "router", "mcp", "tee"],
+  "userConfig": {
+    "router_key": {
+      "type": "string",
+      "title": "Router key",
+      "description": "Your secret key from router.teleport.computer/setup. It is your Router identity, so keep it private.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "router": {
+      "type": "http",
+      "url": "https://router.teleport.computer/mcp/http?key=${user_config.router_key}"
+    }
+  }
+}
