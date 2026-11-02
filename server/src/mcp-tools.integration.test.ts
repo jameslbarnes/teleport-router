@@ -79,6 +79,7 @@ describe('MCP Tool Integration Tests', () => {
         STAGED_STORAGE: 'memory',
         MODERATOR_HANDLES: MODERATOR_HANDLE,
         MODERATOR_URL: `http://127.0.0.1:${moderationPort}`,
+        TINYCLOUD_GROUPS: 'memory',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: true,
@@ -615,6 +616,38 @@ describe('MCP Tool Integration Tests', () => {
       // A real invite still works, and the refused attempt didn't use it up
       await post(`/api/channels/${target}/join`, { secret_key: RECIPIENT_KEY, invite_token: targetToken });
       expect((await fetch(`${base()}/api/channels/${target}/entries?secret_key=${RECIPIENT_KEY}`)).status).toBe(200);
+    });
+
+    it('groups on TinyCloud: posts live in the group store, members read them, the public never sees them', async () => {
+      const groupId = `lk-grp-${Date.now().toString(36).slice(-6)}`;
+      const created = await post('/api/channels', { secret_key: MODERATOR_KEY, id: groupId, name: 'Skills cohort', storage: 'tinycloud', join_rule: 'open' });
+      expect(created.store).toEqual({ kind: 'tinycloud', prefix: `groups/${groupId}/` });
+      expect(created.joinRule).toBe('invite'); // a TinyCloud group is always invite-only
+
+      const { token } = await post(`/api/channels/${groupId}/invite`, { secret_key: MODERATOR_KEY });
+      await post(`/api/channels/${groupId}/join`, { secret_key: RECIPIENT_KEY, invite_token: token });
+
+      const card = 'Skill card: demo bundle v1 (placeholder)';
+      const publishedId = await publish(await write(modClient, card, { to: [`#${groupId}`] }), MODERATOR_KEY);
+
+      expect(await channelFeed(groupId, RECIPIENT_KEY)).toContain(card);
+      expect((await fetch(`${base()}/api/channels/${groupId}/entries`)).status).toBe(401);
+      expect((await fetch(`${base()}/api/channels/${groupId}/entries?secret_key=${OTHER_KEY}`)).status).toBe(403);
+
+      const member = await fetch(`${base()}/api/entry/${publishedId}?key=${RECIPIENT_KEY}`);
+      expect(member.status).toBe(200);
+      expect((await member.json()).content).toBe(card);
+      expect((await fetch(`${base()}/api/entry/${publishedId}`)).status).toBe(404);
+
+      const publicFeed = await (await fetch(`${base()}/api/entries?limit=200`)).json();
+      expect(publicFeed.entries.map((e: any) => e.content)).not.toContain(card);
+    });
+
+    it('groups on TinyCloud: an ordinary channel on the same server stays in the Router database', async () => {
+      const groupId = `lk-grp2-${Date.now().toString(36).slice(-5)}`;
+      const created = await post('/api/channels', { secret_key: MODERATOR_KEY, id: groupId, name: 'Plain channel', join_rule: 'open' });
+      expect(created.store).toBeUndefined();
+      expect(created.joinRule).toBe('open');
     });
 
     it('review: a manual hold does not reveal the content to moderators', async () => {

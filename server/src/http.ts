@@ -23,7 +23,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, isValidHandle, normalizeHandle } from './identity.js';
-import { MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
+import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
+import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, type GroupStore } from './group-store.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -970,10 +971,24 @@ const PORT = process.env.PORT || 3000;
 
 const useFirestore = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS;
 const useStagedMemory = process.env.STAGED_STORAGE === 'memory';
+/** Where group posts live (see group-store.ts). Off unless TINYCLOUD_GROUPS is set. */
+function makeGroupStore(): GroupStore | null {
+  switch (process.env.TINYCLOUD_GROUPS) {
+    case undefined:
+    case '':
+      return null;
+    case 'memory':
+      return new MemoryGroupStore();
+    default:
+      throw new Error(`Unknown TINYCLOUD_GROUPS value: ${process.env.TINYCLOUD_GROUPS}`);
+  }
+}
+const groupStore = makeGroupStore();
+const withGroups = (base: Storage): Storage => (groupStore ? withGroupStore(base, groupStore, generateEntryId) : base);
 const storage = useFirestore
-  ? new StagedStorage(STAGING_DELAY_MS)
+  ? new StagedStorage(STAGING_DELAY_MS, withGroups(new FirestoreStorage()))
   : useStagedMemory
-    ? new StagedStorage(STAGING_DELAY_MS, new MemoryStorage())
+    ? new StagedStorage(STAGING_DELAY_MS, withGroups(new MemoryStorage()))
   : new MemoryStorage();
 const STATIC_DIR = join(process.cwd(), '..');
 
@@ -6232,7 +6247,7 @@ const server = createServer(async (req, res) => {
         req.on('end', () => resolve(data));
       });
 
-      let parsed: { secret_key?: string; id?: string; name?: string; description?: string; visibility?: 'public' | 'private'; join_rule?: 'open' | 'invite' };
+      let parsed: { secret_key?: string; id?: string; name?: string; description?: string; visibility?: 'public' | 'private'; join_rule?: 'open' | 'invite'; storage?: 'router' | 'tinycloud' };
       try { parsed = JSON.parse(body); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
 
       if (!parsed.secret_key || !isValidSecretKey(parsed.secret_key)) {
@@ -6262,9 +6277,17 @@ const server = createServer(async (req, res) => {
       }
 
       try {
-        const restJoinRule = parsed.join_rule || (parsed.visibility === 'private' ? 'invite' : 'open');
-        const restVisibility = parsed.visibility || (restJoinRule === 'invite' ? 'private' : 'public');
+        // A group whose posts live in the owner's TinyCloud space is always invite-only
+        const onTinyCloud = parsed.storage === 'tinycloud';
+        if (onTinyCloud && !groupStore) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Groups stored on TinyCloud are not enabled on this server.' }));
+          return;
+        }
+        const restJoinRule = onTinyCloud ? 'invite' : parsed.join_rule || (parsed.visibility === 'private' ? 'invite' : 'open');
+        const restVisibility = onTinyCloud ? 'private' : parsed.visibility || (restJoinRule === 'invite' ? 'private' : 'public');
         const channel = await storage.createChannel({
+          ...(onTinyCloud ? { store: { kind: 'tinycloud' as const, prefix: groupPrefix(parsed.id) } } : {}),
           id: parsed.id,
           name: parsed.name,
           description: parsed.description,
@@ -6688,7 +6711,16 @@ const server = createServer(async (req, res) => {
       const hasViewerKey = !!viewerKey && isValidSecretKey(viewerKey);
       const viewerPseudonym = hasViewerKey ? derivePseudonym(viewerKey!) : undefined;
       const viewerHandle = hasViewerKey ? (await storage.getUserByKeyHash(hashSecretKey(viewerKey!)))?.handle : undefined;
-      const entries = (await storage.getChannelEntries(channelId, limit))
+      let channelEntries: JournalEntry[];
+      try {
+        channelEntries = await storage.getChannelEntries(channelId, limit);
+      } catch (err) {
+        if (!(err instanceof GroupStoreRevokedError)) throw err;
+        res.writeHead(410);
+        res.end(JSON.stringify({ error: err.message, revoked: true }));
+        return;
+      }
+      const entries = channelEntries
         .filter(e => !isHiddenWhilePending(e.id, isEntryAuthor(e, viewerPseudonym, viewerHandle)));
       res.writeHead(200);
       res.end(JSON.stringify({ entries }));
