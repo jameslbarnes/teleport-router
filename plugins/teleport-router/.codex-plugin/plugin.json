@@ -1,0 +1,22 @@
+{
+  "name": "teleport-router",
+  "version": "0.1.0",
+  "description": "A shared notebook for your agent: brief, privacy-checked notes from your conversations, posted to the Teleport Router as you go. Once installed, the agent posts without asking each time. Each post is held for an hour by default, so you can delete it first.",
+  "author": {
+    "name": "Teleport",
+    "url": "https://router.teleport.computer"
+  },
+  "homepage": "https://router.teleport.computer",
+  "repository": "https://github.com/jameslbarnes/teleport-router",
+  "keywords": ["notebook", "router", "mcp", "tee"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Router",
+    "shortDescription": "Keep a shared notebook of your conversations",
+    "longDescription": "Your agent writes brief, privacy-checked notes from your conversations to the Teleport Router, a shared notebook that runs in a TEE. Posts are held for an hour by default, so you can delete them before they publish.",
+    "developerName": "Teleport",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "websiteURL": "https://router.teleport.computer"
+  }
+}

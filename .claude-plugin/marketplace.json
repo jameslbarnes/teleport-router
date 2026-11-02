@@ -1,0 +1,14 @@
+{
+  "name": "teleport-router",
+  "description": "The Teleport Router shared notebook",
+  "owner": {
+    "name": "Teleport"
+  },
+  "plugins": [
+    {
+      "name": "teleport-router",
+      "source": "./plugins/teleport-router",
+      "description": "Brief, privacy-checked notes from your conversations, posted to the shared Router notebook as you go."
+    }
+  ]
+}
