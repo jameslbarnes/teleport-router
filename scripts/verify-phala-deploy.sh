@@ -19,7 +19,8 @@ status_file="$(mktemp)"
 router_health_file="$(mktemp)"
 hermes_health_file="$(mktemp)"
 bridge_log_file="$(mktemp)"
-trap 'rm -f "$metadata_file" "$containers_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file"' EXIT
+bridge_err_file="$(mktemp)"
+trap 'rm -f "$metadata_file" "$containers_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file" "$bridge_err_file"' EXIT
 
 # The TEE's own report on port 8090 is the first choice. Phala closed public 8090
 # on CVMs still running unpatched OS images after the October 2026 guest-agent
@@ -45,10 +46,11 @@ fetch_containers() {
   phala api "/cvms/${PHALA_APP_ID}/composition" >"$containers_file" 2>/dev/null
 }
 
-# Bridge logs are read with the API key, because public logs are off.
+# Bridge logs are read with the API key, because public logs are off. The CLI's
+# error (never log content) is kept so a failure can be explained.
 fetch_bridge_logs() {
-  phala logs "$BRIDGE_CONTAINER" --cvm-id "$PHALA_APP_ID" -n "${BRIDGE_LOG_TAIL:-1000}" -t >"$bridge_log_file" 2>/dev/null ||
-    phala logs shape-matrix-bridge --cvm-id "$PHALA_APP_ID" -n "${BRIDGE_LOG_TAIL:-1000}" -t >"$bridge_log_file" 2>/dev/null
+  phala logs "$BRIDGE_CONTAINER" --cvm-id "$PHALA_APP_ID" -n "${BRIDGE_LOG_TAIL:-1000}" -t >"$bridge_log_file" 2>"$bridge_err_file" ||
+    phala logs shape-matrix-bridge --cvm-id "$PHALA_APP_ID" -n "${BRIDGE_LOG_TAIL:-1000}" -t >"$bridge_log_file" 2>>"$bridge_err_file"
 }
 
 deadline=$((SECONDS + VERIFY_TIMEOUT_SECONDS))
@@ -141,7 +143,10 @@ while [ "$SECONDS" -lt "$deadline" ]; do
           echo "Shape Matrix bridge logs do not yet show private Router auth and Matrix initial sync"
         fi
       else
-        echo "Shape Matrix bridge logs are not reachable yet"
+        # With public logs off, the CLI may not reach them. The Shape Matrix
+        # smoke step that follows tests the bridge end to end instead.
+        bridge_ok=1
+        echo "Warning: Shape Matrix bridge logs are not readable ($(head -n1 "$bridge_err_file" | cut -c1-160)); relying on the smoke test"
       fi
     fi
   else
