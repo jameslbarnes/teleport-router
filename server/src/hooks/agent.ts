@@ -518,7 +518,8 @@ async function onEntryPublished(ctx: HookContext): Promise<void> {
   }
 
   const authorDisplay = entry.handle ? `@${entry.handle}` : entry.pseudonym;
-  console.log(`[Agent] Entry published by ${authorDisplay}: ${entry.content.substring(0, 80)}...`);
+  // Logs are not private: log the entry ID and size, never its text or author.
+  console.log(`[Agent] Entry ${entry.id} published (${entry.content.length} chars)`);
 
   const anthropic = getAnthropic();
 
@@ -574,7 +575,7 @@ async function onEntryPublished(ctx: HookContext): Promise<void> {
         }
       } else if (evaluation.route) {
         const content = evaluation.hook || entry.content;
-        console.log(`[Agent] Routing to ${platform.name}: ${content.substring(0, 80)}...`);
+        console.log(`[Agent] Routing entry ${entry.id} to ${platform.name} (${content.length} chars)`);
       }
     } catch (err) {
       console.error(`[Agent] Failed to route to ${platform.name}:`, err);
@@ -586,7 +587,7 @@ async function onEntryPublished(ctx: HookContext): Promise<void> {
     try {
       const candidates = await detectSparks(entry, storage, evaluationKeywords);
       if (candidates.length > 0) {
-        console.log(`[Agent] ${candidates.length} spark candidates for ${authorDisplay}`);
+        console.log(`[Agent] ${candidates.length} spark candidates for entry ${entry.id}`);
 
         // Evaluate top candidates
         for (const candidate of candidates.slice(0, 3)) {
@@ -692,7 +693,7 @@ async function onPlatformMention(ctx: HookContext): Promise<void> {
   const platform = platforms.find(p => p.name === platformName);
   if (!platform) return;
 
-  console.log(`[Agent] ${is_dm ? 'DM' : 'Mention'} on ${platformName} by ${sender_id || 'unknown'}: ${text.substring(0, 80)}...`);
+  console.log(`[Agent] ${is_dm ? 'DM' : 'Mention'} on ${platformName} (${text.length} chars)`);
 
   // Extract the query (remove @mentions, slashes, etc.)
   const query = text.replace(/@\w+/g, '').trim().toLowerCase();

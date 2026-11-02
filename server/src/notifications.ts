@@ -541,7 +541,7 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
           subject,
           html,
         });
-        console.log(`[Digest] Test digest sent to @${handle} (${user.email})`);
+        console.log(`[Digest] Test digest sent to @${handle}`);
       } else {
         console.log(`[Digest] Test digest generated for @${handle} (not sent - no verified email or no email client)`);
       }
@@ -574,10 +574,10 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
           html: renderVerificationEmail(handle, verificationToken),
         });
 
-        console.log(`[Verify] Verification email sent to ${email} for @${handle}`);
+        console.log(`[Verify] Verification email sent for @${handle}`);
         return true;
       } catch (err: any) {
-        console.error(`[Verify] Failed to send verification email to ${email}`);
+        console.error(`[Verify] Failed to send verification email for @${handle}`);
         console.error(`[Verify] From: ${fromEmail}`);
         console.error(`[Verify] Error:`, err?.response?.body || err?.message || err);
         return false;

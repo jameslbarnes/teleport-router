@@ -97,7 +97,7 @@ export class Writer {
       );
 
       this.lastWritebackTime = now;
-      console.log(`[Telegram/Writer] Wrote entry ${entry.id}: "${summary.slice(0, 80)}..."`);
+      console.log(`[Telegram/Writer] Wrote entry ${entry.id} (${summary.length} chars)`);
       return summary;
     } catch (err) {
       console.error('[Telegram/Writer] Write-back failed:', err);

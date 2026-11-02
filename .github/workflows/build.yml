@@ -267,14 +267,16 @@ jobs:
         run: SHAPE_COMPOSE_PULL_IMAGE=1 node scripts/shape-compose-boundary-check.mjs --check-image docker-compose.deploy.yml
 
       - name: Deploy to Phala Cloud
+        id: phala_deploy
         run: |
           set -euo pipefail
           # Compose-only deploy — encrypted env vars are set in Phala dashboard
           # and persist across deploys. CI only updates the image tag.
+          # --no-public-logs: container logs stay private (the CLI defaults to public).
           for attempt in {1..20}; do
             echo "Phala deploy attempt ${attempt}/20"
             set +e
-            phala deploy --wait --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml -e /tmp/phala.env 2>&1 | tee /tmp/phala-deploy.log
+            phala deploy --wait --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml -e /tmp/phala.env --no-public-logs 2>&1 | tee /tmp/phala-deploy.log
             status=${PIPESTATUS[0]}
             set -e
 
@@ -327,45 +329,21 @@ jobs:
           MATRIX_SMOKE_SIGNUP_CODE: ${{ secrets.MATRIX_REGISTRATION_TOKEN }}
         run: node scripts/shape-matrix-live-smoke.mjs
 
+      # Evidence is archived whenever the deploy itself succeeded, even if a
+      # later check failed, so the public record never silently stops.
       - name: Archive evidences
-        run: |
-          TEE_HOST="${{ secrets.PHALA_APP_ID }}-8090.dstack-pha-prod9.phala.network"
-          DATE=$(date -u +%Y-%m-%d)
-          DIR="evidences/$DATE"
-          mkdir -p "$DIR"
-
-          # Fetch attestation artifacts from TEE metadata endpoint
-          curl -sf "https://$TEE_HOST/" -o "$DIR/metadata-raw.json" || echo "Warning: could not fetch metadata"
-          curl -sf "https://$TEE_HOST/quote" -o "$DIR/quote.json" || echo "Warning: could not fetch quote"
-
-          # Redact secrets from metadata before committing
-          if [ -f "$DIR/metadata-raw.json" ]; then
-            SECRET_ENV_RE='(ANTHROPIC_API_KEY|SENDGRID_API_KEY|FIREBASE_SERVICE_ACCOUNT_BASE64|FIRECRAWL_API_KEY|CLOUDFLARE_API_TOKEN|TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_SECRET_KEY|ROUTER_SECRET_KEY|HERMES_SECRET_KEY|HERMES_AGENT_SECRET_KEY|SHAPE_ROUTER_SECRET_KEY|SHAPE_MATRIX_AGENT_SECRET|SHAPE_MATRIX_SERVICE_KEY|MATRIX_SERVER_URL|MATRIX_HOMESERVER|MATRIX_SERVER_NAME|MATRIX_BOT_SECRET_KEY|MATRIX_ACCESS_TOKEN|MATRIX_USER_ID|MATRIX_DEVICE_ID|MATRIX_CRYPTO_SECRET|MATRIX_BOT_HANDLE|MATRIX_SPACE_ROOM_ID|MATRIX_REGISTRATION_TOKEN|MATRIX_SIGNUP_URL|GITHUB_TOKEN|GH_TOKEN)'
-            sed -E \
-              -e "s/(${SECRET_ENV_RE}=)[^\",\\\\[:space:]]*/\\1[REDACTED]/g" \
-              -e "s/(\"${SECRET_ENV_RE}\"[[:space:]]*:[[:space:]]*\")[^\"]*/\\1[REDACTED]/g" \
-              -e "s/(\\\\\"${SECRET_ENV_RE}\\\\\"[[:space:]]*:[[:space:]]*\\\\\")[^\\\\\"]*/\\1[REDACTED]/g" \
-              -e "s/(&#34;${SECRET_ENV_RE}&#34;[[:space:]]*:[[:space:]]*&#34;)[^&]*/\\1[REDACTED]/g" \
-              "$DIR/metadata-raw.json" > "$DIR/metadata.json"
-            rm "$DIR/metadata-raw.json"
-          fi
-
-          # Record deployment context
-          cat > "$DIR/deploy-info.json" <<EOF
-          {
-          "git_sha": "${{ github.sha }}",
-          "git_sha_short": "$(echo ${{ github.sha }} | cut -c1-7)",
-          "image_digest": "${{ needs.build.outputs.digest }}",
-          "agent_image_digest": "${{ needs.build.outputs.agent_digest }}",
-          "app_id": "${{ secrets.PHALA_APP_ID }}",
-          "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-          "workflow_run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          }
-          EOF
-
-          ls -la "$DIR"
+        if: always() && steps.phala_deploy.outcome == 'success'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+          GIT_SHA: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          AGENT_IMAGE_DIGEST: ${{ needs.build.outputs.agent_digest }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/archive-tee-evidence.sh
 
       - name: Commit evidences to repo
+        if: always() && steps.phala_deploy.outcome == 'success'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
