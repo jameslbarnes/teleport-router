@@ -2694,6 +2694,8 @@
                 const channel = await channelRes.json();
                 const entriesData = await entriesRes.json();
                 const entries = entriesData.entries || [];
+                // e.g. a group whose owner revoked the Router's access: say so instead of looking empty
+                const feedError = entriesRes.ok ? null : (entriesData.error || 'Could not load this channel\'s posts.');
 
                 // Check if current user is a member
                 let isMember = false;
@@ -2745,7 +2747,9 @@
                     </div>
                 `;
 
-                if (entries.length === 0) {
+                if (feedError) {
+                    html += `<div class="empty-state">${escapeHtml(feedError)}</div>`;
+                } else if (entries.length === 0) {
                     html += `<div class="empty-state">No entries in this channel yet.</div>`;
                 } else {
                     html += entries.map(entry => renderEntry(entry)).join('');
