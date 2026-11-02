@@ -37,6 +37,8 @@ export interface JournalEntry {
   // Moderation state for staged entries only. Must not persist to published storage.
   moderationHeld?: boolean;
   moderationHoldReason?: string;
+  moderationHeldBy?: string;   // 'automated' for automated review, else the moderator's handle
+  scheduledPublishAt?: number; // publishAt before the hold; a release never publishes earlier
 }
 
 export interface Summary {
@@ -1710,8 +1712,8 @@ export class StagedStorage implements Storage {
     // Publish ready entries
     for (const [id, entry] of this.pending) {
       if (entry.publishAt && entry.publishAt <= now) {
-        // Move to Firestore without publishAt field
-        const { publishAt, moderationHeld, moderationHoldReason, ...publishedEntry } = entry;
+        // Move to Firestore without staging-only fields
+        const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
         const saved = await this.published.addEntry(publishedEntry);
         this.pending.delete(id);
 
@@ -1846,8 +1848,8 @@ export class StagedStorage implements Storage {
     const entry = this.pending.get(id);
     if (!entry) return null;
 
-    // Move to Firestore without publishAt field
-    const { publishAt, moderationHeld, moderationHoldReason, ...publishedEntry } = entry;
+    // Move to Firestore without staging-only fields
+    const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
     const saved = await this.published.addEntry(publishedEntry);
     this.pending.delete(id);
 
@@ -1898,15 +1900,37 @@ export class StagedStorage implements Storage {
   }
 
   /**
-   * Mark a pending entry as held by moderation.
+   * Mark a pending entry as held by moderation. `heldBy` is 'automated' for
+   * automated review, otherwise the moderator's handle. The original publish time
+   * is kept so a release can't publish the entry before the author's window ends.
    */
-  holdEntry(id: string, reason: string, holdUntil: number): boolean {
+  holdEntry(id: string, reason: string, holdUntil: number, heldBy?: string): boolean {
     const entry = this.pending.get(id);
     if (!entry) return false;
+    entry.scheduledPublishAt ??= entry.publishAt;
     entry.publishAt = holdUntil;
     entry.moderationHeld = true;
     entry.moderationHoldReason = reason;
+    entry.moderationHeldBy = heldBy;
     return true;
+  }
+
+  /**
+   * Lift a moderation hold. The entry goes back to its original schedule: it
+   * publishes then, or at the next publish tick if that time has passed.
+   * Returns the new publish time, or null if the entry isn't pending.
+   */
+  releaseHold(id: string): number | null {
+    const entry = this.pending.get(id);
+    if (!entry) return null;
+    // Holds from before scheduledPublishAt existed: assume the default staging window
+    const scheduled = entry.scheduledPublishAt ?? entry.timestamp + this.publishDelayMs;
+    entry.publishAt = Math.max(scheduled, Date.now());
+    delete entry.moderationHeld;
+    delete entry.moderationHoldReason;
+    delete entry.moderationHeldBy;
+    delete entry.scheduledPublishAt;
+    return entry.publishAt;
   }
 
   /**
@@ -1989,26 +2013,9 @@ export class StagedStorage implements Storage {
   }
 
   async getEntriesAddressedTo(handle: string, email?: string, limit = 50): Promise<JournalEntry[]> {
-    // Get from published storage
-    const published = await this.published.getEntriesAddressedTo(handle, email, limit);
-
-    // Also include pending entries addressed to this user
-    const handlePattern = `@${handle}`;
-    const pendingMatches: JournalEntry[] = [];
-    for (const entry of this.pending.values()) {
-      if (entry.to && entry.to.some(dest =>
-        dest === handlePattern ||
-        dest === handle ||
-        (email && dest.toLowerCase() === email.toLowerCase())
-      )) {
-        pendingMatches.push(entry);
-      }
-    }
-
-    // Merge, sort, and limit
-    return [...pendingMatches, ...published]
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
+    // Published entries only. A waiting entry is private to its author until it
+    // publishes, which is also when recipients are notified.
+    return this.published.getEntriesAddressedTo(handle, email, limit);
   }
 
   async getRepliesTo(entryId: string, limit = 50): Promise<JournalEntry[]> {

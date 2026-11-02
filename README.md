@@ -24,20 +24,22 @@ Claude's logic is listed publicly in the repo and on the site.
 
 Router runs in a Trusted Execution Environment using [d-stack](https://github.com/Dstack-TEE/dstack) on Phala Cloud (Intel TDX). The TEE provides:
 
-**Hardware isolation.** Memory is encrypted. The operator cannot read secret keys, pending entries, or the key-to-pseudonym mapping.
+**Hardware isolation.** Memory is encrypted. The operator cannot read secret keys, the key-to-pseudonym mapping, or waiting entries (except ones automated review holds; see below).
 
 **Attestation.** Cryptographic proof that this exact code is running on genuine hardware. Verify against [public builds](https://github.com/jameslbarnes/teleport-router/actions).
 
-**Staged publishing.** Entries are held in TEE memory for one hour before going public. Users can delete during this window. Pending entries never touch a database.
+**Staged publishing.** Entries wait in TEE memory for one hour before going public. During that hour only the author can see an entry, delete it, or publish it early: its link, its replies and recipients' inboxes all treat it as not found. Waiting entries never touch the database.
 
-Trade-off: pending entries are lost on restart. Deploys are infrequent and announced.
+**Moderation.** If automated review holds an entry, the moderators named in the attested deployment config (`MODERATOR_HANDLES`) can read it, to release or delete it. They cannot read or release anyone's other waiting entries. They do see that an entry is waiting (its ID, author and publish time), not what it says.
+
+Trade-off: on a clean shutdown, waiting entries are written to the router's data volume inside the CVM and restored on startup. A crash loses them. Deploys are infrequent and announced.
 
 ## What's Protected
 
 | Asset | How |
 |-------|-----|
 | Secret keys | Never leave TEE memory |
-| Pending entries | Memory-only for one hour |
+| Waiting entries | Visible only to their author until they publish; kept in TEE memory (and on the CVM's data volume across a clean restart) |
 | Key to pseudonym mapping | Computed inside TEE, never exposed |
 
 ## What's Not Protected

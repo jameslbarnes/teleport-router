@@ -9,6 +9,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { spawn, type ChildProcess } from 'child_process';
+import { createServer, type Server } from 'http';
+import type { AddressInfo } from 'net';
 import { generateSecretKey } from './identity.js';
 
 const TEST_PORT = 9876 + Math.floor(Math.random() * 1000);
@@ -22,6 +24,10 @@ let modClient: Client;
 let modTransport: SSEClientTransport;
 let regularClient: Client;
 let regularTransport: SSEClientTransport;
+
+// Stand-in for the automated moderator service: HOLDs entries containing the marker.
+const AUTO_HOLD_MARKER = '[auto-hold-test]';
+let moderationServer: Server;
 
 async function callTool(client: Client, name: string, args: Record<string, any> = {}): Promise<string> {
   const result = await client.callTool({ name, arguments: args });
@@ -51,6 +57,19 @@ async function connectClient(port: number, secretKey: string): Promise<{ client:
 
 describe('MCP Tool Integration Tests', () => {
   beforeAll(async () => {
+    moderationServer = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        let entry = '';
+        try { entry = JSON.parse(body).entry || ''; } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ verdict: entry.includes(AUTO_HOLD_MARKER) ? 'HOLD: flagged by the test moderator' : 'PASS' }));
+      });
+    });
+    await new Promise<void>((resolve) => moderationServer.listen(0, '127.0.0.1', () => resolve()));
+    const moderationPort = (moderationServer.address() as AddressInfo).port;
+
     serverProcess = spawn('npx', ['tsx', 'src/http.ts'], {
       cwd: process.cwd(),
       env: {
@@ -59,6 +78,7 @@ describe('MCP Tool Integration Tests', () => {
         STAGING_DELAY_MS: '3600000',
         STAGED_STORAGE: 'memory',
         MODERATOR_HANDLES: MODERATOR_HANDLE,
+        MODERATOR_URL: `http://127.0.0.1:${moderationPort}`,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: true,
@@ -103,6 +123,7 @@ describe('MCP Tool Integration Tests', () => {
         setTimeout(resolve, 3000);
       });
     }
+    await new Promise<void>((resolve) => moderationServer?.close(() => resolve()) ?? resolve());
   });
 
   // ── Tool Discovery ──────────────────────────────────────
@@ -261,10 +282,31 @@ describe('MCP Tool Integration Tests', () => {
   // ── Content Moderation ──────────────────────────────────
 
   describe('router_review_staged', () => {
-    it('lists pending entries', async () => {
+    it("lists the caller's own waiting entries", async () => {
+      const wr = await callTool(modClient, 'router_write_entry', {
+        sensitivity_check: 'No sensitive content. I, Claude, certify I am completing this check.',
+        client: 'code',
+        entry: 'Moderator own waiting entry',
+      });
+      const ownId = wr.match(/Entry ID: (\S+)/)![1];
+
       const text = await callTool(modClient, 'router_review_staged', {});
       expect(text).toContain('pending entries');
       expect(text).toContain('publishes in');
+      expect(text).toContain(ownId);
+    });
+
+    it("does not show moderators other people's ordinary waiting entries", async () => {
+      const wr = await callTool(regularClient, 'router_write_entry', {
+        sensitivity_check: 'No sensitive content. I, Claude, certify I am completing this check.',
+        client: 'code',
+        entry: 'Regular waiting entry that review must not reveal',
+      });
+      const entryId = wr.match(/Entry ID: (\S+)/)![1];
+
+      const text = await callTool(modClient, 'router_review_staged', {});
+      expect(text).not.toContain(entryId);
+      expect(text).not.toContain('must not reveal');
     });
   });
 
@@ -350,8 +392,9 @@ describe('MCP Tool Integration Tests', () => {
 
       await callTool(modClient, 'router_hold_entry', { entry_id: entryId, reason: 'test' });
       const release = await callTool(modClient, 'router_release_entry', { entry_id: entryId });
-      expect(release).toContain('released and published');
+      expect(release).toContain('back on its original schedule');
 
+      // No longer held, and not the moderator's own: gone from their review
       const review = await callTool(modClient, 'router_review_staged', {});
       expect(review).not.toContain(entryId);
     });
@@ -365,7 +408,7 @@ describe('MCP Tool Integration Tests', () => {
   // ── Full Lifecycle ──────────────────────────────────────
 
   describe('Full moderation lifecycle', () => {
-    it('write → stage event → review → hold → release', async () => {
+    it('write → stage event → hidden from review → hold → review → release', async () => {
       // 1. Write
       const wr = await callTool(regularClient, 'router_write_entry', {
         sensitivity_check: 'No sensitive content. I, Claude, certify I am completing this check.',
@@ -379,22 +422,158 @@ describe('MCP Tool Integration Tests', () => {
       expect(events).toContain('entry_staged');
       expect(events).not.toContain('TEE attestation'); // content not leaked in events
 
-      // 3. Review
+      // 3. Review: an ordinary waiting entry stays private to its author
       const staged = await callTool(modClient, 'router_review_staged', {});
-      expect(staged).toContain(entryId);
+      expect(staged).not.toContain(entryId);
 
-      // 4. Hold
+      // 4. Hold: held entries are what moderators review
       await callTool(modClient, 'router_hold_entry', { entry_id: entryId, reason: 'review' });
       const held = await callTool(modClient, 'router_review_staged', {});
       expect(held).toContain('HELD');
+      expect(held).toContain(entryId);
 
-      // 5. Release
+      // 5. Release: back on the original schedule, not published early
       const release = await callTool(modClient, 'router_release_entry', { entry_id: entryId });
-      expect(release).toContain('released and published');
+      expect(release).toContain('back on its original schedule');
 
-      // 6. Gone from staging
+      // 6. No longer held, so gone from the moderator's review
       const final = await callTool(modClient, 'router_review_staged', {});
       expect(final).not.toContain(entryId);
+    });
+  });
+
+  // ── Waiting posts stay private ──────────────────────────
+
+  describe('Waiting posts stay private to their author', () => {
+    const SENSITIVITY = 'No sensitive content. I, Claude, certify I am completing this check.';
+    // A valid key that was never registered: no handle, like REGULAR_KEY.
+    // Guards against "no handle" === "no handle" counting as authorship.
+    const OTHER_KEY = generateSecretKey();
+    const RECIPIENT_KEY = generateSecretKey();
+    const RECIPIENT_HANDLE = `rcpt${Date.now().toString(36).slice(-6)}`;
+    const base = () => `http://localhost:${TEST_PORT}`;
+    let otherClient: Client;
+    let otherTransport: SSEClientTransport;
+
+    async function write(client: Client, entry: string, extra: Record<string, any> = {}): Promise<string> {
+      const text = await callTool(client, 'router_write_entry', { sensitivity_check: SENSITIVITY, client: 'code', entry, ...extra });
+      const id = text.match(/Entry ID: (\S+)/)?.[1];
+      if (!id) throw new Error(`write failed: ${text}`);
+      return id;
+    }
+
+    async function publish(entryId: string, key: string): Promise<string> {
+      const res = await fetch(`${base()}/api/entries/${entryId}/publish?key=${key}`, { method: 'POST' });
+      expect(res.status).toBe(200);
+      return (await res.json()).entry.id;
+    }
+
+    beforeAll(async () => {
+      const other = await connectClient(TEST_PORT, OTHER_KEY);
+      otherClient = other.client;
+      otherTransport = other.transport;
+
+      const reg = await fetch(`${base()}/api/identity/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret_key: RECIPIENT_KEY, handle: RECIPIENT_HANDLE }),
+      });
+      if (!reg.ok) throw new Error(`Register failed: ${await reg.text()}`);
+    });
+
+    afterAll(async () => {
+      try { await otherTransport?.close(); } catch {}
+    });
+
+    it('post page: hidden from anonymous viewers, other keys and moderators; shown to the author', async () => {
+      const entryId = await write(regularClient, 'Waiting permalink privacy check');
+
+      expect((await fetch(`${base()}/api/entry/${entryId}`)).status).toBe(404);
+      expect((await fetch(`${base()}/api/entry/${entryId}?key=${OTHER_KEY}`)).status).toBe(404);
+      expect((await fetch(`${base()}/api/entry/${entryId}?key=${MODERATOR_KEY}`)).status).toBe(404);
+
+      const own = await fetch(`${base()}/api/entry/${entryId}?key=${REGULAR_KEY}`);
+      expect(own.status).toBe(200);
+      expect((await own.json()).content).toBe('Waiting permalink privacy check');
+    });
+
+    it('post page: visible to everyone once it publishes', async () => {
+      const entryId = await write(regularClient, 'Published permalink check');
+      const publishedId = await publish(entryId, REGULAR_KEY);
+
+      const res = await fetch(`${base()}/api/entry/${publishedId}`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).content).toBe('Published permalink check');
+    });
+
+    it('router_get_entry: only the author can open a waiting post', async () => {
+      const entryId = await write(regularClient, 'Waiting get_entry privacy check');
+
+      expect(await callTool(modClient, 'router_get_entry', { entry_id: entryId })).toContain('Entry not found');
+      expect(await callTool(otherClient, 'router_get_entry', { entry_id: entryId })).toContain('Entry not found');
+      expect(await callTool(regularClient, 'router_get_entry', { entry_id: entryId })).toContain('Waiting get_entry privacy check');
+    });
+
+    it('replies: a waiting reply is shown only to its author', async () => {
+      const parentId = await publish(await write(regularClient, 'Published parent for reply privacy'), REGULAR_KEY);
+      const replyId = await write(modClient, 'Waiting reply privacy check', { in_reply_to: parentId });
+
+      const anon = await (await fetch(`${base()}/api/entry/${parentId}/replies`)).json();
+      expect(anon.replies.map((r: any) => r.id)).not.toContain(replyId);
+      const other = await (await fetch(`${base()}/api/entry/${parentId}/replies?key=${OTHER_KEY}`)).json();
+      expect(other.replies.map((r: any) => r.id)).not.toContain(replyId);
+
+      const own = await (await fetch(`${base()}/api/entry/${parentId}/replies?key=${MODERATOR_KEY}`)).json();
+      expect(own.replies.map((r: any) => r.id)).toContain(replyId);
+    });
+
+    it("replies: a waiting parent's thread is not found for anyone but its author", async () => {
+      const parentId = await write(regularClient, 'Waiting parent for thread privacy');
+
+      expect((await fetch(`${base()}/api/entry/${parentId}/replies`)).status).toBe(404);
+      expect((await fetch(`${base()}/api/entry/${parentId}/replies?key=${OTHER_KEY}`)).status).toBe(404);
+      expect((await fetch(`${base()}/api/entry/${parentId}/replies?key=${REGULAR_KEY}`)).status).toBe(200);
+    });
+
+    it('inbox: an addressed post reaches the recipient only when it publishes', async () => {
+      const entryId = await write(modClient, 'Addressed waiting entry for inbox privacy', { to: [`@${RECIPIENT_HANDLE}`] });
+      const inbox = async () => (await (await fetch(`${base()}/api/inbox?key=${RECIPIENT_KEY}`)).json()).received
+        .map((e: any) => e.content);
+
+      expect(await inbox()).not.toContain('Addressed waiting entry for inbox privacy');
+
+      await publish(entryId, MODERATOR_KEY);
+      expect(await inbox()).toContain('Addressed waiting entry for inbox privacy');
+    });
+
+    it('review: a manual hold does not reveal the content to moderators', async () => {
+      const entryId = await write(regularClient, 'Manually held text that review must hide');
+      expect(await callTool(modClient, 'router_hold_entry', { entry_id: entryId, reason: 'test' })).toContain('held indefinitely');
+
+      const review = await callTool(modClient, 'router_review_staged', {});
+      expect(review).toContain(entryId);
+      expect(review).toContain('content hidden');
+      expect(review).not.toContain('review must hide');
+    });
+
+    it('review: moderators can read an automated hold, and releasing it keeps the author window', async () => {
+      const entryId = await write(regularClient, `${AUTO_HOLD_MARKER} automated hold check`);
+
+      const review = await callTool(modClient, 'router_review_staged', {});
+      expect(review).toContain(entryId);
+      expect(review).toContain('automated hold check');
+
+      expect(await callTool(modClient, 'router_release_entry', { entry_id: entryId })).toContain('back on its original schedule');
+      expect((await fetch(`${base()}/api/entry/${entryId}`)).status).toBe(404); // still waiting
+      expect(await callTool(regularClient, 'router_delete_entry', { entry_id: entryId })).toContain('will not be published');
+    });
+
+    it("moderators cannot release someone else's ordinary waiting post", async () => {
+      const entryId = await write(regularClient, 'Waiting entry a moderator must not force-publish');
+
+      expect(await callTool(modClient, 'router_release_entry', { entry_id: entryId })).toContain('not held');
+      expect((await fetch(`${base()}/api/entry/${entryId}`)).status).toBe(404); // still waiting
+      expect(await callTool(regularClient, 'router_get_entry', { entry_id: entryId })).toContain('must not force-publish');
     });
   });
 });
