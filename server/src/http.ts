@@ -3261,7 +3261,7 @@ function createMCPServer(secretKey: string) {
           }
 
           try {
-            await storage.useInvite(inviteToken);
+            await storage.useInvite(inviteToken, { channelId, handle: currentUser.handle });
           } catch (err: any) {
             return {
               content: [{ type: 'text' as const, text: `Invalid invite: ${err.message}` }],
@@ -3399,6 +3399,7 @@ function createMCPServer(secretKey: string) {
           createdBy: currentUser.handle,
           createdAt: Date.now(),
           maxUses: 1,
+          forHandle: targetHandle,
           uses: 0,
         };
         await storage.createInvite(invite);
@@ -6414,7 +6415,7 @@ const server = createServer(async (req, res) => {
           return;
         }
         try {
-          await storage.useInvite(parsed.invite_token);
+          await storage.useInvite(parsed.invite_token, { channelId, handle: user.handle });
         } catch (err: any) {
           res.writeHead(403);
           res.end(JSON.stringify({ error: err.message }));
@@ -6625,6 +6626,7 @@ const server = createServer(async (req, res) => {
         createdBy: user.handle,
         createdAt: Date.now(),
         maxUses: 1,
+        forHandle: targetHandle,
         uses: 0,
       };
       await storage.createInvite(invite);

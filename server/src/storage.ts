@@ -192,6 +192,32 @@ export interface ChannelInvite {
   expiresAt?: number;
   maxUses?: number;
   uses: number;
+  forHandle?: string;            // personal invite: only this handle may use it
+}
+
+/** Who is using an invite, and for which channel. Checked before the invite is consumed. */
+export interface InviteUse {
+  channelId: string;
+  handle: string;
+}
+
+/**
+ * An invite opens only the channel it was made for, and a personal invite only
+ * for its recipient. Throws before anything is consumed.
+ */
+export function checkInviteUse(invite: ChannelInvite, use: InviteUse): void {
+  if (invite.expiresAt && Date.now() > invite.expiresAt) {
+    throw new Error('Invite has expired.');
+  }
+  if (invite.maxUses && invite.uses >= invite.maxUses) {
+    throw new Error('Invite has reached maximum uses.');
+  }
+  if (invite.channelId !== use.channelId) {
+    throw new Error('Invite is not valid for this channel.');
+  }
+  if (invite.forHandle && invite.forHandle.toLowerCase() !== use.handle.toLowerCase()) {
+    throw new Error('Invite is not valid for this account.');
+  }
 }
 
 /** Validate channel ID: lowercase alphanumeric + hyphens, 2-30 chars, no leading/trailing hyphens */
@@ -388,7 +414,7 @@ export interface Storage {
   getInvite(token: string): Promise<ChannelInvite | null>;
 
   /** Use an invite (increment uses, return the channel) */
-  useInvite(token: string): Promise<Channel>;
+  useInvite(token: string, use: InviteUse): Promise<Channel>;
 
   /** Get entries for a channel */
   getChannelEntries(channelId: string, limit?: number): Promise<JournalEntry[]>;
@@ -731,15 +757,10 @@ export class MemoryStorage implements Storage {
     return this.invites.get(token) || null;
   }
 
-  async useInvite(token: string): Promise<Channel> {
+  async useInvite(token: string, use: InviteUse): Promise<Channel> {
     const invite = this.invites.get(token);
     if (!invite) throw new Error('Invite not found.');
-    if (invite.expiresAt && Date.now() > invite.expiresAt) {
-      throw new Error('Invite has expired.');
-    }
-    if (invite.maxUses && invite.uses >= invite.maxUses) {
-      throw new Error('Invite has reached maximum uses.');
-    }
+    checkInviteUse(invite, use);
     invite.uses++;
     const channel = this.channels.get(invite.channelId);
     if (!channel) throw new Error(`Channel "${invite.channelId}" not found.`);
@@ -1595,18 +1616,17 @@ export class FirestoreStorage implements Storage {
     return { token: doc.id, ...doc.data() } as ChannelInvite;
   }
 
-  async useInvite(token: string): Promise<Channel> {
+  async useInvite(token: string, use: InviteUse): Promise<Channel> {
     const inviteRef = this.db.collection(this.invitesCollection).doc(token);
-    const inviteDoc = await inviteRef.get();
-    if (!inviteDoc.exists) throw new Error('Invite not found.');
-    const invite = { token: inviteDoc.id, ...inviteDoc.data() } as ChannelInvite;
-    if (invite.expiresAt && Date.now() > invite.expiresAt) {
-      throw new Error('Invite has expired.');
-    }
-    if (invite.maxUses && invite.uses >= invite.maxUses) {
-      throw new Error('Invite has reached maximum uses.');
-    }
-    await inviteRef.update({ uses: invite.uses + 1 });
+    // Check and count in one transaction, so concurrent joins can't overrun maxUses
+    const invite = await this.db.runTransaction(async (tx) => {
+      const inviteDoc = await tx.get(inviteRef);
+      if (!inviteDoc.exists) throw new Error('Invite not found.');
+      const found = { token: inviteDoc.id, ...inviteDoc.data() } as ChannelInvite;
+      checkInviteUse(found, use);
+      tx.update(inviteRef, { uses: found.uses + 1 });
+      return found;
+    });
     const channel = await this.getChannel(invite.channelId);
     if (!channel) throw new Error(`Channel "${invite.channelId}" not found.`);
     return channel;
@@ -2205,8 +2225,8 @@ export class StagedStorage implements Storage {
     return this.published.getInvite(token);
   }
 
-  async useInvite(token: string): Promise<Channel> {
-    return this.published.useInvite(token);
+  async useInvite(token: string, use: InviteUse): Promise<Channel> {
+    return this.published.useInvite(token, use);
   }
 
   async getChannelEntries(channelId: string, limit = 50): Promise<JournalEntry[]> {

@@ -712,7 +712,7 @@ describe('MemoryStorage Channels', () => {
       };
       await storage.createInvite(invite);
 
-      const channel = await storage.useInvite('use-me');
+      const channel = await storage.useInvite('use-me', { channelId: 'private-ch', handle: 'bob' });
       expect(channel.id).toBe('private-ch');
 
       const updated = await storage.getInvite('use-me');
@@ -729,7 +729,7 @@ describe('MemoryStorage Channels', () => {
         uses: 0,
       };
       await storage.createInvite(invite);
-      await expect(storage.useInvite('expired')).rejects.toThrow('expired');
+      await expect(storage.useInvite('expired', { channelId: 'private-ch', handle: 'bob' })).rejects.toThrow('expired');
     });
 
     it('should reject invite at max uses', async () => {
@@ -742,7 +742,26 @@ describe('MemoryStorage Channels', () => {
         uses: 1,
       };
       await storage.createInvite(invite);
-      await expect(storage.useInvite('maxed')).rejects.toThrow('maximum uses');
+      await expect(storage.useInvite('maxed', { channelId: 'private-ch', handle: 'bob' })).rejects.toThrow('maximum uses');
+    });
+
+    it('should refuse an invite for a different channel, without using it up', async () => {
+      await storage.createChannel(makeChannel({ id: 'other-ch', visibility: 'private' }));
+      await storage.createInvite({ token: 'for-private', channelId: 'private-ch', createdBy: 'alice', createdAt: Date.now(), maxUses: 1, uses: 0 });
+
+      await expect(storage.useInvite('for-private', { channelId: 'other-ch', handle: 'bob' })).rejects.toThrow('not valid for this channel');
+      expect((await storage.getInvite('for-private'))!.uses).toBe(0);
+
+      const channel = await storage.useInvite('for-private', { channelId: 'private-ch', handle: 'bob' });
+      expect(channel.id).toBe('private-ch');
+    });
+
+    it('should let only its recipient use a personal invite', async () => {
+      await storage.createInvite({ token: 'for-carol', channelId: 'private-ch', createdBy: 'alice', createdAt: Date.now(), maxUses: 1, uses: 0, forHandle: 'carol' });
+
+      await expect(storage.useInvite('for-carol', { channelId: 'private-ch', handle: 'bob' })).rejects.toThrow('not valid for this account');
+      expect((await storage.getInvite('for-carol'))!.uses).toBe(0);
+      await expect(storage.useInvite('for-carol', { channelId: 'private-ch', handle: 'Carol' })).resolves.toMatchObject({ id: 'private-ch' });
     });
 
     it('should return null for non-existent invite', async () => {

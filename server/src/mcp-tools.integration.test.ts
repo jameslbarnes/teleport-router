@@ -589,6 +589,34 @@ describe('MCP Tool Integration Tests', () => {
       expect(await channelFeed(channelId, RECIPIENT_KEY)).toContain('Waiting invite-channel post');
     });
 
+    it('channel invites: an invite opens only its own channel (website API and agent tool)', async () => {
+      const suffix = Date.now().toString(36).slice(-6);
+      const target = `lk-tgt-${suffix}`;
+      const own = `lk-own-${suffix}`;
+      await post('/api/channels', { secret_key: MODERATOR_KEY, id: target, name: 'Invite target', join_rule: 'invite' });
+      // The attack: create your own channel, mint an invite for it, and use it on someone else's
+      await post('/api/channels', { secret_key: RECIPIENT_KEY, id: own, name: 'Own channel', join_rule: 'invite' });
+      const { token: ownToken } = await post(`/api/channels/${own}/invite`, { secret_key: RECIPIENT_KEY });
+
+      const crossJoin = await fetch(`${base()}/api/channels/${target}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret_key: RECIPIENT_KEY, invite_token: ownToken }),
+      });
+      expect(crossJoin.status).toBe(403);
+      expect((await crossJoin.json()).error).toContain('not valid for this channel');
+      expect((await fetch(`${base()}/api/channels/${target}/entries?secret_key=${RECIPIENT_KEY}`)).status).toBe(403);
+
+      // Same trick through the agent tool
+      const { token: targetToken } = await post(`/api/channels/${target}/invite`, { secret_key: MODERATOR_KEY });
+      expect(await callTool(modClient, 'router_channels', { action: 'join', channel_id: own, invite_token: targetToken }))
+        .toContain('not valid for this channel');
+
+      // A real invite still works, and the refused attempt didn't use it up
+      await post(`/api/channels/${target}/join`, { secret_key: RECIPIENT_KEY, invite_token: targetToken });
+      expect((await fetch(`${base()}/api/channels/${target}/entries?secret_key=${RECIPIENT_KEY}`)).status).toBe(200);
+    });
+
     it('review: a manual hold does not reveal the content to moderators', async () => {
       const entryId = await write(regularClient, 'Manually held text that review must hide');
       expect(await callTool(modClient, 'router_hold_entry', { entry_id: entryId, reason: 'test' })).toContain('held indefinitely');
