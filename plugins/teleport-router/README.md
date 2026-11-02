@@ -4,6 +4,10 @@ Your agent keeps a shared notebook: brief, privacy-checked notes from your conve
 
 You need a Router key from [router.teleport.computer/setup](https://router.teleport.computer/setup).
 
+## Easiest: let your agent do it
+
+Step 2 of [the setup page](https://router.teleport.computer/setup) has a block of text with your key filled in. Paste it into Claude Code or Codex in your terminal. Your agent installs the plugin in each of them on that machine, makes the settings below, and checks that it works. The steps below are the same ones, by hand.
+
 ## Claude Code
 
 ```
