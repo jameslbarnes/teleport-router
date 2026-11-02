@@ -1,0 +1,96 @@
+name: Phala CVM maintenance
+
+# Manual checks and upgrades for the Router's Phala CVM, using the same API key
+# as deploys. This repository is public, so steps print only non-sensitive fields.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'status, upgrade-os, or archive-evidence'
+        required: true
+        type: choice
+        options:
+          - status
+          - upgrade-os
+          - archive-evidence
+        default: status
+      os_image:
+        description: 'OS image for upgrade-os'
+        required: false
+        default: 'dstack-0.5.12'
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: production-phala-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+      PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Phala CLI
+        # Same pin as deploys (see build.yml).
+        run: npm install -g phala@1.1.19
+
+      - name: Show CVM status and OS image
+        run: |
+          set -euo pipefail
+          phala api "/cvms/${PHALA_APP_ID}" -q '{status,in_progress,updated_at}'
+          echo "OS images available to this CVM (is_current marks the running one):"
+          phala api "/cvms/${PHALA_APP_ID}/available-os-images"
+
+      - name: Upgrade OS image
+        if: inputs.action == 'upgrade-os'
+        env:
+          OS_IMAGE: ${{ inputs.os_image }}
+        run: |
+          set -euo pipefail
+          echo "Requesting OS image ${OS_IMAGE} (the CVM reboots)"
+          phala api "/cvms/${PHALA_APP_ID}/os-image" -X PATCH -F "os_image_name=${OS_IMAGE}"
+          sleep 30
+          # Wait until the CVM reports running and idle again (up to 20 minutes).
+          for attempt in $(seq 1 60); do
+            state="$(phala api "/cvms/${PHALA_APP_ID}" -q '{status,in_progress}' || true)"
+            echo "attempt ${attempt}: $(echo "$state" | tr -d '\n')"
+            if echo "$state" | grep -Eiq '"status": *"running"' && echo "$state" | grep -Eq '"in_progress": *false'; then
+              echo "CVM is running again"
+              break
+            fi
+            sleep 20
+          done
+          echo "OS images after the upgrade:"
+          phala api "/cvms/${PHALA_APP_ID}/available-os-images"
+          for url in https://router.teleport.computer/health https://hermes.teleport.computer/health; do
+            curl -fsS --max-time 20 "$url" && echo " <- ${url}"
+          done
+
+      - name: Archive evidence
+        if: inputs.action == 'archive-evidence'
+        env:
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/archive-tee-evidence.sh
+
+      - name: Commit evidence
+        if: inputs.action == 'archive-evidence'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add evidences/
+          if git diff --cached --quiet; then
+            echo "No new evidence to commit"
+          else
+            git commit -m "chore: archive TEE evidences for $(date -u +%Y-%m-%d) (maintenance)"
+            git push
+          fi

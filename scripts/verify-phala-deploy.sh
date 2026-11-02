@@ -11,13 +11,45 @@ ROUTER_HEALTH_URL="${ROUTER_HEALTH_URL:-https://router.teleport.computer/health}
 HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-https://hermes.teleport.computer/health}"
 VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS:-900}"
 POLL_SECONDS="${POLL_SECONDS:-15}"
+BRIDGE_CONTAINER="${BRIDGE_CONTAINER:-dstack-shape-matrix-bridge-1}"
 
 metadata_file="$(mktemp)"
+containers_file="$(mktemp)"
 status_file="$(mktemp)"
 router_health_file="$(mktemp)"
 hermes_health_file="$(mktemp)"
 bridge_log_file="$(mktemp)"
-trap 'rm -f "$metadata_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file"' EXIT
+trap 'rm -f "$metadata_file" "$containers_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file"' EXIT
+
+# The TEE's own report on port 8090 is the first choice. Phala closed public 8090
+# on CVMs still running unpatched OS images after the October 2026 guest-agent
+# incident, so fall back to Phala's authenticated attestation API.
+fetch_metadata() {
+  if curl -fsS --max-time 30 "https://${TEE_HOST}/" >"$metadata_file" 2>/dev/null; then
+    metadata_source="public"
+    return 0
+  fi
+  if phala api "/cvms/${PHALA_APP_ID}/attestation" >"$metadata_file" 2>/dev/null; then
+    metadata_source="api"
+    return 0
+  fi
+  return 1
+}
+
+# Container status comes with the public report; otherwise ask Phala's API.
+fetch_containers() {
+  if [ "$metadata_source" = "public" ]; then
+    cp "$metadata_file" "$containers_file"
+    return 0
+  fi
+  phala api "/cvms/${PHALA_APP_ID}/composition" >"$containers_file" 2>/dev/null
+}
+
+# Bridge logs are read with the API key, because public logs are off.
+fetch_bridge_logs() {
+  phala logs "$BRIDGE_CONTAINER" --cvm-id "$PHALA_APP_ID" -n "${BRIDGE_LOG_TAIL:-1000}" -t >"$bridge_log_file" 2>/dev/null ||
+    phala logs shape-matrix-bridge --cvm-id "$PHALA_APP_ID" -n "${BRIDGE_LOG_TAIL:-1000}" -t >"$bridge_log_file" 2>/dev/null
+}
 
 deadline=$((SECONDS + VERIFY_TIMEOUT_SECONDS))
 attempt=0
@@ -37,8 +69,10 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   containers_ok=0
   bridge_ok=1
   health_ok=0
+  metadata_source=""
 
-  if curl -fsS --max-time 30 "https://${TEE_HOST}/" >"$metadata_file"; then
+  if fetch_metadata; then
+    echo "TEE metadata source: ${metadata_source}"
     if grep -Fq "GIT_SHA=${EXPECTED_GIT_SHA}" "$metadata_file" &&
       grep -Fq "${EXPECTED_IMAGE_DIGEST}" "$metadata_file" &&
       grep -Fq "${EXPECTED_AGENT_IMAGE_DIGEST}" "$metadata_file"; then
@@ -48,32 +82,37 @@ while [ "$SECONDS" -lt "$deadline" ]; do
       echo "TEE metadata does not yet contain the expected git SHA/image digests"
     fi
 
-    if grep -q "Exited (" "$metadata_file"; then
-      echo "TEE metadata still reports at least one exited container"
+    if fetch_containers; then
+      if grep -Eiq 'Exited \(|"(state|status)" *: *"exited"' "$containers_file"; then
+        echo "At least one container has exited"
+      else
+        containers_ok=1
+        echo "No exited containers"
+      fi
     else
-      containers_ok=1
-      echo "TEE metadata reports no exited containers"
+      echo "Container status is not reachable yet"
     fi
 
-    if grep -q "shape-matrix-bridge" "$metadata_file"; then
+    if grep -q "shape-matrix-bridge" "$containers_file"; then
       bridge_ok=0
-      bridge_uptime="$(
-        awk '
-          /dstack-shape-matrix-bridge-1/ {
-            getline
-            gsub(/<[^>]+>/, "")
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-            print
-            exit
-          }
-        ' "$metadata_file"
-      )"
+      bridge_uptime=""
+      if [ "$metadata_source" = "public" ]; then
+        bridge_uptime="$(
+          awk -v name="$BRIDGE_CONTAINER" '
+            index($0, name) {
+              getline
+              gsub(/<[^>]+>/, "")
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+              print
+              exit
+            }
+          ' "$containers_file"
+        )"
+      fi
 
-      if [ -z "$bridge_uptime" ]; then
-        echo "Shape Matrix bridge container is not listed in TEE metadata yet"
-      elif [[ "$bridge_uptime" == "Up Less than"* ]]; then
+      if [[ "$bridge_uptime" == "Up Less than"* ]]; then
         echo "Shape Matrix bridge is still too fresh/restarting: ${bridge_uptime}"
-      elif curl -fsS --max-time 20 "https://${TEE_HOST}/logs/dstack-shape-matrix-bridge-1?text&bare&timestamps&tail=${BRIDGE_LOG_TAIL:-1000}" >"$bridge_log_file"; then
+      elif fetch_bridge_logs; then
         auth_failure_line="$(
           grep -En 'Error: .* is required|Matrix auth failed|Matrix access token whoami failed|Signup wrapper failed|Registration failed' "$bridge_log_file" |
             tail -n1 |
@@ -106,7 +145,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
       fi
     fi
   else
-    echo "TEE metadata endpoint is not reachable yet"
+    echo "TEE metadata is not reachable yet (public report and attestation API)"
   fi
 
   if curl -fsS --max-time 20 "$ROUTER_HEALTH_URL" >"$router_health_file" &&
@@ -120,7 +159,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   fi
 
   if [ "$metadata_ok" -eq 1 ] && [ "$containers_ok" -eq 1 ] && [ "$bridge_ok" -eq 1 ] && [ "$health_ok" -eq 1 ]; then
-    echo "Deployment verified"
+    echo "Deployment verified (TEE metadata from ${metadata_source})"
     exit 0
   fi
 
