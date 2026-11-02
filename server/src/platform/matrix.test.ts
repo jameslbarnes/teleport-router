@@ -444,6 +444,8 @@ describe('MatrixPlatform DMs', () => {
     lastActive?: number;
     routerChannel?: boolean;
     routerSpark?: { sourceHandle: string; targetHandle: string };
+    encrypted?: boolean;
+    invited?: string[];
   } = {}) => {
     const members = opts.members || ['@router:mtrx.example.test', '@james:matrix.org'];
     return {
@@ -454,9 +456,16 @@ describe('MatrixPlatform DMs', () => {
       getMember: (userId: string) => members.includes(userId)
         ? { userId, membership: KnownMembership.Join }
         : null,
+      getMembers: () => [
+        ...members.map(userId => ({ userId, membership: KnownMembership.Join })),
+        ...(opts.invited || []).map(userId => ({ userId, membership: KnownMembership.Invite })),
+      ],
       getLastActiveTimestamp: () => opts.lastActive || 0,
       currentState: {
         getStateEvents: (type: string) => {
+          if (type === EventType.RoomEncryption && opts.encrypted) {
+            return { getContent: () => ({ algorithm: 'm.megolm.v1.aes-sha2' }) };
+          }
           if (type === EventType.RoomName && opts.explicitName) {
             return { getContent: () => ({ name: opts.explicitName }) };
           }
@@ -556,6 +565,57 @@ describe('MatrixPlatform DMs', () => {
     expect(clientSendMessage).toHaveBeenCalledWith('!router-dm:mtrx.example.test', expect.objectContaining({
       body: 'digest check',
     }));
+  });
+
+  describe('pending-entry review DMs (waiting-post text)', () => {
+    const reviewPlatform = (client: Record<string, unknown>) => {
+      const platform = createPlatform();
+      (platform as any).botUserId = '@router:mtrx.example.test';
+      (platform as any).client = {
+        getAccountData: vi.fn().mockReturnValue({ getContent: () => ({}) }),
+        getRooms: vi.fn().mockReturnValue([]),
+        getRoom: vi.fn(),
+        setAccountData: vi.fn().mockResolvedValue({}),
+        createRoom: vi.fn().mockResolvedValue({ room_id: '!private-created:mtrx.example.test' }),
+        sendMessage: vi.fn().mockResolvedValue({ event_id: '$review' }),
+        ...client,
+      };
+      return platform;
+    };
+    const sentTo = (platform: MatrixPlatform) => ((platform as any).client.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([, content]) => content?.pending_entry_id)
+      .map(([roomId]) => roomId);
+
+    it('skips an unencrypted DM and creates an encrypted one', async () => {
+      const platform = reviewPlatform({
+        getRooms: vi.fn().mockReturnValue([fakeRoom('!plain-dm:mtrx.example.test')]),
+      });
+
+      await platform.sendPendingEntryReviewDM('@james:matrix.org', 'Review this Router post', 'entry-1');
+      expect((platform as any).client.createRoom).toHaveBeenCalled();
+      expect(sentTo(platform)).toEqual(['!private-created:mtrx.example.test']);
+    });
+
+    it('reuses an encrypted one-to-one DM', async () => {
+      const platform = reviewPlatform({
+        getRooms: vi.fn().mockReturnValue([fakeRoom('!secret-dm:mtrx.example.test', { encrypted: true })]),
+      });
+
+      await platform.sendPendingEntryReviewDM('@james:matrix.org', 'Review this Router post', 'entry-2');
+      expect((platform as any).client.createRoom).not.toHaveBeenCalled();
+      expect(sentTo(platform)).toEqual(['!secret-dm:mtrx.example.test']);
+    });
+
+    it('never reuses a mapped DM that holds anyone else, even encrypted', async () => {
+      const crowded = fakeRoom('!crowded:mtrx.example.test', { encrypted: true, invited: ['@stranger:matrix.org'] });
+      const platform = reviewPlatform({
+        getAccountData: vi.fn().mockReturnValue({ getContent: () => ({ '@james:matrix.org': ['!crowded:mtrx.example.test'] }) }),
+        getRoom: vi.fn((roomId: string) => (roomId === '!crowded:mtrx.example.test' ? crowded : null)),
+      });
+
+      await platform.sendPendingEntryReviewDM('@james:matrix.org', 'Review this Router post', 'entry-3');
+      expect(sentTo(platform)).toEqual(['!private-created:mtrx.example.test']);
+    });
   });
 
   it('creates a fresh DM instead of reusing arbitrary two-person rooms', async () => {

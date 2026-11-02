@@ -762,7 +762,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_release_entry',
     name: 'router_release_entry',
-    description: 'Release a held entry. It goes back on its original schedule: it publishes when its staging window ends (immediately, if that has already passed), and its author can still delete it until then. Only held entries can be released, except your own pending entries, which publish immediately. Use this after reviewing a held entry and determining it is safe to publish.',
+    description: 'Moderators only. Release a held entry. It goes back on its original schedule: it publishes when its staging window ends (immediately, if that has already passed), and its author can still delete it until then. Only held entries can be released; holds made before original publish times were recorded can only be published by their author. Releasing your own pending entry publishes it immediately. Use this after reviewing a held entry and determining it is safe to publish.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -2115,11 +2115,8 @@ function createMCPServer(secretKey: string) {
           if (modText) {
             const verdict = modText.trim();
             if (verdict.startsWith('BLOCK')) {
-              const reason = verdict.includes(':')
-                ? verdict.split(':').slice(1).join(':').trim()
-                : 'Blocked by automated review.';
               await storage.deleteEntry(saved.id);
-              console.log(`[Moderation] ${saved.id} BLOCK — ${reason}`);
+              console.log(`[Moderation] ${saved.id} BLOCK`); // the verdict's reason paraphrases the entry: keep it out of logs
               // Don't notify — silently drop spam/injection
             } else if (verdict.startsWith('HOLD')) {
               const reason = verdict.includes(':')
@@ -2127,7 +2124,7 @@ function createMCPServer(secretKey: string) {
                 : 'Flagged by automated review.';
               const FOREVER = Date.now() + (999999 * 365.25 * 24 * 60 * 60 * 1000);
               storage.holdEntry(saved.id, reason, FOREVER, 'automated');
-              console.log(`[Moderation] ${saved.id} HOLD — ${reason}`);
+              console.log(`[Moderation] ${saved.id} HOLD`); // reason paraphrases the entry: keep it out of logs
 
               // Notify author via email
               if (currentUser?.email && currentUser.emailVerified && emailClient) {
@@ -4123,7 +4120,7 @@ function createMCPServer(secretKey: string) {
         }
       }
 
-      console.log(`[Moderation] Entry ${entryId} held by @${handle || pseudonym}. Reason: ${reason}`);
+      console.log(`[Moderation] Entry ${entryId} held by @${handle || pseudonym}`);
 
       return {
         content: [{ type: 'text' as const, text: `Entry ${entryId} has been held indefinitely. It will not auto-publish. Author has been notified${entry?.handle ? ` (@${entry.handle})` : ''}.${reason ? ` Reason: ${reason}` : ''}` }],
@@ -4177,7 +4174,13 @@ function createMCPServer(secretKey: string) {
           };
         }
         const publishAt = storage.releaseHold(entryId);
-        if (publishAt !== null && publishAt > Date.now()) {
+        if (publishAt === null) {
+          return {
+            content: [{ type: 'text' as const, text: `Entry ${entryId} was held before original publish times were recorded, so releasing it could publish it before its author's window ends. Only its author can publish it.` }],
+            isError: true,
+          };
+        }
+        if (publishAt > Date.now()) {
           console.log(`[Moderation] Entry ${entryId} released by @${handle || pseudonym} (back on schedule)`);
           const minutes = Math.max(1, Math.round((publishAt - Date.now()) / 60000));
           return {
@@ -5750,8 +5753,12 @@ const server = createServer(async (req, res) => {
         isAuthor = conversation.pseudonym === userPseudonym;
       }
 
-      // Check if it's a pending conversation - only owner can view
-      if (conversation.publishAt && conversation.publishAt > Date.now()) {
+      // Check if it's a pending conversation - only owner can view. Pending means
+      // still in the buffer, even if its publish time has just passed.
+      const conversationPending = storage instanceof StagedStorage
+        ? storage.isConversationPending(conversationId)
+        : !!conversation.publishAt && conversation.publishAt > Date.now();
+      if (conversationPending) {
         if (!isAuthor) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: 'Conversation not found' }));
@@ -6674,7 +6681,13 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      const entries = await storage.getChannelEntries(channelId, limit);
+      // Waiting entries stay private to their author until they publish
+      const viewerKey = url.searchParams.get('secret_key');
+      const hasViewerKey = !!viewerKey && isValidSecretKey(viewerKey);
+      const viewerPseudonym = hasViewerKey ? derivePseudonym(viewerKey!) : undefined;
+      const viewerHandle = hasViewerKey ? (await storage.getUserByKeyHash(hashSecretKey(viewerKey!)))?.handle : undefined;
+      const entries = (await storage.getChannelEntries(channelId, limit))
+        .filter(e => !isHiddenWhilePending(e.id, isEntryAuthor(e, viewerPseudonym, viewerHandle)));
       res.writeHead(200);
       res.end(JSON.stringify({ entries }));
       return;

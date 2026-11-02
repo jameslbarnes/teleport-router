@@ -1053,7 +1053,8 @@ export class MatrixPlatform implements Platform {
   async sendPendingEntryReviewDM(userId: string, text: string, entryId: string): Promise<string> {
     if (!this.client) throw new Error('Matrix client not started');
 
-    const roomId = await this.findOrCreateDM(userId);
+    // The text of a waiting post: only an encrypted room with nobody else in it
+    const roomId = await this.findOrCreatePrivateDM(userId);
     const content = await this.createMessageContent(text);
     content.pending_entry_id = entryId;
     content['com.router.pending_entry'] = {
@@ -2342,6 +2343,47 @@ export class MatrixPlatform implements Platform {
 
     await this.markRoomAsDirect(userId, room.id);
     return room.id;
+  }
+
+  /**
+   * A room fit for a waiting post's text: encrypted, with no one in it (joined or
+   * invited) but the bot and this user. Otherwise a new encrypted DM is created.
+   */
+  private async findOrCreatePrivateDM(userId: string): Promise<string> {
+    if (!this.client) throw new Error('Matrix client not started');
+
+    const directRoomIds = this.getDirectRoomMap()[userId] || [];
+    const existingDirectRoom = this.findExistingDirectRoom(userId, directRoomIds, { encryptedOnly: true });
+    if (existingDirectRoom) {
+      await this.markRoomAsDirect(userId, existingDirectRoom.roomId);
+      return existingDirectRoom.roomId;
+    }
+
+    // A DM the user hasn't joined yet is fine only if it is encrypted and holds no one else
+    for (const roomId of directRoomIds) {
+      const room = this.client.getRoom(roomId);
+      if (room?.getMyMembership() === KnownMembership.Join
+        && this.roomIsEncrypted(room)
+        && this.holdsOnlyBotAnd(room, userId)) {
+        return room.roomId;
+      }
+    }
+
+    const room = await this.createRoom('', {
+      type: 'dm',
+      invite: [userId],
+      encrypted: true,
+    });
+
+    await this.markRoomAsDirect(userId, room.id);
+    return room.id;
+  }
+
+  private holdsOnlyBotAnd(room: Room, userId: string): boolean {
+    if (!this.botUserId) return false;
+    return room.getMembers()
+      .filter(member => member.membership === KnownMembership.Join || member.membership === KnownMembership.Invite)
+      .every(member => member.userId === userId || member.userId === this.botUserId);
   }
 
   private async findOrCreateEncryptedDM(userId: string): Promise<string> {

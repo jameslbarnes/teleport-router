@@ -546,6 +546,49 @@ describe('MCP Tool Integration Tests', () => {
       expect(await inbox()).toContain('Addressed waiting entry for inbox privacy');
     });
 
+    const post = async (path: string, body: Record<string, unknown>) => {
+      const res = await fetch(`${base()}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`${path} failed: ${res.status} ${await res.text()}`);
+      return res.json();
+    };
+    const channelFeed = async (channelId: string, key?: string) => {
+      const res = await fetch(`${base()}/api/channels/${channelId}/entries${key ? `?secret_key=${key}` : ''}`);
+      expect(res.status).toBe(200);
+      return ((await res.json()).entries as any[]).map(e => e.content);
+    };
+
+    it('channel feed (open channel): a waiting post is hidden from everyone but its author', async () => {
+      const channelId = `lk-open-${Date.now().toString(36).slice(-6)}`;
+      await post('/api/channels', { secret_key: MODERATOR_KEY, id: channelId, name: 'Open privacy check', join_rule: 'open' });
+      const entryId = await write(modClient, 'Waiting open-channel post', { to: [`#${channelId}`, `@${RECIPIENT_HANDLE}`] });
+
+      expect(await channelFeed(channelId)).not.toContain('Waiting open-channel post');
+      expect(await channelFeed(channelId, OTHER_KEY)).not.toContain('Waiting open-channel post');
+      expect(await channelFeed(channelId, RECIPIENT_KEY)).not.toContain('Waiting open-channel post');
+      expect(await channelFeed(channelId, MODERATOR_KEY)).toContain('Waiting open-channel post');
+
+      await publish(entryId, MODERATOR_KEY);
+      expect(await channelFeed(channelId)).toContain('Waiting open-channel post');
+    });
+
+    it('channel feed (invite-only channel): members see a waiting post only once it publishes', async () => {
+      const channelId = `lk-inv-${Date.now().toString(36).slice(-6)}`;
+      await post('/api/channels', { secret_key: MODERATOR_KEY, id: channelId, name: 'Invite privacy check', join_rule: 'invite' });
+      const { token } = await post(`/api/channels/${channelId}/invite`, { secret_key: MODERATOR_KEY });
+      await post(`/api/channels/${channelId}/join`, { secret_key: RECIPIENT_KEY, invite_token: token });
+      const entryId = await write(modClient, 'Waiting invite-channel post', { to: [`#${channelId}`] });
+
+      expect(await channelFeed(channelId, RECIPIENT_KEY)).not.toContain('Waiting invite-channel post');
+      expect(await channelFeed(channelId, MODERATOR_KEY)).toContain('Waiting invite-channel post');
+
+      await publish(entryId, MODERATOR_KEY);
+      expect(await channelFeed(channelId, RECIPIENT_KEY)).toContain('Waiting invite-channel post');
+    });
+
     it('review: a manual hold does not reveal the content to moderators', async () => {
       const entryId = await write(regularClient, 'Manually held text that review must hide');
       expect(await callTool(modClient, 'router_hold_entry', { entry_id: entryId, reason: 'test' })).toContain('held indefinitely');

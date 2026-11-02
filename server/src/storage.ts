@@ -1918,14 +1918,14 @@ export class StagedStorage implements Storage {
   /**
    * Lift a moderation hold. The entry goes back to its original schedule: it
    * publishes then, or at the next publish tick if that time has passed.
-   * Returns the new publish time, or null if the entry isn't pending.
+   * Returns the new publish time, or null if the entry isn't pending or its
+   * original schedule is unknown (held before scheduledPublishAt was recorded;
+   * staging delays vary per user, so it can't be safely guessed).
    */
   releaseHold(id: string): number | null {
     const entry = this.pending.get(id);
-    if (!entry) return null;
-    // Holds from before scheduledPublishAt existed: assume the default staging window
-    const scheduled = entry.scheduledPublishAt ?? entry.timestamp + this.publishDelayMs;
-    entry.publishAt = Math.max(scheduled, Date.now());
+    if (!entry || entry.scheduledPublishAt === undefined) return null;
+    entry.publishAt = Math.max(entry.scheduledPublishAt, Date.now());
     delete entry.moderationHeld;
     delete entry.moderationHoldReason;
     delete entry.moderationHeldBy;

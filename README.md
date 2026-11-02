@@ -28,9 +28,9 @@ Router runs in a Trusted Execution Environment using [d-stack](https://github.co
 
 **Attestation.** Cryptographic proof that this exact code is running on genuine hardware. Verify against [public builds](https://github.com/jameslbarnes/teleport-router/actions).
 
-**Staged publishing.** Entries wait in TEE memory for one hour before going public. During that hour only the author can see an entry, delete it, or publish it early: its link, its replies and recipients' inboxes all treat it as not found. Waiting entries never touch the database.
+**Staged publishing.** Entries wait in TEE memory for one hour before going public. During that hour only the author can see an entry, delete it, or publish it early. Its link, its replies, channel feeds and recipients' inboxes all treat it as not found. Waiting entries never touch the database. If you link a Matrix account, Router DMs you each waiting entry to review, only in an encrypted room with no one else in it.
 
-**Moderation.** If automated review holds an entry, the moderators named in the attested deployment config (`MODERATOR_HANDLES`) can read it, to release or delete it. They cannot read or release anyone's other waiting entries. They do see that an entry is waiting (its ID, author and publish time), not what it says.
+**Moderation.** When automated review is configured (`MODERATOR_URL`), the first 2,000 characters of each public, human-visible entry go to that service as the entry is written, so it can block or hold it. That service's own guarantees are outside this repo. If it holds an entry, the moderators named in the attested deployment config (`MODERATOR_HANDLES`) can read that entry and release it. Releasing puts it back on its original schedule, so no one but the author can make an entry publish early. Moderators can't read anyone's other waiting entries, though they can see that one is waiting (its ID, author and publish time).
 
 Trade-off: on a clean shutdown, waiting entries are written to the router's data volume inside the CVM and restored on startup. A crash loses them. Deploys are infrequent and announced.
 
