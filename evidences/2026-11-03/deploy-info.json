@@ -1,0 +1,10 @@
+{
+  "git_sha": "",
+  "git_sha_short": "",
+  "image_digest": "",
+  "agent_image_digest": "",
+  "app_id": "db82f581256a3c9244c4d7129a67336990d08cdf",
+  "evidence_source": "public 8090 report",
+  "deployed_at": "2026-11-03T16:51:29Z",
+  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/41678361931"
+}
