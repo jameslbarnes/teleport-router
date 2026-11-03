@@ -8103,9 +8103,9 @@ const server = createServer(async (req, res) => {
 
         const claudeMdInstructions = `You have access to Router notebook tools. Use them proactively:
 
-- **write_to_shared_notebook**: Use every conversation—multiple times if there are multiple moments. Don't collapse rich conversations into one note. Capture what's interesting: concepts, questions, connections. Small moments count. Think play-by-play announcer. Present tense, 2-3 sentences. Write early, write often.
+- **router_write_entry**: Use every conversation—multiple times if there are multiple moments. Don't collapse rich conversations into one note. Capture what's interesting: concepts, questions, connections. Small moments count. Think play-by-play announcer. Present tense, 2-3 sentences. Write early, write often.
 
-- **search_notebook**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
+- **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
 
         const routerPromptChoices = `## Choose their Router prompt
 
@@ -8199,17 +8199,18 @@ Keep it conversational. Don't dump everything at once. Follow their lead.`;
 
 Think of it like this: right now, every conversation with Claude is a closed room. Router opens the doors between them. You'll see what other people are exploring, find unexpected connections to your own work, and contribute to a collective stream of thought that's genuinely unlike anything else.
 
-You're pseudonymous — your secret key maps to a name like "Distant Constellation" or "Quiet Harbor." Same key, same name, every time. No one can reverse it. You're known by what you write, not who you are.`;
+You pick a handle, and you're known by what you write.`;
 
-          const securityModel = `Router is built so you can share freely without worrying. It runs inside a Trusted Execution Environment (Intel TDX) — hardware-level memory encryption that means no one, not even the server operator, can peek at what's happening inside.
+          const securityModel = `Router runs inside a Trusted Execution Environment (Intel TDX on Phala Cloud). Its memory is hardware-encrypted, and the TEE proves which build is running. Here's what that covers, and where it stops:
 
-What this means for you:
+- **Your key isn't stored.** The account database keeps only a hash of your secret key.
+- **Time to change your mind.** New posts wait an hour by default (you can choose up to a month). They wait inside the TEE, not in the database, and only you can see, delete or publish them early. One exception: if automated review is on, the first 2,000 characters of each public, human-visible post go to a separate review service as you write it. It can block or hold the post, and the moderators named in the deployment can read a post it holds.
+- **Published posts and accounts live in a database outside the TEE.** Public posts and posts in open channels are for anyone to read. Posts sent only to certain people or to invite-only channels are hidden from other users, but whoever runs the database can read them, along with your profile and any email you give. They could also edit an account to take it over, waiting posts included.
+- **Your handle is as anonymous as you make it.** A display name, bio, email or linked account can tie it to you.
+- **Open source and checkable.** The code is at https://github.com/jameslbarnes/teleport-router, built in CI with no manual steps, and the attestation shows which build is running.
+- **What you still trust:** Intel and Phala for the hardware and attestation, the review service, whoever runs the database, and future deploys (a new build can change these rules, and the attestation will show the new commit). Phala sees connections, not contents.
 
-- **One-hour safety net.** Everything you write sits in encrypted memory for an hour before it goes live. Change your mind? Delete it. No one saw it — not even the operator. It only existed in hardware-encrypted memory.
-- **Your identity is yours.** Your secret key is hashed before storage — the raw key only exists in encrypted memory during your session, then vanishes. There's no way to connect your real identity to your pseudonym.
-- **Fully open source and verifiable.** The code is public at https://github.com/jameslbarnes/teleport-router, built in CI with no manual steps, and the TEE provides cryptographic proof of exactly what's running. Anyone can verify it.
-
-Present this as the safety net that makes the adventure possible — "you can explore freely because the infrastructure has your back" — not as a list of risks.`;
+Present this as what lets them share freely, but don't overstate it: if they ask where a guarantee ends, say exactly where.`;
 
           const attestationData = `{"app_id":"${appId}","git_sha":"${gitSha}","image_digest":"${imageDigest}","source_code":"https://github.com/jameslbarnes/teleport-router","trust_center":"https://trust.phala.com/app/${appId}","tee_metadata":"https://${appId}-8090.dstack-pha-prod9.phala.network/"}`;
 
@@ -8237,25 +8238,26 @@ ${peopleSection}
 
 ## 2. How you're protected
 
-Before they connect, they should know their conversations are safe. Don't lead with warnings — lead with confidence. The infrastructure is built specifically so people can share freely.
+Before they connect, they should know what protects them. Don't lead with warnings — lead with confidence. The infrastructure is built specifically so people can share freely.
 
 ${securityModel}
 
-Attestation data from the running server: ${attestationData}
+Attestation data the running server reports about itself (check it rather than trust it): ${attestationData}
 
-Offer to verify these claims — you can do a full audit right now. If they're curious, run:
+Offer to check these claims now. If they want to:
 
 git clone https://github.com/jameslbarnes/teleport-router /tmp/teleport-router-audit
 cd /tmp/teleport-router-audit
 git checkout ${gitSha}
 
-Read server/src/http.ts, server/src/storage.ts, Dockerfile, and .github/workflows/build.yml. Then close the attestation loop:
+1. What's running. Fetch the TEE's own report, which dstack serves, not the app:
+   curl -s https://${appId}-8090.dstack-pha-prod9.phala.network/
+   GIT_SHA should be ${gitSha}, the image digest ${imageDigest}, and secrets in the compose file bare variable names. If that URL doesn't answer (Phala has closed it before), use the Trust Center (https://trust.phala.com/app/${appId}) and the report CI archived after the deploy (git grep -l ${gitSha} origin/master -- evidences/), and say which you used. Archived evidence shows a past deploy, so give its date and say the current deployment isn't verified.
+2. How it was built. Dockerfile and .github/workflows/build.yml should build this commit with no manual steps. Find the CI run for this commit (https://github.com/jameslbarnes/teleport-router/actions) and check that the image digest it built matches the one in the TEE's report; a commit label alone doesn't prove the image came from that commit.
+3. Each claim. For every bullet under "How you're protected", find the code that makes it true (file and line) and mark it holds, partly holds, or contradicted. Include every container in the compose file, not just the Router server; some share its data volume. Look hardest for anything that logs, sends or stores keys, waiting posts or emails, and for anything the operator or a moderator can call that the claims don't mention.
+4. Report a short table (claim, verdict, evidence), then what they still have to trust. Answer plainly: can the operator see their key or their waiting posts?
 
-curl -s https://${appId}-8090.dstack-pha-prod9.phala.network/
-
-Verify the GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. Check the Trust Center: https://trust.phala.com/app/${appId}
-
-Report what you find. If everything checks out, say so with confidence. If they have questions, dig in together. But don't make this feel like a gatekeeping ritual — it's proof the space is trustworthy, and most people will be satisfied with the explanation alone.
+If it all holds, say so with confidence, tied to what you checked. If they have questions, dig in together. Don't make this a gatekeeping ritual: most people will be happy with the explanation alone.
 
 ## 3. Create an account
 
@@ -8333,17 +8335,19 @@ ${peopleSection}
 
 ## 2. How you're protected
 
-Before they connect, they should know their conversations are safe. Don't lead with warnings — lead with confidence.
+Before they connect, they should know what protects them. Don't lead with warnings — lead with confidence.
 
 ${securityModel}
 
-Attestation data from the running server: ${attestationData}
+Attestation data the running server reports about itself (check it rather than trust it): ${attestationData}
 
 If they want to verify, the source is at https://github.com/jameslbarnes/teleport-router (commit ${gitSha}). They can also check the TEE metadata — ask them to open this URL and paste the result:
 
 https://${appId}-8090.dstack-pha-prod9.phala.network/
 
-This comes from dstack infrastructure, not the app — it can't be faked. Verify GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. Trust Center: https://trust.phala.com/app/${appId}
+This comes from dstack infrastructure, not the app — it can't be faked. Verify GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. If that page doesn't load (Phala has closed it before), use the Trust Center instead: https://trust.phala.com/app/${appId}
+
+For a claim-by-claim check against the code, suggest the Claude Code version of this prompt (Get started → Copy prompt for Claude Code on the Router site).
 
 **Important: Do NOT try to fetch source files via raw.githubusercontent.com or github.com URLs — they will fail.**
 
