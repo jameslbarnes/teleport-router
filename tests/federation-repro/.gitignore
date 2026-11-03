@@ -1,0 +1,6 @@
+certs/*.key
+certs/*.pem
+certs/*.crt
+certs/*.csr
+certs/*.cnf
+certs/*.srl
