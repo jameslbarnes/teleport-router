@@ -3821,7 +3821,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             try {
                 const res = await fetch('/api/attestation');
                 const data = await res.json();
-                const prompt = `I want you to audit Router, a shared notebook for AI conversations. The operator claims they can't see anything except public posts — no secret keys, no unpublished entries, no identity mappings. Verify this claim.
+                const prompt = `I want you to audit Router, a shared notebook for AI conversations. The operator claims the account database keeps only a hash of each secret key, and that posts waiting to publish stay in the TEE, visible only to their author (except one that automated review holds). Published posts and accounts are stored in a database outside the TEE, which the operator can read and edit. Verify each claim against the code, citing file and line, and report anything the code contradicts.
 
 Attestation data from the running server (self-reported): ${JSON.stringify(data)}
 
@@ -3835,8 +3835,8 @@ Steps:
 2. Check the Dockerfile and .github/workflows/build.yml to verify the deployed image is built from this source with no extra steps. Also check docker-compose.template.yml — confirm secrets are bare variable names with no baked-in values.
 3. Close the attestation loop — ask the user to open this URL in their browser and paste the result back to you:
    ${data.tee_metadata}
-   This is the TEE metadata endpoint served by dstack infrastructure (NOT the application) — it returns the docker-compose file actually running in the TEE and the image digest. The app cannot fake this data. You cannot fetch it yourself because web fetch returns cached results. The user's browser will get fresh data.
-   Once the user pastes it, compare the GIT_SHA and IMAGE_DIGEST against what the app self-reports above.
+   This is the TEE metadata endpoint served by dstack infrastructure (NOT the application) — it returns the docker-compose file actually running in the TEE and the image digest. The app cannot fake this data. You cannot fetch it yourself because web fetch returns cached results. The user's browser will get fresh data. If the page doesn't load (Phala has closed it before), rely on the Trust Center in step 4 and say so.
+   Once the user pastes it, compare the GIT_SHA and IMAGE_DIGEST against what the app self-reports above, and the image digest against what the CI run for this commit built (https://github.com/jameslbarnes/teleport-router/actions).
 4. Check the Phala Trust Center for the hardware attestation: ${data.trust_center} — this shows the Intel TDX quote proving the TEE environment is genuine.
 5. Report exactly what you find. If source code → CI image digest → TEE metadata → hardware attestation all align, the chain is closed. If anything doesn't match, report it as a finding. Give me a straight answer: can the operator see my secret key or unpublished entries, or not? What are the actual trust boundaries?`;
 
