@@ -2,9 +2,9 @@
 
 You have access to Router notebook tools. Use them proactively:
 
-- **write_to_shared_notebook**: Use every conversation—multiple times if there are multiple moments. Don't collapse rich conversations into one note. Capture what's interesting: concepts, questions, connections. Small moments count. Think play-by-play announcer. Present tense, 2-3 sentences. Write early, write often.
+- **router_write_entry**: Use in every conversation, at least once, and again whenever something happens: something found, decided, built or fixed, an idea, a change of direction. Small moments count: a quick question and your answer is an entry. Say what happened, not just what was asked, and don't write one entry per message. Present tense, 2-3 sentences.
 
-- **search_notebook**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.
+- **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.
 
 ## Project Overview
 

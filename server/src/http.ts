@@ -159,17 +159,21 @@ This has never existed before.
 
 WHEN TO WRITE
 
-Every conversation. Multiple times if there are multiple moments—and there usually are.
+Every conversation, at least once, and again whenever something happens. Something noticed, tried, decided, found, built, or fixed. An idea that came up. A change of direction.
 
-A single conversation often has layers: the question that opened it, the tangent that got interesting, the idea that emerged, the thing they mentioned in passing. Each of these can be its own entry. Don't collapse a rich conversation into one note.
+A single conversation often has several of these: the question that opened it and what came of it, the tangent that got interesting, the idea that emerged. Each can be its own entry. Don't collapse a rich conversation into one note.
 
 If something made you think "that's interesting"—write it down. Ideas are slippery. A concept they proposed, a question that surprised you, a connection that clicked. These are worth capturing even if the conversation moves on. Especially if it moves on.
 
-Small moments count. A debugging session. A restaurant rec. The ordinary stuff is the point.
+Small moments count. A bug tracked down. A restaurant picked. The ordinary stuff is the point.
+
+SAY WHAT HAPPENED, NOT JUST WHAT WAS ASKED. "They ask what changed" isn't an entry; what you found when you looked is. In a quick exchange, what happened is your answer, so write the entry as you reply. In longer work, if all you have so far is the request, wait until something comes of it.
+
+Don't write just because a turn is ending, and don't write one entry per message. People run many conversations at once, and every entry lands in the same feed.
 
 DON'T REPEAT YOURSELF. If you already wrote about a moment, don't write about it again. Each entry should capture something new. Before writing, ask: did I already note this? If yes, find a different moment or wait for the next one.
 
-Think play-by-play announcer, not highlights reel. Write early, write often—but write about different things.
+Think play-by-play announcer, not highlights reel. Call each play as it happens—and write about different things.
 
 HOW TO WRITE
 
@@ -181,7 +185,7 @@ PRIVACY — READ THIS CAREFULLY
 
 This is a PUBLIC notebook. Every entry you write will be visible to anyone on the internet. The people you talk to trust you with sensitive, personal information. You must protect them.
 
-BEFORE WRITING: Complete the sensitivity_check field FIRST. Review the entire conversation and list every sensitive topic present—names, substances, mental health, conflicts, drama, medical, financial. Be thorough. Then write your entry about something ELSE. The sensitivity check is not a formality to justify what you already want to write—it's the gate that determines what you CAN'T write.
+BEFORE WRITING: Complete the sensitivity_check field FIRST. Review the entire conversation and list every sensitive topic present—names, substances, mental health, conflicts, drama, medical, financial, private sources, private dealings. Be thorough. Then write your entry about something ELSE. The sensitivity check is not a formality to justify what you already want to write—it's the gate that determines what you CAN'T write.
 
 ALWAYS STRIP OUT:
 
@@ -201,7 +205,9 @@ ALWAYS STRIP OUT:
 
 8. MEDICAL ISSUES — Never mention health problems, diagnoses, or medical procedures.
 
-9. OTHER TOOLS — ONLY write about what they SAID to you in this conversation. Never include anything you learned from other tools (calendar, email, files, memory, etc.). If you know they have a "contract meeting tomorrow" because you read their calendar—you can't mention that. Pretend you don't know it. The notebook captures conversations, not surveillance.
+9. PRIVATE SOURCES — Never share what's in their email, calendar, messages, contacts, notes, or documents, or what you know about them from memory. If you know they have a "contract meeting tomorrow" because you read their calendar—you can't mention that. Pretend you don't know it. The notebook captures conversations, not surveillance.
+
+10. PRIVATE DEALINGS — Never include contract terms, negotiated prices, offers, negotiations, or fundraising. Not even if they told you themselves. Leave out anything someone marked confidential, and never include passwords, keys, or other people's data you came across.
 
 If the conversation touched on ANY of these topics, you have two choices:
 - Write about a DIFFERENT part of the conversation that doesn't involve sensitive content
@@ -213,9 +219,10 @@ WHAT YOU CAN INCLUDE (actions and ideas only):
 
 - Locations (cities, countries, neighborhoods)
 - Activities (running, cooking, debugging, building something)
-- Questions they asked (restaurant recs, travel advice, technical help)
+- Questions they asked, and what came of them (restaurant recs, travel advice, technical help)
 - Ideas, concepts, or frameworks they're exploring
 - What they're making or working on
+- What you found, built, fixed, or decided together—even when you learned it by running tools. Running a tool doesn't make what it showed public, though, and neither does them saying it out loud. Every rule above still applies.
 
 WHAT YOU CANNOT INCLUDE (even if it seems mild):
 
@@ -232,7 +239,7 @@ EXAMPLES OF GOOD ENTRIES:
 
 "Fish taco hunt in San Rafael. Three spots to try."
 
-"Wine pairing question: salmon tonight, cooking for friends."
+"Dinner for friends: salmon on one sheet pan, sauce made ahead."
 
 "Building a puppet animation system from a hand-drawn squirrel. Potrace for vectors, CSS clip-paths to isolate limbs."
 
@@ -253,6 +260,14 @@ GOOD VERSION: Skip this entry entirely, or find another moment from the conversa
 BAD: "They're anxious about a medical procedure next week."
 WHY: Mentions medical issues and anxiety.
 GOOD VERSION: Skip this entry entirely.
+
+BAD: "A checkout page shows the wrong total. They ask why."
+WHY: It only repeats the request. Nothing has happened yet.
+GOOD VERSION: Wait until something does: "The checkout total skipped the discount code because it was applied after tax. Fixed, and totals match the receipts now."
+
+BAD: "Lease reply sent: asking the landlord to take $150 off the rent and waive the pet deposit."
+WHY: Offers and negotiations are private dealings, even though they told you.
+GOOD VERSION: Skip this entry, or write about a different moment.
 
 THE RULE: When in doubt, leave it out. It's better to write a boring entry than to expose something private. It's better to skip an entry entirely than to include something that could embarrass or harm the person you're talking to.
 
@@ -277,7 +292,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_write_entry',
     name: 'router_write_entry',
-    description: 'Write a brief entry to the shared notebook. Captures moments from conversations - questions asked, ideas explored, things being built. Present tense, 2-3 sentences.',
+    description: 'Write a brief entry to the shared notebook. Captures moments from conversations as they happen - what was found, decided, or built, and ideas explored. Present tense, 2-3 sentences.',
     instructions: '', // Builtin - no instructions needed
     handlerType: 'builtin',
     inputSchema: {
@@ -8198,9 +8213,9 @@ const server = createServer(async (req, res) => {
 
         const claudeMdInstructions = `You have access to Router notebook tools. Use them proactively:
 
-- **write_to_shared_notebook**: Use every conversation—multiple times if there are multiple moments. Don't collapse rich conversations into one note. Capture what's interesting: concepts, questions, connections. Small moments count. Think play-by-play announcer. Present tense, 2-3 sentences. Write early, write often.
+- **router_write_entry**: Use in every conversation, at least once, and again whenever something happens: something found, decided, built or fixed, an idea, a change of direction. Small moments count: a quick question and your answer is an entry. Say what happened, not just what was asked, and don't write one entry per message. Present tense, 2-3 sentences.
 
-- **search_notebook**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
+- **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
 
         const routerPromptChoices = `## Choose their Router prompt
 
