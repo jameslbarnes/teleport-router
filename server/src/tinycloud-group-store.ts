@@ -39,7 +39,7 @@ export function inspectGrant(wire: string): GrantSummary {
 export function tinyCloudGroups(config: TinyCloudRouterConfig) {
   let signingIn: Promise<TinyCloudNode> | null = null;
   const signedIn = () => (signingIn ??= (async () => {
-    const node = new TinyCloudNode({ privateKey: config.privateKey, host: config.host, autoCreateSpace: false });
+    const node = new TinyCloudNode({ privateKey: config.privateKey, host: config.host, autoCreateSpace: false, enablePublicSpace: false });
     await node.signIn();
     return node;
   })().catch(err => { signingIn = null; throw err; }));

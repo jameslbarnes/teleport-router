@@ -12,7 +12,7 @@ From `server/`, after `npm ci`:
 node scripts/link-tinycloud.mjs --tinycloud-key-file /private/path/tinycloud.key --router-key-file /private/path/router.key
 ```
 
-Both files must already exist. The command does not generate or replace identities. It uses the `router` space by default and grants get, put, list and delete on exactly `router/`, without also granting the public space. Grants last one year; rerun the command to renew. A protected receipt beside the key file retains the grant for safe retries and revocation. `--receipt` changes that location. The receipt's parent directory should have the same access restrictions as the key directory.
+Both files must already exist. The command does not generate or replace identities. It uses the `router` space by default and grants get, put, list and delete on exactly `router/`, without also granting the public space. Grants last one year. Rerunning renews a grant within 30 days of expiry; `--renew` renews earlier. It switches to the new grant before revoking the old one. A protected receipt beside the key file retains grants for safe retries and revocation. `--receipt` changes that location. The receipt's parent directory should have the same access restrictions as the key directory.
 
 To withdraw access, run the same command with `--revoke`. Your data stays in your space. Existing copies held by people or services that already read it cannot be recalled.
 
@@ -24,6 +24,7 @@ Linking copies each record with its original ID and reads it back before switchi
 - Feed and search indexes are held in process memory and rebuilt from the grants. They are checked before reads when a 60-second lease expires. Revoked, expired or unavailable grants remove that author's records from the current view. Owner-side deletion is detected by the same check. If a check is slow, the read waits; stale content is not returned after a failed check.
 - Personal summaries follow the author. Cross-author daily summaries are kept only in memory and evicted when a contributing author's grant fails. Existing daily summaries containing the migrating author's writing are removed from legacy storage. Replies, quotations or digests previously delivered to other readers are those readers' copies.
 - Records carry a Router integrity tag. Directly altering JSON in an owner's space cannot impersonate another author or change a published post's addressing. Owner deletion remains supported.
+- Public dashboard previews, daily entry lists, generated summaries and email discovery exclude private and AI-only text. Private posts are also excluded from public connection suggestions and shared editorial context. Summary maintenance requires a moderator identity.
 - User profiles, channel membership and scoped grants remain in Firestore. Authors who have not linked TinyCloud continue using their existing storage. Moving inactive authors requires their own identity and consent; it is not silently done for them.
 - Failed publications remain waiting and do not block other authors. Staged IDs are retained on retry. Existing graceful-shutdown recovery is still used; this does not promise durability after a process or machine crash.
 

@@ -17,6 +17,15 @@ describe('detectSparks', () => {
     storage = new MemoryStorage();
   });
 
+  it('does not turn private group writing into public connection suggestions',async()=>{
+    const bob=await storage.addEntry({handle:'bob',pseudonym:'bob',client:'code',content:'secret attestation',
+      keywords:['attestation'],timestamp:Date.now(),to:['#private']});
+    const alice=await storage.addEntry({handle:'alice',pseudonym:'alice',client:'code',content:'public attestation',
+      keywords:['attestation'],timestamp:Date.now()});
+    expect(await detectSparks(alice,storage)).toEqual([]);
+    expect(await detectSparks(bob,storage)).toEqual([]);
+  });
+
   it('returns empty array when source entry has no handle', async () => {
     const entry: JournalEntry = {
       id: '1',

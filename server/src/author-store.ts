@@ -272,6 +272,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       const previous = authors.get(user.handle);
       if (previous && previous.user.tinycloud.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
         throw new Error('Changing an existing TinyCloud identity requires an explicit migration.');
+      if (previous && (previous.user.tinycloud.space !== binding.space || previous.user.tinycloud.prefix !== binding.prefix))
+        throw new Error('Changing an existing TinyCloud space requires an explicit migration.');
       const linked = { ...user, tinycloud: binding } as BindingUser;
       const store = await resolveStore(binding);
       await store.list('posts/'); // prove the actual grant works, not only its unsigned metadata

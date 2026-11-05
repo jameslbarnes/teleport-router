@@ -113,6 +113,22 @@ describe('Each author owns their published records',()=>{
     expect(await fresh.status('alice')).toMatchObject({linked:true,available:false});
   });
 
+  it('keeps summaries of private records out of public summary views',async()=>{
+    const f=await fixture();await f.layer.link(f.users[0],binding('alice'));
+    const hidden=await f.layer.storage.addEntry(post('alice','private'));
+    const visible=await f.layer.storage.addEntry({...post('alice','public'),to:[]});
+    const s=f.layer.storage as any;
+    for(const e of [hidden,visible])await s.addSummary({pseudonym:'alice#123',content:e.content,timestamp:1000,entryIds:[e.id],startTime:0,endTime:1000});
+    expect((await s.getSummaries()).map((v:any)=>v.content)).toEqual(['public']);
+    expect(f.data.get('space:alice')!.size).toBe(4);
+  });
+
+  it('does not silently switch an existing identity to a different empty space',async()=>{
+    const f=await fixture();await f.layer.link(f.users[0],binding('alice'));
+    await expect(f.layer.link(f.users[0],{...binding('alice'),space:'another-space'})).rejects.toThrow('explicit migration');
+    expect(await f.layer.status('alice')).toMatchObject({space:'space:alice',available:true});
+  });
+
   it('retries incomplete cleanup without losing the verified destination',async()=>{
     const f=await fixture(); const e=await f.base.addEntry(post('alice'));
     const remove=vi.spyOn(f.base,'deleteEntry').mockRejectedValueOnce(new Error('unavailable'));

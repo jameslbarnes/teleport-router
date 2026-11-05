@@ -13,6 +13,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Storage, JournalEntry } from '../storage.js';
 import { ENTRY_SCORE_PROMPT, ENTRY_HOOK_PROMPT } from './prompts.js';
+import { isPublicNotebookEntry } from '../public-views.js';
 
 /** Extract a JSON object from a model response, handling fences and trailing text. */
 export function extractJson(text: string): string {
@@ -100,6 +101,7 @@ export async function writeHook(
   anthropic: Anthropic,
   baseUrl = 'https://router.teleport.computer',
 ): Promise<string | null> {
+  relatedEntries = relatedEntries.filter(isPublicNotebookEntry);
   try {
     const author = entry.handle ? `@${entry.handle}` : entry.pseudonym;
 

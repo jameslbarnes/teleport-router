@@ -41,10 +41,12 @@ try {
     const handle=`${name}${suffix}`,secretKey=randomBytes(32).toString('base64url');
     await request(base,'/api/identity/register',{secret_key:secretKey,handle});
     const ownerKey=privateKey(),wallet=new Wallet(ownerKey);
-    const owner=new TinyCloudNode({privateKey:ownerKey,host,prefix:'router-test',autoCreateSpace:true});
+    const owner=new TinyCloudNode({privateKey:ownerKey,host,prefix:'router-test',autoCreateSpace:true,
+      enablePublicSpace:false,sessionExpirationMs:366*86400000});
     owners.push(owner); await owner.signIn();
     const grant=await owner.createDelegation({delegateDID:router.did,path:router.folder,actions:router.actions,
-      expiryMs:3600000,includePublicSpace:false}); grants.push(grant);
+      expiryMs:365*86400000,includePublicSpace:false}); grants.push(grant);
+    assert(grant.expiry.getTime()-Date.now()>364*86400000,'Owner session must not silently shorten the one-year grant');
     const challenge=await request(base,'/api/tinycloud/challenge',{secret_key:secretKey,delegation:serializeDelegation(grant)});
     const wrongSignature=await new Wallet(privateKey()).signMessage(challenge.message);
     const refused=await fetch(`${base}/api/tinycloud/link`,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -76,6 +78,8 @@ try {
   assert.equal((await feed()).entries.length,3);
   assert.equal((await request(base,'/api/entries')).entries.length,0);
   assert.equal((await fetch(`${base}/api/channels/${group}/entries`)).status,401);
+  for(const path of ['/api/stats',`/api/daily-summaries/${new Date().toISOString().slice(0,10)}/entries`])
+    assert(!(JSON.stringify(await request(base,path))).includes('Synthetic ownership'));
   console.log('PASS three authors publish into separate spaces; only members can read the combined group');
 
   // A fresh SDK client has a new session key, but can use the existing account-DID grant.

@@ -18,6 +18,7 @@ import type { Storage, JournalEntry, User } from '../storage.js';
 import type { Platform } from '../platform/types.js';
 import { SPARK_COPY_PROMPT, SPARK_EVALUATION_PROMPT } from './prompts.js';
 import { extractJson } from './scoring.js';
+import { hasPublicAudience } from '../public-views.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ export async function detectSparks(
   keywords?: string[],
 ): Promise<SparkCandidate[]> {
   const authorHandle = entry.handle;
-  if (!authorHandle) return [];
+  if (!authorHandle || !hasPublicAudience(entry)) return [];
 
   // Use provided keywords or extract from entry
   const searchTerms = keywords?.length
@@ -97,7 +98,7 @@ export async function detectSparks(
   // Search for related entries by other authors
   const relatedEntries = await storage.searchEntries(searchTerms.join(' '), 30);
   const otherEntries = relatedEntries.filter(e =>
-    e.handle && e.handle !== authorHandle
+    e.handle && e.handle !== authorHandle && hasPublicAudience(e)
   );
 
   // Group by author

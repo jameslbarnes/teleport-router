@@ -10,6 +10,7 @@
 import sgMail from '@sendgrid/mail';
 import Anthropic from '@anthropic-ai/sdk';
 import { generateNewsletterDigest } from './newsletter-digest.js';
+import { isPublicNotebookEntry } from './public-views.js';
 
 // Simple email client interface
 export interface EmailClient {
@@ -296,7 +297,7 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
     // Get user's entries from last 7 days
     const userEntries = await storage.getEntriesByHandle(userHandle, 20);
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const recentUserEntries = userEntries.filter(e => e.timestamp > sevenDaysAgo);
+    const recentUserEntries = userEntries.filter(e => e.timestamp > sevenDaysAgo && isPublicNotebookEntry(e));
 
     // Get entries from followed users (last 2 days)
     const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
@@ -307,7 +308,7 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
       for (const follow of user.following) {
         followedHandles.add(follow.handle);
         const entries = await storage.getEntriesByHandle(follow.handle, 20);
-        const recent = entries.filter(e => e.timestamp > twoDaysAgo);
+        const recent = entries.filter(e => e.timestamp > twoDaysAgo && isPublicNotebookEntry(e));
         followedEntries.push(...recent);
       }
       // Sort by timestamp descending, cap at 10
@@ -331,6 +332,7 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
     // Get recent entries from others (last 2 days), excluding user and followed
     const allRecent = await storage.getEntries(100);
     const othersEntries = allRecent.filter(e =>
+      isPublicNotebookEntry(e) &&
       e.handle !== userHandle &&
       !followedHandles.has(e.handle || '') &&
       e.timestamp > twoDaysAgo
