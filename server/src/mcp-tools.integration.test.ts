@@ -70,7 +70,7 @@ describe('MCP Tool Integration Tests', () => {
     await new Promise<void>((resolve) => moderationServer.listen(0, '127.0.0.1', () => resolve()));
     const moderationPort = (moderationServer.address() as AddressInfo).port;
 
-    serverProcess = spawn('npx', ['tsx', 'src/http.ts'], {
+    serverProcess = spawn(process.execPath, ['--import', 'tsx', 'src/http.ts'], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -82,7 +82,7 @@ describe('MCP Tool Integration Tests', () => {
         TINYCLOUD_GROUPS: 'memory',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true,
+      shell: false,
     });
 
     serverProcess.stderr?.on('data', (data) => {
@@ -484,6 +484,24 @@ describe('MCP Tool Integration Tests', () => {
 
     afterAll(async () => {
       try { await otherTransport?.close(); } catch {}
+    });
+
+    it('public dashboard and daily entry lists exclude private and AI-only content',async()=>{
+      const privateText='Private dashboard regression sentinel';
+      const hiddenText='AI-only dashboard regression sentinel';
+      await publish(await write(modClient,privateText,{to:[`@${RECIPIENT_HANDLE}`]}),MODERATOR_KEY);
+      await publish(await write(modClient,hiddenText,{ai_only:true}),MODERATOR_KEY);
+      const date=new Date().toISOString().slice(0,10);
+      for(const path of ['/api/stats',`/api/daily-summaries/${date}/entries`]) {
+        const response=await fetch(`${base()}${path}`);expect(response.ok).toBe(true);
+        const text=await response.text();expect(text).not.toContain(privateText);expect(text).not.toContain(hiddenText);
+      }
+    });
+
+    it('anonymous and ordinary users cannot delete other authors summaries',async()=>{
+      for(const key of ['',REGULAR_KEY])for(const path of ['/api/summaries','/api/daily-summaries']) {
+        expect((await fetch(`${base()}${path}${key?`?key=${key}`:''}`,{method:'DELETE'})).status).toBe(403);
+      }
     });
 
     it('post page: hidden from anonymous viewers, other keys and moderators; shown to the author', async () => {

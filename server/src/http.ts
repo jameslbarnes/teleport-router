@@ -10,7 +10,7 @@
 
 import 'dotenv/config';
 import { createServer } from 'http';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, accessSync, statSync, constants } from 'fs';
 import { join, extname, dirname } from 'path';
@@ -26,6 +26,9 @@ import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, is
 import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
 import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
+import { authorStorage, recordCodec } from './author-store.js';
+import { tinyCloudIdentity } from './tinycloud-identity.js';
+import { isPublicNotebookEntry, channelView } from './public-views.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -1034,11 +1037,22 @@ async function checkGroupGrant(wire: string | undefined, prefix: string): Promis
   if (grant.expiry && grant.expiry.getTime() <= Date.now()) return { error: 'The grant has expired.' };
   return { space: grant.spaceId };
 }
-const storage = useFirestore
-  ? new StagedStorage(STAGING_DELAY_MS, withGroups(new FirestoreStorage()))
-  : useStagedMemory
-    ? new StagedStorage(STAGING_DELAY_MS, withGroups(new MemoryStorage()))
-  : new MemoryStorage();
+const useAuthors = process.env.TINYCLOUD_AUTHORS === 'tinycloud';
+if (useAuthors && groups) throw new Error('Enable per-author storage without the legacy TINYCLOUD_GROUPS prototype.');
+const authorIdentity = useAuthors ? await tinyCloudIdentity() : null;
+const authorCloud = authorIdentity ? (await import('./tinycloud-group-store.js')).tinyCloudGroups({
+  privateKey: authorIdentity.privateKey, host: process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz',
+}) : null;
+const baseStorage: Storage = useFirestore ? new FirestoreStorage() : new MemoryStorage();
+const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
+  binding => authorCloud.accessFor(binding.delegation), recordCodec(authorIdentity.recordKey),
+  {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
+const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
+const storage = useFirestore || useStagedMemory || useAuthors
+  ? new StagedStorage(STAGING_DELAY_MS, publishedStorage) : baseStorage;
+const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string}>();
+const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progress: string; result?: unknown; error?: string}>();
+let authorLinkQueue: Promise<unknown> = Promise.resolve();
 const STATIC_DIR = join(process.cwd(), '..');
 
 /**
@@ -1192,6 +1206,7 @@ setInterval(async () => {
 const lastEntryTimestamp = new Map<string, number>();
 
 async function generateSummary(entries: JournalEntry[], otherEntriesToday: JournalEntry[] = []): Promise<string> {
+  entries = entries.filter(isPublicNotebookEntry);
   if (!anthropic || entries.length === 0) return '';
 
   // Don't summarize single entries
@@ -1256,7 +1271,7 @@ async function checkAndGenerateSummary(publishedEntry: JournalEntry) {
     startTime,
     lastTimestamp
   );
-  const entriesToSummarize = allEntriesInRange.filter(e => !e.isReflection);
+  const entriesToSummarize = allEntriesInRange.filter(e => !e.isReflection && isPublicNotebookEntry(e));
 
   if (entriesToSummarize.length === 0) {
     return;
@@ -1350,6 +1365,7 @@ if (storage instanceof StagedStorage) {
 // ═══════════════════════════════════════════════════════════════
 
 async function generateDailySummary(date: string, entries: JournalEntry[]): Promise<string> {
+  entries = entries.filter(isPublicNotebookEntry);
   if (!anthropic || entries.length === 0) return '';
 
   // Group entries by pseudonym for context
@@ -1453,7 +1469,7 @@ async function checkAndGenerateDailySummary(entry: JournalEntry): Promise<void> 
   }
 
   // Get yesterday's entries
-  const entries = await storage.getEntriesForDate(yesterday);
+  const entries = (await storage.getEntriesForDate(yesterday)).filter(isPublicNotebookEntry);
   if (entries.length === 0) {
     lastDailySummaryDate = yesterday;
     return;
@@ -1464,6 +1480,7 @@ async function checkAndGenerateDailySummary(entry: JournalEntry): Promise<void> 
     if (content) {
       const pseudonyms = [...new Set(entries.map(e => e.pseudonym))];
       await storage.addDailySummary({
+        publicOnly: true,
         date: yesterday,
         content,
         timestamp: Date.now(),
@@ -4905,7 +4922,7 @@ let cachedAnonEntriesPage: { key: string; body: string; expiresAt: number } | nu
 
 async function getEntryCountCached(storage: Storage): Promise<number> {
   const now = Date.now();
-  if (cachedEntryCount && cachedEntryCount.expiresAt > now) {
+  if (!authorLayer && cachedEntryCount && cachedEntryCount.expiresAt > now) {
     return cachedEntryCount.value;
   }
 
@@ -4941,6 +4958,15 @@ const server = createServer(async (req, res) => {
   });
 
   try {
+    // These maintenance routes can delete or regenerate another author's stored
+    // summaries. They require moderator identity, including when backed by TinyCloud.
+    if (['POST','DELETE'].includes(req.method || '') && /^\/api\/(?:summaries|daily-summaries(?:\/\d{4}-\d{2}-\d{2})?|backfill-summaries|backfill-daily-summaries)$/.test(url.pathname)) {
+      const key=req.headers.authorization?.replace(/^Bearer /i,'') || url.searchParams.get('key');
+      const user=key&&isValidSecretKey(key)?await storage.getUserByKeyHash(hashSecretKey(key)):null;
+      if(!user?.handle||!MODERATOR_HANDLES.has(user.handle)) {
+        res.writeHead(403);res.end(JSON.stringify({error:'Moderator identity required.'}));return;
+      }
+    }
     // ─────────────────────────────────────────────────────────────
     // GET /api/entry/:id - Get single entry by ID (for permalinks)
     // ─────────────────────────────────────────────────────────────
@@ -5096,7 +5122,7 @@ const server = createServer(async (req, res) => {
       const isAnonymous = !secretKey;
 
       // Hot path optimization: cache anonymous feed responses briefly.
-      if (isAnonymous && !followingOnly) {
+      if (isAnonymous && !followingOnly && !authorLayer) {
         const cacheKey = buildAnonEntriesCacheKey(limit, offset, cursor);
         const now = Date.now();
         if (cachedAnonEntriesPage && cachedAnonEntriesPage.key === cacheKey && cachedAnonEntriesPage.expiresAt > now) {
@@ -5160,7 +5186,7 @@ const server = createServer(async (req, res) => {
       });
 
       const body = JSON.stringify({ entries: strippedEntries, total, limit, offset, nextCursor });
-      if (isAnonymous && !followingOnly) {
+      if (isAnonymous && !followingOnly && !authorLayer) {
         cachedAnonEntriesPage = {
           key: buildAnonEntriesCacheKey(limit, offset, cursor),
           body,
@@ -5899,7 +5925,7 @@ const server = createServer(async (req, res) => {
       }
 
       const date = url.pathname.split('/')[3];
-      const entries = await storage.getEntriesForDate(date);
+      const entries = (await storage.getEntriesForDate(date)).filter(isPublicNotebookEntry);
 
       // Also get session summaries for that day
       const allSummaries = await storage.getSummaries(200);
@@ -5933,7 +5959,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const entries = await storage.getEntriesForDate(date);
+      const entries = (await storage.getEntriesForDate(date)).filter(isPublicNotebookEntry);
       if (entries.length === 0) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: 'No entries for this date' }));
@@ -5949,6 +5975,7 @@ const server = createServer(async (req, res) => {
 
       const pseudonyms = [...new Set(entries.map(e => e.pseudonym))];
       const summary = await storage.addDailySummary({
+        publicOnly: true,
         date,
         content,
         timestamp: Date.now(),
@@ -5971,7 +5998,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get all entries to find date range
-      const allEntries = await storage.getEntries(1000);
+      const allEntries = (await storage.getEntries(1000)).filter(isPublicNotebookEntry);
       if (allEntries.length === 0) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, results: [] }));
@@ -5998,7 +6025,7 @@ const server = createServer(async (req, res) => {
           continue;
         }
 
-        const entries = await storage.getEntriesForDate(date);
+        const entries = (await storage.getEntriesForDate(date)).filter(isPublicNotebookEntry);
         if (entries.length === 0) continue;
 
         try {
@@ -6006,6 +6033,7 @@ const server = createServer(async (req, res) => {
           if (content) {
             const pseudonyms = [...new Set(entries.map(e => e.pseudonym))];
             await storage.addDailySummary({
+              publicOnly: true,
               date,
               content,
               timestamp: Date.now(),
@@ -6074,7 +6102,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get all entries
-      const allEntries = await storage.getEntries(1000);
+      const allEntries = (await storage.getEntries(1000)).filter(isPublicNotebookEntry);
 
       // Group by pseudonym
       const byPseudonym = new Map<string, JournalEntry[]>();
@@ -6210,11 +6238,11 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const entries = await storage.getEntriesInRange(
+      const entries = (await storage.getEntriesInRange(
         summary.pseudonym,
         summary.startTime,
         summary.endTime
-      );
+      )).filter(isPublicNotebookEntry);
 
       res.writeHead(200);
       res.end(JSON.stringify({ entries }));
@@ -6248,8 +6276,8 @@ const server = createServer(async (req, res) => {
 
       res.writeHead(200);
       res.end(JSON.stringify({
-        subscribed: subscribedChannels,
-        discoverable,
+        subscribed: subscribedChannels.map(channelView),
+        discoverable: discoverable.map(channelView),
       }));
       return;
     }
@@ -6286,7 +6314,7 @@ const server = createServer(async (req, res) => {
       }
 
       res.writeHead(200);
-      res.end(JSON.stringify(channel));
+      res.end(JSON.stringify(channelView(channel)));
       return;
     }
 
@@ -6364,7 +6392,7 @@ const server = createServer(async (req, res) => {
           subscribers: [{ handle: user.handle, role: 'admin', joinedAt: Date.now() }],
         });
         res.writeHead(201);
-        res.end(JSON.stringify(channel));
+        res.end(JSON.stringify(channelView(channel)));
       } catch (err: any) {
         res.writeHead(409);
         res.end(JSON.stringify({ error: err.message }));
@@ -6419,7 +6447,7 @@ const server = createServer(async (req, res) => {
 
       const updated = await storage.updateChannel(channelId, updates);
       res.writeHead(200);
-      res.end(JSON.stringify(updated));
+      res.end(JSON.stringify(channelView(updated)));
       return;
     }
 
@@ -6741,8 +6769,81 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // GET /api/tinycloud/router - the identity a group owner grants access to
+    // Linking proves control of both independent identities. Never accept a TinyCloud private key.
+    if (req.method === 'POST' && ['/api/tinycloud/challenge','/api/tinycloud/link','/api/tinycloud/status','/api/tinycloud/refresh'].includes(url.pathname)) {
+      if (!authorLayer || !authorCloud || !authorIdentity) {
+        res.writeHead(404); res.end(JSON.stringify({error:'Author-owned storage is not enabled.'})); return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(await readBody(req,131072));
+        if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error('Invalid request');
+      } catch(err) {
+        res.writeHead(err instanceof RangeError?413:400); res.end(JSON.stringify({error:'Invalid or oversized linking request.'})); return;
+      }
+      const user = typeof parsed.secret_key === 'string' && isValidSecretKey(parsed.secret_key)
+        ? await storage.getUserByKeyHash(hashSecretKey(parsed.secret_key)) : null;
+      if (!user) { res.writeHead(401); res.end(JSON.stringify({error:'A registered Router identity is required.'})); return; }
+      res.setHeader('Cache-Control','no-store');
+      if (url.pathname === '/api/tinycloud/status') {
+        res.writeHead(200); res.end(JSON.stringify({...await authorLayer.status(user.handle),job:authorJobs.get(user.handle)||null})); return;
+      }
+      if (url.pathname === '/api/tinycloud/refresh') {
+        res.writeHead(200); res.end(JSON.stringify({available:await authorLayer.refresh(user.handle)})); return;
+      }
+      try {
+        const wire = parsed.delegation;
+        if (typeof wire !== 'string') throw new Error('A serialized TinyCloud delegation is required.');
+        const grant = authorCloud.inspectGrant(wire);
+        if(grant.host && new URL(grant.host).origin !== new URL(authorCloud.host).origin)
+          throw new Error('The grant must use this Router\'s configured TinyCloud host.');
+        const match = /^tinycloud:pkh:eip155:1:(0x[a-fA-F0-9]{40}):[\w-]+$/.exec(grant.spaceId);
+        if (!match) throw new Error('Expected an Ethereum-owned TinyCloud space.');
+        const ownerDid = `did:pkh:eip155:1:${match[1]}`;
+        if (grant.delegateDID.toLowerCase() !== authorIdentity.did.toLowerCase() || grant.path !== 'router/'
+          || GROUP_GRANT_ACTIONS.some(a=>!grant.actions.includes(a)) || grant.actions.some(a=>!GROUP_GRANT_ACTIONS.includes(a))
+          || !grant.expiry || !Number.isFinite(grant.expiry.getTime()) || grant.expiry.getTime() <= Date.now())
+          throw new Error('The grant must cover router/ with exactly get, put, list and del for this Router, and must be unexpired.');
+        const grantHash = createHash('sha256').update(wire).digest('hex');
+        if (url.pathname === '/api/tinycloud/challenge') {
+          for(const [handle,c] of authorChallenges) if(c.expires<Date.now()) authorChallenges.delete(handle);
+          const expires=Date.now()+10*60*1000;
+          const message=`Link TinyCloud to Teleport Router\nServer: ${BASE_URL}\nRouter identity: ${authorIdentity.did}\nRouter account: ${user.handle}\nOwner: ${ownerDid}\nGrant SHA-256: ${grantHash}\nNonce: ${randomUUID()}\nExpires: ${new Date(expires).toISOString()}`;
+          authorChallenges.set(user.handle,{message,expires,grantHash});
+          res.writeHead(200); res.end(JSON.stringify({message,expires})); return;
+        }
+        const challenge=authorChallenges.get(user.handle);
+        if(!challenge||challenge.expires<Date.now()||challenge.grantHash!==grantHash) throw new Error('Request a fresh linking challenge.');
+        const {verifyMessage}=await import('ethers');
+        if(typeof parsed.signature!=='string'||verifyMessage(challenge.message,parsed.signature).toLowerCase()!==match[1].toLowerCase())
+          throw new Error('The TinyCloud owner signature does not match this grant.');
+        if(authorJobs.get(user.handle)?.status==='running') { res.writeHead(409); res.end(JSON.stringify({error:'Your migration is already running.'})); return; }
+        authorChallenges.delete(user.handle);
+        const job={status:'running' as 'running'|'complete'|'failed',progress:'Waiting to verify and move published records.'};
+        authorJobs.set(user.handle,job);
+        const binding={ownerDid,space:grant.spaceId,prefix:grant.path,delegation:wire,pseudonym:derivePseudonym(parsed.secret_key),linkedAt:Date.now()};
+        // Serialize account links to enforce one TinyCloud identity per Router account.
+        authorLinkQueue=authorLinkQueue.catch(()=>{}).then(async()=>{
+          try {
+            const result=await authorLayer.link(user,binding,message=>{job.progress=message;});
+            Object.assign(job,{status:'complete',result,progress:'Migration verified; new posts use your TinyCloud space.'});
+          } catch {
+            Object.assign(job,{status:'failed',error:'Migration did not complete. Existing verified data is retained; retry or inspect the storage connection.'});
+          }
+        });
+        res.writeHead(202); res.end(JSON.stringify({status:'running',handle:user.handle})); return;
+      } catch(err) {
+        res.writeHead(400); res.end(JSON.stringify({error:err instanceof Error ? err.message : 'Invalid TinyCloud linking request.'})); return;
+      }
+    }
+
+    // GET /api/tinycloud/router - the identity an author or group owner grants access to
     if (req.method === 'GET' && url.pathname === '/api/tinycloud/router') {
+      if (authorIdentity && authorCloud) {
+        res.writeHead(200,{'Cache-Control':'no-store'});
+        res.end(JSON.stringify({did:authorIdentity.did,host:authorCloud.host,folder:'router/',actions:GROUP_GRANT_ACTIONS,
+          mode:'authors',keySource:authorIdentity.source,revocationWindowSeconds:60})); return;
+      }
       if (!groups?.tinycloud) {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'TinyCloud groups are not enabled on this server.' }));
@@ -8532,12 +8633,13 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'GET' && url.pathname === '/api/stats') {
       try {
-        const [entryCount, userCount, allEntries, allUsers] = await Promise.all([
-          storage.getEntryCount(),
+        const [userCount, rawEntries, allUsers] = await Promise.all([
           storage.getUserCount(),
           storage.getEntries(10000),
           storage.getAllUsers(),
         ]);
+        const allEntries = rawEntries.filter(isPublicNotebookEntry);
+        const entryCount = allEntries.length;
 
         // Calculate entries per day for the last 30 days
         const now = Date.now();
@@ -8580,7 +8682,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
           .slice(0, 20);
         const recentUsers = await Promise.all(recentUsersList.map(async u => {
           // Get all entries to count + pick most recent
-          const entries = await storage.getEntriesByHandle(u.handle, 500);
+          const entries = (await storage.getEntriesByHandle(u.handle, 500)).filter(isPublicNotebookEntry);
           const latest = entries[0];
           return {
             handle: u.handle,
@@ -8761,10 +8863,16 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 
-function readBody(req: import('http').IncomingMessage): Promise<string> {
+function readBody(req: import('http').IncomingMessage, maxBytes = Infinity): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let size=0,overflow=false;
+    req.on('data', (chunk) => {
+      if(overflow)return;
+      size+=chunk.length;
+      if(size>maxBytes){overflow=true;chunks.length=0;reject(new RangeError('Request is too large'));return;}
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });

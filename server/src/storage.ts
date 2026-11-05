@@ -7,6 +7,7 @@
 
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import type { AuthorBinding } from './author-store.js';
 
 // Visibility levels for entries
 export type EntryVisibility = 'public' | 'private' | 'ai-only';
@@ -58,6 +59,7 @@ export interface DailySummary {
   timestamp: number; // When summary was created
   entryCount: number;
   pseudonyms: string[]; // Pseudonyms who contributed that day
+  publicOnly?: boolean; // Generated from public, human-visible entries only.
 }
 
 export interface Conversation {
@@ -149,6 +151,8 @@ export interface User {
   lastDailyQuestionAt?: number;  // UTC timestamp of last daily question trigger, resets by calendar day
   /** Linked platform accounts — Matrix, Telegram, Discord, etc. */
   linkedAccounts?: LinkedAccount[];
+  /** Private storage configuration; never include the delegation in public profile responses. */
+  tinycloud?: AuthorBinding;
 }
 
 /**
@@ -450,9 +454,10 @@ export class MemoryStorage implements Storage {
   async addEntry(entry: Omit<JournalEntry, 'id'>, _stagingDelayMs?: number): Promise<JournalEntry> {
     const newEntry: JournalEntry = {
       ...entry,
-      id: String(this.nextId++),
+      id: (entry as JournalEntry).id || String(this.nextId++),
     };
-    this.entries.unshift(newEntry); // Add to front for newest-first ordering
+    this.entries = this.entries.filter(e => e.id !== newEntry.id);
+    this.entries.unshift(newEntry); // Idempotent when retrying a staged record.
     return newEntry;
   }
 
@@ -632,8 +637,9 @@ export class MemoryStorage implements Storage {
   async addConversation(conversation: Omit<Conversation, 'id'>): Promise<Conversation> {
     const newConversation: Conversation = {
       ...conversation,
-      id: String(this.nextId++),
+      id: (conversation as Conversation).id || String(this.nextId++),
     };
+    this.conversations = this.conversations.filter(c => c.id !== newConversation.id);
     this.conversations.unshift(newConversation);
     return newConversation;
   }
@@ -790,6 +796,35 @@ export class MemoryStorage implements Storage {
     this.sparkPairRooms.set(getSparkPairKey(handleA, handleB), roomId);
   }
 
+  private summaries = new Map<string, Summary>();
+  private dailySummaries = new Map<string, DailySummary>();
+
+  async addSummary(value: Omit<Summary,'id'>): Promise<Summary> {
+    const saved={...value,id:generateEntryId()};this.summaries.set(saved.id,saved);return saved;
+  }
+  async getSummaries(limit=50): Promise<Summary[]> {
+    return [...this.summaries.values()].sort((a,b)=>b.timestamp-a.timestamp).slice(0,limit);
+  }
+  async getLastSummaryForPseudonym(pseudonym:string): Promise<Summary|null> {
+    return [...this.summaries.values()].filter(s=>s.pseudonym===pseudonym).sort((a,b)=>b.endTime-a.endTime)[0]||null;
+  }
+  async deleteSummary(id:string): Promise<void> {this.summaries.delete(id);}
+  async addDailySummary(value:Omit<DailySummary,'id'>): Promise<DailySummary> {
+    const saved={...value,id:`daily-${value.date}`};this.dailySummaries.set(value.date,saved);return saved;
+  }
+  async getDailySummaries(limit=30): Promise<DailySummary[]> {
+    return [...this.dailySummaries.values()].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,limit);
+  }
+  async getDailySummary(date:string): Promise<DailySummary|null> {return this.dailySummaries.get(date)||null;}
+  async deleteDailySummary(date:string): Promise<void> {this.dailySummaries.delete(date);}
+  async getEntriesForDate(date:string): Promise<JournalEntry[]> {
+    const start=Date.parse(`${date}T00:00:00Z`);
+    return this.entries.filter(e=>e.timestamp>=start&&e.timestamp<start+86400000).sort((a,b)=>a.timestamp-b.timestamp);
+  }
+  async getEntriesInRange(pseudonym:string,start:number,end:number): Promise<JournalEntry[]> {
+    return this.entries.filter(e=>e.pseudonym===pseudonym&&e.timestamp>=start&&e.timestamp<=end).sort((a,b)=>a.timestamp-b.timestamp);
+  }
+
 }
 
 /**
@@ -840,7 +875,7 @@ export class FirestoreStorage implements Storage {
   }
 
   async addEntry(entry: Omit<JournalEntry, 'id'>, _stagingDelayMs?: number): Promise<JournalEntry> {
-    const id = generateEntryId();
+    const id = (entry as JournalEntry).id || generateEntryId();
     const keywords = tokenize(entry.content);
     const newEntry: JournalEntry = { ...entry, id, keywords };
 
@@ -1356,6 +1391,7 @@ export class FirestoreStorage implements Storage {
       timestamp: newSummary.timestamp,
       entryCount: newSummary.entryCount,
       pseudonyms: newSummary.pseudonyms,
+      publicOnly: newSummary.publicOnly === true,
     });
 
     return newSummary;
@@ -1412,7 +1448,7 @@ export class FirestoreStorage implements Storage {
   private conversationsCollection = 'imported_conversations';
 
   async addConversation(conversation: Omit<Conversation, 'id'>): Promise<Conversation> {
-    const id = generateEntryId();
+    const id = (conversation as Conversation).id || generateEntryId();
     const newConversation: Conversation = { ...conversation, id };
 
     const docData: Record<string, any> = {
@@ -1702,6 +1738,8 @@ export class FirestoreStorage implements Storage {
 export class StagedStorage implements Storage {
   private pending: Map<string, JournalEntry> = new Map();
   private pendingConversations: Map<string, Conversation> = new Map();
+  private publishingEntries = new Map<string, Promise<JournalEntry | null>>();
+  private publishingConversations = new Map<string, Promise<Conversation>>();
   private published: Storage & Record<string, any>;
   private publishDelayMs: number;
   private publishInterval: NodeJS.Timeout | null = null;
@@ -1730,40 +1768,34 @@ export class StagedStorage implements Storage {
 
   private startPublishLoop() {
     // Check every minute for entries ready to publish
-    this.publishInterval = setInterval(() => this.publishReadyEntries(), 60 * 1000);
+    this.publishInterval = setInterval(() => {
+      void this.publishReadyEntries().catch(() => console.error('[Storage] Publish sweep failed; waiting records retained'));
+    }, 60 * 1000);
   }
 
   private async publishReadyEntries() {
     const now = Date.now();
 
-    // Publish ready entries
-    for (const [id, entry] of this.pending) {
-      if (entry.publishAt && entry.publishAt <= now) {
-        // Move to Firestore without staging-only fields
-        const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
-        const saved = await this.published.addEntry(publishedEntry);
-        this.pending.delete(id);
-
-        // Call the onPublish callback if registered
-        if (this.onPublishCallback) {
-          try {
-            this.onPublishCallback(saved);
-          } catch (err) {
-            console.error('[Storage] onPublish callback error:', err);
-          }
-        }
+    // An unavailable author's store must not stop other authors from publishing.
+    // All failures leave the original waiting record available for retry/recovery.
+    const jobs: Promise<unknown>[] = [];
+    for (const [id, entry] of this.pending) if (entry.publishAt && entry.publishAt <= now && !entry.moderationHeld) jobs.push(this.publishEntry(id));
+    for (const [id, conversation] of this.pendingConversations) if (conversation.publishAt && conversation.publishAt <= now) {
+      let task = this.publishingConversations.get(id);
+      if (!task) {
+        task = (async () => {
+          const { publishAt, ...publishedConversation } = conversation;
+          const saved = await this.published.addConversation(publishedConversation);
+          this.pendingConversations.delete(id);
+          return saved;
+        })().finally(() => { this.publishingConversations.delete(id); });
+        this.publishingConversations.set(id, task);
       }
+      jobs.push(task);
     }
-
-    // Publish ready conversations
-    for (const [id, conversation] of this.pendingConversations) {
-      if (conversation.publishAt && conversation.publishAt <= now) {
-        // Move to Firestore without publishAt field
-        const { publishAt, ...publishedConversation } = conversation;
-        await this.published.addConversation(publishedConversation);
-        this.pendingConversations.delete(id);
-      }
-    }
+    const results = await Promise.allSettled(jobs);
+    const failed = results.filter(r => r.status === 'rejected').length;
+    if (failed) console.error(`[Storage] ${failed} publications failed; waiting records retained`);
   }
 
   async addEntry(entry: Omit<JournalEntry, 'id'>, stagingDelayMs?: number): Promise<JournalEntry> {
@@ -1851,6 +1883,11 @@ export class StagedStorage implements Storage {
   }
 
   async deleteEntry(id: string): Promise<void> {
+    const inflight = this.publishingEntries.get(id);
+    if (inflight) {
+      const saved = await inflight.catch(() => null);
+      if (saved) { await this.published.deleteEntry(saved.id); return; }
+    }
     // Try pending first
     if (this.pending.has(id)) {
       this.pending.delete(id);
@@ -1872,24 +1909,22 @@ export class StagedStorage implements Storage {
    * Returns the published entry, or null if entry was not found in pending
    */
   async publishEntry(id: string): Promise<JournalEntry | null> {
+    const inflight = this.publishingEntries.get(id);
+    if (inflight) return inflight;
     const entry = this.pending.get(id);
     if (!entry) return null;
-
-    // Move to Firestore without staging-only fields
-    const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
-    const saved = await this.published.addEntry(publishedEntry);
-    this.pending.delete(id);
-
-    // Call the onPublish callback if registered
-    if (this.onPublishCallback) {
-      try {
-        this.onPublishCallback(saved);
-      } catch (err) {
-        console.error('[Storage] onPublish callback error:', err);
+    const task = (async () => {
+      const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
+      const saved = await this.published.addEntry(publishedEntry);
+      this.pending.delete(id);
+      if (this.onPublishCallback) {
+        try { this.onPublishCallback(saved); }
+        catch (err) { console.error('[Storage] onPublish callback error:', err); }
       }
-    }
-
-    return saved;
+      return saved;
+    })().finally(() => { this.publishingEntries.delete(id); });
+    this.publishingEntries.set(id, task);
+    return task;
   }
 
   async searchEntries(query: string, limit = 50, since?: number): Promise<JournalEntry[]> {
@@ -2172,6 +2207,11 @@ export class StagedStorage implements Storage {
   }
 
   async deleteConversation(id: string): Promise<void> {
+    const inflight = this.publishingConversations.get(id);
+    if (inflight) {
+      const saved = await inflight.catch(() => null);
+      if (saved) { await this.published.deleteConversation(saved.id); return; }
+    }
     // Try pending first
     if (this.pendingConversations.has(id)) {
       this.pendingConversations.delete(id);

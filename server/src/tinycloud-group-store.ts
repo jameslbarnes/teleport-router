@@ -19,6 +19,8 @@ export interface GrantSummary {
   path: string;
   actions: string[];
   expiry?: Date;
+  delegatorDID?: string;
+  host?: string;
 }
 
 export function inspectGrant(wire: string): GrantSummary {
@@ -29,6 +31,8 @@ export function inspectGrant(wire: string): GrantSummary {
     path: d.path,
     actions: d.actions ?? [],
     expiry: d.expiry ? new Date(d.expiry) : undefined,
+    delegatorDID: d.delegatorDID,
+    host: d.host,
   };
 }
 
@@ -42,15 +46,16 @@ export function tinyCloudGroups(config: TinyCloudRouterConfig) {
 
   const storeByGrant = new Map<string, GroupStore>();
 
-  const resolver: GroupStoreResolver = async (channel) => {
-    const wire = channel.store.delegation;
-    if (!wire) throw new Error(`Group #${channel.id} has no TinyCloud grant.`);
+  const accessFor = async (wire: string): Promise<GroupStore> => {
     const cached = storeByGrant.get(wire);
     if (cached) return cached;
     const node = await signedIn();
     let access: unknown;
     try {
-      access = await node.useDelegation(deserializeDelegation(wire));
+      const delegation = deserializeDelegation(wire);
+      if (delegation.host && new URL(delegation.host).origin !== new URL(config.host).origin)
+        throw new Error('The TinyCloud grant uses a different host.');
+      access = await node.useDelegation({...delegation,host:config.host});
     } catch (err) {
       if (isRevokedGrant((err as Error)?.message)) throw new GroupStoreRevokedError();
       throw err;
@@ -61,7 +66,11 @@ export function tinyCloudGroups(config: TinyCloudRouterConfig) {
   };
 
   return {
-    resolver,
+    resolver: (async (channel) => {
+      if (!channel.store.delegation) throw new Error(`Group #${channel.id} has no TinyCloud grant.`);
+      return accessFor(channel.store.delegation);
+    }) as GroupStoreResolver,
+    accessFor,
     routerDid: async () => (await signedIn()).did as string,
     host: config.host,
     inspectGrant,

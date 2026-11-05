@@ -7,6 +7,10 @@ services:
       - "3000:3000"
     environment:
       - PORT=3000
+      - NODE_ENV=production
+      - TINYCLOUD_AUTHORS=tinycloud
+      - TINYCLOUD_KEY_SOURCE=dstack
+      - TINYCLOUD_HOST=https://tee.node.tinycloud.xyz
       - STAGING_DELAY_MS=3600000
       - GIT_SHA=${GIT_SHA}
       - IMAGE_DIGEST=${IMAGE_DIGEST}
@@ -21,6 +25,7 @@ services:
       - SENDGRID_FROM_EMAIL
     volumes:
       - router-data:/data
+      - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
   shape-matrix-bridge:
