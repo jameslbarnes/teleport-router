@@ -1,0 +1,10 @@
+{
+  "git_sha": "841d007cb70c9cf315dc1a1f2c2677e01b483c74",
+  "git_sha_short": "841d007",
+  "image_digest": "sha256:d6f7a6bd652ea0894dafe50847f76651db1b830bf9239126a9f8b281b070724f",
+  "agent_image_digest": "sha256:41976399654a138917f3cf79654909694a299ae3c1a91db1ee784c2f88bb2eb3",
+  "app_id": "db82f581256a3c9244c4d7129a67336990d08cdf",
+  "evidence_source": "public 8090 report",
+  "deployed_at": "2026-11-05T22:40:02Z",
+  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/42122157833"
+}
