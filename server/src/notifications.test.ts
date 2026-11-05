@@ -35,7 +35,7 @@ describe('NotificationService', () => {
     it('keeps private and AI-only followed/discovery text out of the email and model prompt',async()=>{
       const create=vi.fn().mockResolvedValue({content:[{type:'text',text:'<digest>Public update.</digest><question>Next?</question>'}]});
       await storage.createUser({handle:'alice',secretKeyHash:'alice',email:'alice@example.com',emailVerified:true,following:[{handle:'bob',note:'friend'}]});
-      for(const [handle,extra] of [['alice',{}],['bob',{to:['#private']}],['carol',{aiOnly:true}]] as const)
+      for(const [handle,extra] of [['alice',{}],['bob',{to:['#private']}],['carol',{aiOnly:true}]] as Array<[string,Partial<JournalEntry>]>)
         await storage.addEntry({handle,pseudonym:handle,client:'code',timestamp:Date.now(),content:`attestation ${handle} sentinel`,...extra});
       const digest=createNotificationService({storage,emailClient,anthropic:{messages:{create}} as any,
         fromEmail:'notify@router.test',baseUrl:'https://router.test',jwtSecret:'test'});
