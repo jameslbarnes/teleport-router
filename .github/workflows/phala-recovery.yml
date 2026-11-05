@@ -4,114 +4,42 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Recovery action to run'
+        description: 'Read-only outage diagnostics'
         required: true
         type: choice
         default: status
-        options:
-          - status
-          - restart
-          - api-cancel-operation
-          - api-force-restart
-          - api-stop
-          - api-start
+        options: [status]
 
 jobs:
   phala-recovery:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     permissions:
       contents: read
-
+    env:
+      PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+      PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
     steps:
       - name: Install Phala CLI
-        run: npm install -g phala
-
-      - name: Show CVM status
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: npm install -g phala@1.1.19
+      - name: Provider and gateway state
+        shell: bash
         run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}" \
-            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
-
-      - name: Show recent CVM events
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+          set +e
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}" -q '{id,status,in_progress,base_image,teepod,vcpu,memory,disk_size,app_url}'
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}/network" -q '{is_online,is_public,error,latest_handshake,public_urls}'
+      - name: Resource health
+        shell: bash
         run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/events" \
-            -q '{items: [.items[:10][] | {event_type,status,timestamp,message}], total, next_cursor}' || true
-
-      - name: Show CVM runtime state
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}/stats" -q '{is_online,is_public,error,status,in_progress,boot_progress,boot_error,sysinfo: (.sysinfo | {uptime,total_memory,available_memory,used_memory,free_memory,loadavg_one,loadavg_five,disks})}' || true
+      - name: Container health without environment or commands
+        shell: bash
         run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/state" || true
-
-      - name: Restart CVM
-        if: inputs.action == 'restart'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}/composition" -q '{is_online,is_public,error,containers: [.containers[]? | {id,names,image,state,status}]}' || true
+      - name: Independent public endpoint checks
+        shell: bash
         run: |
-          set -euo pipefail
-          timeout 900s phala cvms restart "${PHALA_APP_ID}" --json
-
-      - name: Cancel in-progress CVM operation through API
-        if: inputs.action == 'api-cancel-operation'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/operations/cancel" \
-            -X POST \
-            -i
-
-      - name: Force restart CVM through API
-        if: inputs.action == 'api-force-restart'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/restart" \
-            -X POST \
-            -d '{"force":true}' \
-            -i
-
-      - name: Stop CVM through API
-        if: inputs.action == 'api-stop'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/stop" \
-            -X POST \
-            -i
-
-      - name: Start CVM through API
-        if: inputs.action == 'api-start'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/start" \
-            -X POST \
-            -i
-
-      - name: Status after recovery action
-        if: inputs.action != 'status'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}" \
-            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
+          for url in https://router.teleport.computer/health https://hermes.teleport.computer/health "https://${PHALA_APP_ID}-3000.dstack-pha-prod9.phala.network/health" "https://${PHALA_APP_ID}-8090.dstack-pha-prod9.phala.network/"; do
+            echo "$url"
+            curl -sS --connect-timeout 5 --max-time 15 -o /dev/null -w 'HTTP %{http_code}; %{errormsg}\n' "$url" || true
+          done
