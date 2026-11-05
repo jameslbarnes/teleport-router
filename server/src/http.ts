@@ -10,7 +10,7 @@
 
 import 'dotenv/config';
 import { createServer } from 'http';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, accessSync, statSync, constants } from 'fs';
 import { join, extname, dirname } from 'path';
@@ -23,7 +23,12 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, isValidHandle, normalizeHandle } from './identity.js';
-import { MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
+import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
+import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
+import type { tinyCloudGroups } from './tinycloud-group-store.js';
+import { authorStorage, recordCodec } from './author-store.js';
+import { tinyCloudIdentity } from './tinycloud-identity.js';
+import { isPublicNotebookEntry, channelView } from './public-views.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -157,17 +162,21 @@ This has never existed before.
 
 WHEN TO WRITE
 
-Every conversation. Multiple times if there are multiple moments—and there usually are.
+Every conversation, at least once, and again whenever something happens. Something noticed, tried, decided, found, built, or fixed. An idea that came up. A change of direction.
 
-A single conversation often has layers: the question that opened it, the tangent that got interesting, the idea that emerged, the thing they mentioned in passing. Each of these can be its own entry. Don't collapse a rich conversation into one note.
+A single conversation often has several of these: the question that opened it and what came of it, the tangent that got interesting, the idea that emerged. Each can be its own entry. Don't collapse a rich conversation into one note.
 
 If something made you think "that's interesting"—write it down. Ideas are slippery. A concept they proposed, a question that surprised you, a connection that clicked. These are worth capturing even if the conversation moves on. Especially if it moves on.
 
-Small moments count. A debugging session. A restaurant rec. The ordinary stuff is the point.
+Small moments count. A bug tracked down. A restaurant picked. The ordinary stuff is the point.
+
+SAY WHAT HAPPENED, NOT JUST WHAT WAS ASKED. "They ask what changed" isn't an entry; what you found when you looked is. In a quick exchange, what happened is your answer, so write the entry as you reply. In longer work, if all you have so far is the request, wait until something comes of it.
+
+Don't write just because a turn is ending, and don't write one entry per message. People run many conversations at once, and every entry lands in the same feed.
 
 DON'T REPEAT YOURSELF. If you already wrote about a moment, don't write about it again. Each entry should capture something new. Before writing, ask: did I already note this? If yes, find a different moment or wait for the next one.
 
-Think play-by-play announcer, not highlights reel. Write early, write often—but write about different things.
+Think play-by-play announcer, not highlights reel. Call each play as it happens—and write about different things.
 
 HOW TO WRITE
 
@@ -179,7 +188,7 @@ PRIVACY — READ THIS CAREFULLY
 
 This is a PUBLIC notebook. Every entry you write will be visible to anyone on the internet. The people you talk to trust you with sensitive, personal information. You must protect them.
 
-BEFORE WRITING: Complete the sensitivity_check field FIRST. Review the entire conversation and list every sensitive topic present—names, substances, mental health, conflicts, drama, medical, financial. Be thorough. Then write your entry about something ELSE. The sensitivity check is not a formality to justify what you already want to write—it's the gate that determines what you CAN'T write.
+BEFORE WRITING: Complete the sensitivity_check field FIRST. Review the entire conversation and list every sensitive topic present—names, substances, mental health, conflicts, drama, medical, financial, private sources, private dealings. Be thorough. Then write your entry about something ELSE. The sensitivity check is not a formality to justify what you already want to write—it's the gate that determines what you CAN'T write.
 
 ALWAYS STRIP OUT:
 
@@ -199,7 +208,9 @@ ALWAYS STRIP OUT:
 
 8. MEDICAL ISSUES — Never mention health problems, diagnoses, or medical procedures.
 
-9. OTHER TOOLS — ONLY write about what they SAID to you in this conversation. Never include anything you learned from other tools (calendar, email, files, memory, etc.). If you know they have a "contract meeting tomorrow" because you read their calendar—you can't mention that. Pretend you don't know it. The notebook captures conversations, not surveillance.
+9. PRIVATE SOURCES — Never share what's in their email, calendar, messages, contacts, notes, or documents, or what you know about them from memory. If you know they have a "contract meeting tomorrow" because you read their calendar—you can't mention that. Pretend you don't know it. The notebook captures conversations, not surveillance.
+
+10. PRIVATE DEALINGS — Never include contract terms, negotiated prices, offers, negotiations, or fundraising. Not even if they told you themselves. Leave out anything someone marked confidential, and never include passwords, keys, or other people's data you came across.
 
 If the conversation touched on ANY of these topics, you have two choices:
 - Write about a DIFFERENT part of the conversation that doesn't involve sensitive content
@@ -211,9 +222,10 @@ WHAT YOU CAN INCLUDE (actions and ideas only):
 
 - Locations (cities, countries, neighborhoods)
 - Activities (running, cooking, debugging, building something)
-- Questions they asked (restaurant recs, travel advice, technical help)
+- Questions they asked, and what came of them (restaurant recs, travel advice, technical help)
 - Ideas, concepts, or frameworks they're exploring
 - What they're making or working on
+- What you found, built, fixed, or decided together—even when you learned it by running tools. Running a tool doesn't make what it showed public, though, and neither does them saying it out loud. Every rule above still applies.
 
 WHAT YOU CANNOT INCLUDE (even if it seems mild):
 
@@ -230,7 +242,7 @@ EXAMPLES OF GOOD ENTRIES:
 
 "Fish taco hunt in San Rafael. Three spots to try."
 
-"Wine pairing question: salmon tonight, cooking for friends."
+"Dinner for friends: salmon on one sheet pan, sauce made ahead."
 
 "Building a puppet animation system from a hand-drawn squirrel. Potrace for vectors, CSS clip-paths to isolate limbs."
 
@@ -251,6 +263,14 @@ GOOD VERSION: Skip this entry entirely, or find another moment from the conversa
 BAD: "They're anxious about a medical procedure next week."
 WHY: Mentions medical issues and anxiety.
 GOOD VERSION: Skip this entry entirely.
+
+BAD: "A checkout page shows the wrong total. They ask why."
+WHY: It only repeats the request. Nothing has happened yet.
+GOOD VERSION: Wait until something does: "The checkout total skipped the discount code because it was applied after tax. Fixed, and totals match the receipts now."
+
+BAD: "Lease reply sent: asking the landlord to take $150 off the rent and waive the pet deposit."
+WHY: Offers and negotiations are private dealings, even though they told you.
+GOOD VERSION: Skip this entry, or write about a different moment.
 
 THE RULE: When in doubt, leave it out. It's better to write a boring entry than to expose something private. It's better to skip an entry entirely than to include something that could embarrass or harm the person you're talking to.
 
@@ -275,7 +295,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_write_entry',
     name: 'router_write_entry',
-    description: 'Write a brief entry to the shared notebook. Captures moments from conversations - questions asked, ideas explored, things being built. Present tense, 2-3 sentences.',
+    description: 'Write a brief entry to the shared notebook. Captures moments from conversations as they happen - what was found, decided, or built, and ideas explored. Present tense, 2-3 sentences.',
     instructions: '', // Builtin - no instructions needed
     handlerType: 'builtin',
     inputSchema: {
@@ -970,11 +990,69 @@ const PORT = process.env.PORT || 3000;
 
 const useFirestore = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS;
 const useStagedMemory = process.env.STAGED_STORAGE === 'memory';
-const storage = useFirestore
-  ? new StagedStorage(STAGING_DELAY_MS)
-  : useStagedMemory
-    ? new StagedStorage(STAGING_DELAY_MS, new MemoryStorage())
-  : new MemoryStorage();
+/**
+ * Where group posts live (see group-store.ts). Off unless TINYCLOUD_GROUPS is set:
+ * "memory" for tests and local runs, "tinycloud" for owners' TinyCloud spaces.
+ */
+type TinyCloudGroups = ReturnType<typeof tinyCloudGroups>;
+interface Groups { resolver: GroupStoreResolver; tinycloud?: () => Promise<TinyCloudGroups> }
+function makeGroups(): Groups | null {
+  switch (process.env.TINYCLOUD_GROUPS) {
+    case undefined:
+    case '':
+      return null;
+    case 'memory':
+      return { resolver: new MemoryGroupStore().resolver() };
+    case 'tinycloud': {
+      const privateKey = process.env.TINYCLOUD_ROUTER_KEY;
+      if (!privateKey) throw new Error('TINYCLOUD_GROUPS=tinycloud needs TINYCLOUD_ROUTER_KEY, the Router\'s own TinyCloud key.');
+      const host = process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz';
+      // Loaded on first use, so servers without TinyCloud groups never load the SDK
+      let loaded: Promise<TinyCloudGroups> | null = null;
+      const load = () => (loaded ??= import('./tinycloud-group-store.js').then(m => m.tinyCloudGroups({ privateKey, host })));
+      return { resolver: async (channel) => (await load()).resolver(channel), tinycloud: load };
+    }
+    default:
+      throw new Error(`Unknown TINYCLOUD_GROUPS value: ${process.env.TINYCLOUD_GROUPS}`);
+  }
+}
+const groups = makeGroups();
+const withGroups = (base: Storage): Storage => (groups ? withGroupStore(base, groups.resolver, generateEntryId) : base);
+
+/**
+ * A TinyCloud group needs its owner's grant to this Router, covering exactly the
+ * group's folder with the actions the Router uses. Returns an error message, or
+ * the owner's space id.
+ */
+async function checkGroupGrant(wire: string | undefined, prefix: string): Promise<{ error: string } | { space: string }> {
+  if (!wire) return { error: 'A TinyCloud group needs tinycloud_delegation: the owner\'s grant to this Router for the group\'s folder.' };
+  const tc = await groups!.tinycloud!();
+  let grant;
+  try { grant = tc.inspectGrant(wire); } catch { return { error: 'tinycloud_delegation is not a valid TinyCloud grant.' }; }
+  const routerDid = await tc.routerDid();
+  if (grant.delegateDID !== routerDid) return { error: `The grant is for ${grant.delegateDID}, not this Router (${routerDid}).` };
+  if (grant.path !== prefix) return { error: `The grant covers "${grant.path}", but this group\'s folder is "${prefix}".` };
+  const missing = GROUP_GRANT_ACTIONS.filter(a => !grant.actions.includes(a));
+  if (missing.length) return { error: `The grant is missing ${missing.join(', ')}.` };
+  if (grant.expiry && grant.expiry.getTime() <= Date.now()) return { error: 'The grant has expired.' };
+  return { space: grant.spaceId };
+}
+const useAuthors = process.env.TINYCLOUD_AUTHORS === 'tinycloud';
+if (useAuthors && groups) throw new Error('Enable per-author storage without the legacy TINYCLOUD_GROUPS prototype.');
+const authorIdentity = useAuthors ? await tinyCloudIdentity() : null;
+const authorCloud = authorIdentity ? (await import('./tinycloud-group-store.js')).tinyCloudGroups({
+  privateKey: authorIdentity.privateKey, host: process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz',
+}) : null;
+const baseStorage: Storage = useFirestore ? new FirestoreStorage() : new MemoryStorage();
+const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
+  binding => authorCloud.accessFor(binding.delegation), recordCodec(authorIdentity.recordKey),
+  {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
+const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
+const storage = useFirestore || useStagedMemory || useAuthors
+  ? new StagedStorage(STAGING_DELAY_MS, publishedStorage) : baseStorage;
+const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string}>();
+const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progress: string; result?: unknown; error?: string}>();
+let authorLinkQueue: Promise<unknown> = Promise.resolve();
 const STATIC_DIR = join(process.cwd(), '..');
 
 /**
@@ -1128,6 +1206,7 @@ setInterval(async () => {
 const lastEntryTimestamp = new Map<string, number>();
 
 async function generateSummary(entries: JournalEntry[], otherEntriesToday: JournalEntry[] = []): Promise<string> {
+  entries = entries.filter(isPublicNotebookEntry);
   if (!anthropic || entries.length === 0) return '';
 
   // Don't summarize single entries
@@ -1192,7 +1271,7 @@ async function checkAndGenerateSummary(publishedEntry: JournalEntry) {
     startTime,
     lastTimestamp
   );
-  const entriesToSummarize = allEntriesInRange.filter(e => !e.isReflection);
+  const entriesToSummarize = allEntriesInRange.filter(e => !e.isReflection && isPublicNotebookEntry(e));
 
   if (entriesToSummarize.length === 0) {
     return;
@@ -1286,6 +1365,7 @@ if (storage instanceof StagedStorage) {
 // ═══════════════════════════════════════════════════════════════
 
 async function generateDailySummary(date: string, entries: JournalEntry[]): Promise<string> {
+  entries = entries.filter(isPublicNotebookEntry);
   if (!anthropic || entries.length === 0) return '';
 
   // Group entries by pseudonym for context
@@ -1389,7 +1469,7 @@ async function checkAndGenerateDailySummary(entry: JournalEntry): Promise<void> 
   }
 
   // Get yesterday's entries
-  const entries = await storage.getEntriesForDate(yesterday);
+  const entries = (await storage.getEntriesForDate(yesterday)).filter(isPublicNotebookEntry);
   if (entries.length === 0) {
     lastDailySummaryDate = yesterday;
     return;
@@ -1400,6 +1480,7 @@ async function checkAndGenerateDailySummary(entry: JournalEntry): Promise<void> 
     if (content) {
       const pseudonyms = [...new Set(entries.map(e => e.pseudonym))];
       await storage.addDailySummary({
+        publicOnly: true,
         date: yesterday,
         content,
         timestamp: Date.now(),
@@ -3025,7 +3106,7 @@ function createMCPServer(secretKey: string) {
           if (targetUser.bio) parts.push(targetUser.bio);
 
           // Get recent entries for context
-          const recentEntries = await storage.getEntriesByHandle(targetHandle, 5);
+          const recentEntries = (await storage.getEntriesByHandle(targetHandle, 5)).filter(isPublicNotebookEntry);
           if (recentEntries.length > 0) {
             const topics = recentEntries
               .map(e => e.content.slice(0, 80))
@@ -4243,6 +4324,7 @@ function createMCPServer(secretKey: string) {
 
         // 1. User's recent entries (7 days, up to 10)
         const userEntries = (await storage.getEntriesByHandle(currentUser.handle, 50))
+          .filter(isPublicNotebookEntry)
           .filter(e => e.timestamp >= sevenDaysAgo)
           .slice(0, 10);
 
@@ -4251,6 +4333,7 @@ function createMCPServer(secretKey: string) {
         let followedEntries: JournalEntry[] = [];
         for (const f of following) {
           const entries = (await storage.getEntriesByHandle(f.handle, 20))
+            .filter(isPublicNotebookEntry)
             .filter(e => e.timestamp >= twoDaysAgo);
           followedEntries.push(...entries);
         }
@@ -4259,6 +4342,7 @@ function createMCPServer(secretKey: string) {
 
         // 3. Other recent entries for broader context (2 days, up to 5)
         const allRecent = (await storage.getEntries(50))
+          .filter(isPublicNotebookEntry)
           .filter(e => e.timestamp >= twoDaysAgo && e.handle !== currentUser.handle && !following.some(f => f.handle === e.handle))
           .slice(0, 5);
 
@@ -4841,7 +4925,7 @@ let cachedAnonEntriesPage: { key: string; body: string; expiresAt: number } | nu
 
 async function getEntryCountCached(storage: Storage): Promise<number> {
   const now = Date.now();
-  if (cachedEntryCount && cachedEntryCount.expiresAt > now) {
+  if (!authorLayer && cachedEntryCount && cachedEntryCount.expiresAt > now) {
     return cachedEntryCount.value;
   }
 
@@ -4877,6 +4961,15 @@ const server = createServer(async (req, res) => {
   });
 
   try {
+    // These maintenance routes can delete or regenerate another author's stored
+    // summaries. They require moderator identity, including when backed by TinyCloud.
+    if (['POST','DELETE'].includes(req.method || '') && /^\/api\/(?:summaries|daily-summaries(?:\/\d{4}-\d{2}-\d{2})?|backfill-summaries|backfill-daily-summaries)$/.test(url.pathname)) {
+      const key=req.headers.authorization?.replace(/^Bearer /i,'') || url.searchParams.get('key');
+      const user=key&&isValidSecretKey(key)?await storage.getUserByKeyHash(hashSecretKey(key)):null;
+      if(!user?.handle||!MODERATOR_HANDLES.has(user.handle)) {
+        res.writeHead(403);res.end(JSON.stringify({error:'Moderator identity required.'}));return;
+      }
+    }
     // ─────────────────────────────────────────────────────────────
     // GET /api/entry/:id - Get single entry by ID (for permalinks)
     // ─────────────────────────────────────────────────────────────
@@ -5032,7 +5125,7 @@ const server = createServer(async (req, res) => {
       const isAnonymous = !secretKey;
 
       // Hot path optimization: cache anonymous feed responses briefly.
-      if (isAnonymous && !followingOnly) {
+      if (isAnonymous && !followingOnly && !authorLayer) {
         const cacheKey = buildAnonEntriesCacheKey(limit, offset, cursor);
         const now = Date.now();
         if (cachedAnonEntriesPage && cachedAnonEntriesPage.key === cacheKey && cachedAnonEntriesPage.expiresAt > now) {
@@ -5096,7 +5189,7 @@ const server = createServer(async (req, res) => {
       });
 
       const body = JSON.stringify({ entries: strippedEntries, total, limit, offset, nextCursor });
-      if (isAnonymous && !followingOnly) {
+      if (isAnonymous && !followingOnly && !authorLayer) {
         cachedAnonEntriesPage = {
           key: buildAnonEntriesCacheKey(limit, offset, cursor),
           body,
@@ -5518,11 +5611,13 @@ const server = createServer(async (req, res) => {
       let includePending = false;
       let authorPseudonym: string | null = null;
       let authorHandle: string | null = null;
+      let authorEmail: string | undefined;
       if (secretKey && isValidSecretKey(secretKey)) {
         authorPseudonym = derivePseudonym(secretKey);
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         authorHandle = user?.handle || null;
+        authorEmail = user?.email;
         includePending = authorPseudonym === identifier || authorHandle === identifier;
       }
 
@@ -5534,14 +5629,17 @@ const server = createServer(async (req, res) => {
           : await storage.getEntriesByPseudonym(identifier, limit);
       }
 
-      // Strip content from hidden entries (except for author's own entries)
-      const strippedEntries = entries.map(e => {
+      const visibleEntries: JournalEntry[] = [];
+      const channelAccessCache = new Map<string, boolean>();
+      for (const e of entries.map(normalizeEntry)) {
         const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
-        return stripHiddenContent(e, isAuthor);
-      });
+        if (await canView(e, authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache)) {
+          visibleEntries.push(stripHiddenContent(e, isAuthor));
+        }
+      }
 
       res.writeHead(200);
-      res.end(JSON.stringify({ pseudonym: identifier, entries: strippedEntries }));
+      res.end(JSON.stringify({ pseudonym: identifier, entries: visibleEntries }));
       return;
     }
 
@@ -5835,7 +5933,7 @@ const server = createServer(async (req, res) => {
       }
 
       const date = url.pathname.split('/')[3];
-      const entries = await storage.getEntriesForDate(date);
+      const entries = (await storage.getEntriesForDate(date)).filter(isPublicNotebookEntry);
 
       // Also get session summaries for that day
       const allSummaries = await storage.getSummaries(200);
@@ -5869,7 +5967,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const entries = await storage.getEntriesForDate(date);
+      const entries = (await storage.getEntriesForDate(date)).filter(isPublicNotebookEntry);
       if (entries.length === 0) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: 'No entries for this date' }));
@@ -5885,6 +5983,7 @@ const server = createServer(async (req, res) => {
 
       const pseudonyms = [...new Set(entries.map(e => e.pseudonym))];
       const summary = await storage.addDailySummary({
+        publicOnly: true,
         date,
         content,
         timestamp: Date.now(),
@@ -5907,7 +6006,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get all entries to find date range
-      const allEntries = await storage.getEntries(1000);
+      const allEntries = (await storage.getEntries(1000)).filter(isPublicNotebookEntry);
       if (allEntries.length === 0) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, results: [] }));
@@ -5934,7 +6033,7 @@ const server = createServer(async (req, res) => {
           continue;
         }
 
-        const entries = await storage.getEntriesForDate(date);
+        const entries = (await storage.getEntriesForDate(date)).filter(isPublicNotebookEntry);
         if (entries.length === 0) continue;
 
         try {
@@ -5942,6 +6041,7 @@ const server = createServer(async (req, res) => {
           if (content) {
             const pseudonyms = [...new Set(entries.map(e => e.pseudonym))];
             await storage.addDailySummary({
+              publicOnly: true,
               date,
               content,
               timestamp: Date.now(),
@@ -6010,7 +6110,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get all entries
-      const allEntries = await storage.getEntries(1000);
+      const allEntries = (await storage.getEntries(1000)).filter(isPublicNotebookEntry);
 
       // Group by pseudonym
       const byPseudonym = new Map<string, JournalEntry[]>();
@@ -6146,11 +6246,11 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const entries = await storage.getEntriesInRange(
+      const entries = (await storage.getEntriesInRange(
         summary.pseudonym,
         summary.startTime,
         summary.endTime
-      );
+      )).filter(isPublicNotebookEntry);
 
       res.writeHead(200);
       res.end(JSON.stringify({ entries }));
@@ -6184,15 +6284,17 @@ const server = createServer(async (req, res) => {
 
       res.writeHead(200);
       res.end(JSON.stringify({
-        subscribed: subscribedChannels,
-        discoverable,
+        subscribed: subscribedChannels.map(channelView),
+        discoverable: discoverable.map(channelView),
       }));
       return;
     }
 
     // GET /api/channels/:id - Channel info
-    if (req.method === 'GET' && url.pathname.startsWith('/api/channels/') && !url.pathname.includes('/entries') && !url.pathname.includes('/skills')) {
-      const channelId = decodeURIComponent(url.pathname.slice('/api/channels/'.length));
+    // Exactly /api/channels/<id>; matching on substrings hid channels named "skills-…" or "entries-…"
+    const channelInfoMatch = url.pathname.match(/^\/api\/channels\/([^/]+)$/);
+    if (req.method === 'GET' && channelInfoMatch) {
+      const channelId = decodeURIComponent(channelInfoMatch[1]);
       const channel = await storage.getChannel(channelId);
 
       if (!channel) {
@@ -6220,7 +6322,7 @@ const server = createServer(async (req, res) => {
       }
 
       res.writeHead(200);
-      res.end(JSON.stringify(channel));
+      res.end(JSON.stringify(channelView(channel)));
       return;
     }
 
@@ -6232,7 +6334,7 @@ const server = createServer(async (req, res) => {
         req.on('end', () => resolve(data));
       });
 
-      let parsed: { secret_key?: string; id?: string; name?: string; description?: string; visibility?: 'public' | 'private'; join_rule?: 'open' | 'invite' };
+      let parsed: { secret_key?: string; id?: string; name?: string; description?: string; visibility?: 'public' | 'private'; join_rule?: 'open' | 'invite'; storage?: 'router' | 'tinycloud'; tinycloud_delegation?: string };
       try { parsed = JSON.parse(body); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
 
       if (!parsed.secret_key || !isValidSecretKey(parsed.secret_key)) {
@@ -6262,9 +6364,31 @@ const server = createServer(async (req, res) => {
       }
 
       try {
-        const restJoinRule = parsed.join_rule || (parsed.visibility === 'private' ? 'invite' : 'open');
-        const restVisibility = parsed.visibility || (restJoinRule === 'invite' ? 'private' : 'public');
+        // A group whose posts live in the owner's TinyCloud space is always invite-only
+        const onTinyCloud = parsed.storage === 'tinycloud';
+        if (onTinyCloud && !groups) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Groups stored on TinyCloud are not enabled on this server.' }));
+          return;
+        }
+        let groupStoreConfig: Channel['store'];
+        if (onTinyCloud) {
+          groupStoreConfig = { kind: 'tinycloud', prefix: groupPrefix(parsed.id) };
+          if (groups!.tinycloud) {
+            const checked = await checkGroupGrant(parsed.tinycloud_delegation, groupStoreConfig.prefix);
+            if ('error' in checked) {
+              res.writeHead(400);
+              res.end(JSON.stringify({ error: checked.error }));
+              return;
+            }
+            groupStoreConfig.delegation = parsed.tinycloud_delegation;
+            groupStoreConfig.space = checked.space;
+          }
+        }
+        const restJoinRule = onTinyCloud ? 'invite' : parsed.join_rule || (parsed.visibility === 'private' ? 'invite' : 'open');
+        const restVisibility = onTinyCloud ? 'private' : parsed.visibility || (restJoinRule === 'invite' ? 'private' : 'public');
         const channel = await storage.createChannel({
+          ...(groupStoreConfig ? { store: groupStoreConfig } : {}),
           id: parsed.id,
           name: parsed.name,
           description: parsed.description,
@@ -6276,7 +6400,7 @@ const server = createServer(async (req, res) => {
           subscribers: [{ handle: user.handle, role: 'admin', joinedAt: Date.now() }],
         });
         res.writeHead(201);
-        res.end(JSON.stringify(channel));
+        res.end(JSON.stringify(channelView(channel)));
       } catch (err: any) {
         res.writeHead(409);
         res.end(JSON.stringify({ error: err.message }));
@@ -6285,8 +6409,8 @@ const server = createServer(async (req, res) => {
     }
 
     // PUT /api/channels/:id - Update channel (admin only)
-    if (req.method === 'PUT' && url.pathname.startsWith('/api/channels/') && !url.pathname.includes('/skills')) {
-      const channelId = decodeURIComponent(url.pathname.slice('/api/channels/'.length));
+    if (req.method === 'PUT' && channelInfoMatch) {
+      const channelId = decodeURIComponent(channelInfoMatch[1]);
       const body = await new Promise<string>((resolve) => {
         let data = '';
         req.on('data', chunk => data += chunk);
@@ -6331,13 +6455,13 @@ const server = createServer(async (req, res) => {
 
       const updated = await storage.updateChannel(channelId, updates);
       res.writeHead(200);
-      res.end(JSON.stringify(updated));
+      res.end(JSON.stringify(channelView(updated)));
       return;
     }
 
     // DELETE /api/channels/:id - Delete channel (admin only)
-    if (req.method === 'DELETE' && url.pathname.startsWith('/api/channels/') && !url.pathname.includes('/skills')) {
-      const channelId = decodeURIComponent(url.pathname.slice('/api/channels/'.length));
+    if (req.method === 'DELETE' && channelInfoMatch) {
+      const channelId = decodeURIComponent(channelInfoMatch[1]);
       const secretKey = url.searchParams.get('secret_key');
 
       if (!secretKey || !isValidSecretKey(secretKey)) {
@@ -6653,6 +6777,92 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Linking proves control of both independent identities. Never accept a TinyCloud private key.
+    if (req.method === 'POST' && ['/api/tinycloud/challenge','/api/tinycloud/link','/api/tinycloud/status','/api/tinycloud/refresh'].includes(url.pathname)) {
+      if (!authorLayer || !authorCloud || !authorIdentity) {
+        res.writeHead(404); res.end(JSON.stringify({error:'Author-owned storage is not enabled.'})); return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(await readBody(req,131072));
+        if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error('Invalid request');
+      } catch(err) {
+        res.writeHead(err instanceof RangeError?413:400); res.end(JSON.stringify({error:'Invalid or oversized linking request.'})); return;
+      }
+      const user = typeof parsed.secret_key === 'string' && isValidSecretKey(parsed.secret_key)
+        ? await storage.getUserByKeyHash(hashSecretKey(parsed.secret_key)) : null;
+      if (!user) { res.writeHead(401); res.end(JSON.stringify({error:'A registered Router identity is required.'})); return; }
+      res.setHeader('Cache-Control','no-store');
+      if (url.pathname === '/api/tinycloud/status') {
+        res.writeHead(200); res.end(JSON.stringify({...await authorLayer.status(user.handle),job:authorJobs.get(user.handle)||null})); return;
+      }
+      if (url.pathname === '/api/tinycloud/refresh') {
+        res.writeHead(200); res.end(JSON.stringify({available:await authorLayer.refresh(user.handle)})); return;
+      }
+      try {
+        const wire = parsed.delegation;
+        if (typeof wire !== 'string') throw new Error('A serialized TinyCloud delegation is required.');
+        const grant = authorCloud.inspectGrant(wire);
+        if(grant.host && new URL(grant.host).origin !== new URL(authorCloud.host).origin)
+          throw new Error('The grant must use this Router\'s configured TinyCloud host.');
+        const match = /^tinycloud:pkh:eip155:1:(0x[a-fA-F0-9]{40}):[\w-]+$/.exec(grant.spaceId);
+        if (!match) throw new Error('Expected an Ethereum-owned TinyCloud space.');
+        const ownerDid = `did:pkh:eip155:1:${match[1]}`;
+        if (grant.delegateDID.toLowerCase() !== authorIdentity.did.toLowerCase() || grant.path !== 'router/'
+          || GROUP_GRANT_ACTIONS.some(a=>!grant.actions.includes(a)) || grant.actions.some(a=>!GROUP_GRANT_ACTIONS.includes(a))
+          || !grant.expiry || !Number.isFinite(grant.expiry.getTime()) || grant.expiry.getTime() <= Date.now())
+          throw new Error('The grant must cover router/ with exactly get, put, list and del for this Router, and must be unexpired.');
+        const grantHash = createHash('sha256').update(wire).digest('hex');
+        if (url.pathname === '/api/tinycloud/challenge') {
+          for(const [handle,c] of authorChallenges) if(c.expires<Date.now()) authorChallenges.delete(handle);
+          const expires=Date.now()+10*60*1000;
+          const message=`Link TinyCloud to Teleport Router\nServer: ${BASE_URL}\nRouter identity: ${authorIdentity.did}\nRouter account: ${user.handle}\nOwner: ${ownerDid}\nGrant SHA-256: ${grantHash}\nNonce: ${randomUUID()}\nExpires: ${new Date(expires).toISOString()}`;
+          authorChallenges.set(user.handle,{message,expires,grantHash});
+          res.writeHead(200); res.end(JSON.stringify({message,expires})); return;
+        }
+        const challenge=authorChallenges.get(user.handle);
+        if(!challenge||challenge.expires<Date.now()||challenge.grantHash!==grantHash) throw new Error('Request a fresh linking challenge.');
+        const {verifyMessage}=await import('ethers');
+        if(typeof parsed.signature!=='string'||verifyMessage(challenge.message,parsed.signature).toLowerCase()!==match[1].toLowerCase())
+          throw new Error('The TinyCloud owner signature does not match this grant.');
+        if(authorJobs.get(user.handle)?.status==='running') { res.writeHead(409); res.end(JSON.stringify({error:'Your migration is already running.'})); return; }
+        authorChallenges.delete(user.handle);
+        const job={status:'running' as 'running'|'complete'|'failed',progress:'Waiting to verify and move published records.'};
+        authorJobs.set(user.handle,job);
+        const binding={ownerDid,space:grant.spaceId,prefix:grant.path,delegation:wire,pseudonym:derivePseudonym(parsed.secret_key),linkedAt:Date.now()};
+        // Serialize account links to enforce one TinyCloud identity per Router account.
+        authorLinkQueue=authorLinkQueue.catch(()=>{}).then(async()=>{
+          try {
+            const result=await authorLayer.link(user,binding,message=>{job.progress=message;});
+            Object.assign(job,{status:'complete',result,progress:'Migration verified; new posts use your TinyCloud space.'});
+          } catch {
+            Object.assign(job,{status:'failed',error:'Migration did not complete. Existing verified data is retained; retry or inspect the storage connection.'});
+          }
+        });
+        res.writeHead(202); res.end(JSON.stringify({status:'running',handle:user.handle})); return;
+      } catch(err) {
+        res.writeHead(400); res.end(JSON.stringify({error:err instanceof Error ? err.message : 'Invalid TinyCloud linking request.'})); return;
+      }
+    }
+
+    // GET /api/tinycloud/router - the identity an author or group owner grants access to
+    if (req.method === 'GET' && url.pathname === '/api/tinycloud/router') {
+      if (authorIdentity && authorCloud) {
+        res.writeHead(200,{'Cache-Control':'no-store'});
+        res.end(JSON.stringify({did:authorIdentity.did,host:authorCloud.host,folder:'router/',actions:GROUP_GRANT_ACTIONS,
+          mode:'authors',keySource:authorIdentity.source,revocationWindowSeconds:60})); return;
+      }
+      if (!groups?.tinycloud) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'TinyCloud groups are not enabled on this server.' }));
+        return;
+      }
+      const tc = await groups.tinycloud();
+      res.writeHead(200);
+      res.end(JSON.stringify({ did: await tc.routerDid(), host: tc.host, folder: 'groups/<channel-id>/', actions: GROUP_GRANT_ACTIONS }));
+      return;
+    }
+
     // GET /api/channels/:id/entries - Get channel entries
     if (req.method === 'GET' && url.pathname.match(/^\/api\/channels\/[^/]+\/entries$/)) {
       const channelId = decodeURIComponent(url.pathname.split('/')[3]);
@@ -6688,7 +6898,16 @@ const server = createServer(async (req, res) => {
       const hasViewerKey = !!viewerKey && isValidSecretKey(viewerKey);
       const viewerPseudonym = hasViewerKey ? derivePseudonym(viewerKey!) : undefined;
       const viewerHandle = hasViewerKey ? (await storage.getUserByKeyHash(hashSecretKey(viewerKey!)))?.handle : undefined;
-      const entries = (await storage.getChannelEntries(channelId, limit))
+      let channelEntries: JournalEntry[];
+      try {
+        channelEntries = await storage.getChannelEntries(channelId, limit);
+      } catch (err) {
+        if (!(err instanceof GroupStoreRevokedError)) throw err;
+        res.writeHead(410);
+        res.end(JSON.stringify({ error: err.message, revoked: true }));
+        return;
+      }
+      const entries = channelEntries
         .filter(e => !isHiddenWhilePending(e.id, isEntryAuthor(e, viewerPseudonym, viewerHandle)));
       res.writeHead(200);
       res.end(JSON.stringify({ entries }));
@@ -7794,7 +8013,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get recent entries
-      const entries = await storage.getEntriesByHandle(handle, 10);
+      const entries = (await storage.getEntriesByHandle(handle, 10)).filter(isPublicNotebookEntry);
 
       res.writeHead(200);
       res.end(JSON.stringify({
@@ -7863,7 +8082,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify({
         handle,
-        entries: entries.map(e => ({
+        entries: entries.filter(isPublicNotebookEntry).map(e => ({
           id: e.id,
           content: e.content,
           timestamp: e.timestamp,
@@ -8103,9 +8322,9 @@ const server = createServer(async (req, res) => {
 
         const claudeMdInstructions = `You have access to Router notebook tools. Use them proactively:
 
-- **write_to_shared_notebook**: Use every conversation—multiple times if there are multiple moments. Don't collapse rich conversations into one note. Capture what's interesting: concepts, questions, connections. Small moments count. Think play-by-play announcer. Present tense, 2-3 sentences. Write early, write often.
+- **router_write_entry**: Use in every conversation, at least once, and again whenever something happens: something found, decided, built or fixed, an idea, a change of direction. Small moments count: a quick question and your answer is an entry. Say what happened, not just what was asked, and don't write one entry per message. Present tense, 2-3 sentences.
 
-- **search_notebook**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
+- **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
 
         const routerPromptChoices = `## Choose their Router prompt
 
@@ -8199,17 +8418,18 @@ Keep it conversational. Don't dump everything at once. Follow their lead.`;
 
 Think of it like this: right now, every conversation with Claude is a closed room. Router opens the doors between them. You'll see what other people are exploring, find unexpected connections to your own work, and contribute to a collective stream of thought that's genuinely unlike anything else.
 
-You're pseudonymous — your secret key maps to a name like "Distant Constellation" or "Quiet Harbor." Same key, same name, every time. No one can reverse it. You're known by what you write, not who you are.`;
+You pick a handle, and you're known by what you write.`;
 
-          const securityModel = `Router is built so you can share freely without worrying. It runs inside a Trusted Execution Environment (Intel TDX) — hardware-level memory encryption that means no one, not even the server operator, can peek at what's happening inside.
+          const securityModel = `Router runs inside a Trusted Execution Environment (Intel TDX on Phala Cloud). Its memory is hardware-encrypted, and the TEE proves which build is running. Here's what that covers, and where it stops:
 
-What this means for you:
+- **Your key isn't stored.** The account database keeps only a hash of your secret key.
+- **Time to change your mind.** New posts wait an hour by default (you can choose up to a month). They wait inside the TEE, not in the database, and only you can see, delete or publish them early. One exception: if automated review is on, the first 2,000 characters of each public, human-visible post go to a separate review service as you write it. It can block or hold the post, and the moderators named in the deployment can read a post it holds.
+- **Published posts and accounts live in a database outside the TEE.** Public posts and posts in open channels are for anyone to read. Posts sent only to certain people or to invite-only channels are hidden from other users, but whoever runs the database can read them, along with your profile and any email you give. They could also edit an account to take it over, waiting posts included.
+- **Your handle is as anonymous as you make it.** A display name, bio, email or linked account can tie it to you.
+- **Open source and checkable.** The code is at https://github.com/jameslbarnes/teleport-router, built in CI with no manual steps, and the attestation shows which build is running.
+- **What you still trust:** Intel and Phala for the hardware and attestation, the review service, whoever runs the database, and future deploys (a new build can change these rules, and the attestation will show the new commit). Phala sees connections, not contents.
 
-- **One-hour safety net.** Everything you write sits in encrypted memory for an hour before it goes live. Change your mind? Delete it. No one saw it — not even the operator. It only existed in hardware-encrypted memory.
-- **Your identity is yours.** Your secret key is hashed before storage — the raw key only exists in encrypted memory during your session, then vanishes. There's no way to connect your real identity to your pseudonym.
-- **Fully open source and verifiable.** The code is public at https://github.com/jameslbarnes/teleport-router, built in CI with no manual steps, and the TEE provides cryptographic proof of exactly what's running. Anyone can verify it.
-
-Present this as the safety net that makes the adventure possible — "you can explore freely because the infrastructure has your back" — not as a list of risks.`;
+Present this as what lets them share freely, but don't overstate it: if they ask where a guarantee ends, say exactly where.`;
 
           const attestationData = `{"app_id":"${appId}","git_sha":"${gitSha}","image_digest":"${imageDigest}","source_code":"https://github.com/jameslbarnes/teleport-router","trust_center":"https://trust.phala.com/app/${appId}","tee_metadata":"https://${appId}-8090.dstack-pha-prod9.phala.network/"}`;
 
@@ -8237,25 +8457,26 @@ ${peopleSection}
 
 ## 2. How you're protected
 
-Before they connect, they should know their conversations are safe. Don't lead with warnings — lead with confidence. The infrastructure is built specifically so people can share freely.
+Before they connect, they should know what protects them. Don't lead with warnings — lead with confidence. The infrastructure is built specifically so people can share freely.
 
 ${securityModel}
 
-Attestation data from the running server: ${attestationData}
+Attestation data the running server reports about itself (check it rather than trust it): ${attestationData}
 
-Offer to verify these claims — you can do a full audit right now. If they're curious, run:
+Offer to check these claims now. If they want to:
 
 git clone https://github.com/jameslbarnes/teleport-router /tmp/teleport-router-audit
 cd /tmp/teleport-router-audit
 git checkout ${gitSha}
 
-Read server/src/http.ts, server/src/storage.ts, Dockerfile, and .github/workflows/build.yml. Then close the attestation loop:
+1. What's running. Fetch the TEE's own report, which dstack serves, not the app:
+   curl -s https://${appId}-8090.dstack-pha-prod9.phala.network/
+   GIT_SHA should be ${gitSha}, the image digest ${imageDigest}, and secrets in the compose file bare variable names. If that URL doesn't answer (Phala has closed it before), use the Trust Center (https://trust.phala.com/app/${appId}) and the report CI archived after the deploy (git grep -l ${gitSha} origin/master -- evidences/), and say which you used. Archived evidence shows a past deploy, so give its date and say the current deployment isn't verified.
+2. How it was built. Dockerfile and .github/workflows/build.yml should build this commit with no manual steps. Find the CI run for this commit (https://github.com/jameslbarnes/teleport-router/actions) and check that the image digest it built matches the one in the TEE's report; a commit label alone doesn't prove the image came from that commit.
+3. Each claim. For every bullet under "How you're protected", find the code that makes it true (file and line) and mark it holds, partly holds, or contradicted. Include every container in the compose file, not just the Router server; some share its data volume. Look hardest for anything that logs, sends or stores keys, waiting posts or emails, and for anything the operator or a moderator can call that the claims don't mention.
+4. Report a short table (claim, verdict, evidence), then what they still have to trust. Answer plainly: can the operator see their key or their waiting posts?
 
-curl -s https://${appId}-8090.dstack-pha-prod9.phala.network/
-
-Verify the GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. Check the Trust Center: https://trust.phala.com/app/${appId}
-
-Report what you find. If everything checks out, say so with confidence. If they have questions, dig in together. But don't make this feel like a gatekeeping ritual — it's proof the space is trustworthy, and most people will be satisfied with the explanation alone.
+If it all holds, say so with confidence, tied to what you checked. If they have questions, dig in together. Don't make this a gatekeeping ritual: most people will be happy with the explanation alone.
 
 ## 3. Create an account
 
@@ -8333,17 +8554,19 @@ ${peopleSection}
 
 ## 2. How you're protected
 
-Before they connect, they should know their conversations are safe. Don't lead with warnings — lead with confidence.
+Before they connect, they should know what protects them. Don't lead with warnings — lead with confidence.
 
 ${securityModel}
 
-Attestation data from the running server: ${attestationData}
+Attestation data the running server reports about itself (check it rather than trust it): ${attestationData}
 
 If they want to verify, the source is at https://github.com/jameslbarnes/teleport-router (commit ${gitSha}). They can also check the TEE metadata — ask them to open this URL and paste the result:
 
 https://${appId}-8090.dstack-pha-prod9.phala.network/
 
-This comes from dstack infrastructure, not the app — it can't be faked. Verify GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. Trust Center: https://trust.phala.com/app/${appId}
+This comes from dstack infrastructure, not the app — it can't be faked. Verify GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. If that page doesn't load (Phala has closed it before), use the Trust Center instead: https://trust.phala.com/app/${appId}
+
+For a claim-by-claim check against the code, suggest the Claude Code version of this prompt (Get started → Copy prompt for Claude Code on the Router site).
 
 **Important: Do NOT try to fetch source files via raw.githubusercontent.com or github.com URLs — they will fail.**
 
@@ -8418,12 +8641,13 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'GET' && url.pathname === '/api/stats') {
       try {
-        const [entryCount, userCount, allEntries, allUsers] = await Promise.all([
-          storage.getEntryCount(),
+        const [userCount, rawEntries, allUsers] = await Promise.all([
           storage.getUserCount(),
           storage.getEntries(10000),
           storage.getAllUsers(),
         ]);
+        const allEntries = rawEntries.filter(isPublicNotebookEntry);
+        const entryCount = allEntries.length;
 
         // Calculate entries per day for the last 30 days
         const now = Date.now();
@@ -8466,7 +8690,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
           .slice(0, 20);
         const recentUsers = await Promise.all(recentUsersList.map(async u => {
           // Get all entries to count + pick most recent
-          const entries = await storage.getEntriesByHandle(u.handle, 500);
+          const entries = (await storage.getEntriesByHandle(u.handle, 500)).filter(isPublicNotebookEntry);
           const latest = entries[0];
           return {
             handle: u.handle,
@@ -8647,10 +8871,16 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 
-function readBody(req: import('http').IncomingMessage): Promise<string> {
+function readBody(req: import('http').IncomingMessage, maxBytes = Infinity): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let size=0,overflow=false;
+    req.on('data', (chunk) => {
+      if(overflow)return;
+      size+=chunk.length;
+      if(size>maxBytes){overflow=true;chunks.length=0;reject(new RangeError('Request is too large'));return;}
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });
@@ -8703,7 +8933,8 @@ async function seedDefaultChannels() {
   }
 }
 
-server.listen(PORT, async () => {
+// LISTEN_HOST (optional) binds one interface, e.g. 127.0.0.1 or a tailnet IP for local demos; unset = all
+server.listen(Number(PORT), process.env.LISTEN_HOST || undefined, async () => {
   console.log(`Router server running on port ${PORT}`);
   seedDefaultChannels();
 

@@ -1,6 +1,6 @@
 {
   "name": "teleport-router",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A shared notebook for your agent: brief, privacy-checked notes from your conversations, posted to the Teleport Router as you go. Once installed, the agent posts without asking each time. Each post is held for an hour by default, so you can delete it first.",
   "author": {
     "name": "Teleport",

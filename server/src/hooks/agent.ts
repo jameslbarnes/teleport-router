@@ -18,6 +18,7 @@ import { RoomBufferManager, type BufferedMessage } from '../intelligence/heat.js
 import { generateLinkToken } from '../intelligence/link-tokens.js';
 import { MatrixPlatform, type MatrixHistoryMessage } from '../platform/matrix.js';
 import type { Platform } from '../platform/types.js';
+import { hasPublicAudience, isPublicNotebookEntry } from '../public-views.js';
 
 // ── State ────────────────────────────────────────────────────
 
@@ -538,7 +539,7 @@ async function onEntryPublished(ctx: HookContext): Promise<void> {
   }
 
   const shouldRecordRecentPost = evaluation.route || matrixTargets.postToFeed || matrixTargets.channelDests.length > 0;
-  if (shouldRecordRecentPost) {
+  if (shouldRecordRecentPost && isPublicNotebookEntry(entry)) {
     recentPosts.push({
       author: authorDisplay,
       contentSnippet: entry.content.slice(0, 200),
@@ -882,7 +883,7 @@ export async function triggerManualSpark(
     storage.getEntriesByHandle(targetHandle, 3),
   ]);
 
-  const sourceEntry = sourceEntries[0] || {
+  const sourceEntry = sourceEntries.find(hasPublicAudience) || {
     id: `manual-spark-${Date.now()}`,
     handle: sourceHandle,
     pseudonym: `@${sourceHandle}`,
@@ -893,7 +894,7 @@ export async function triggerManualSpark(
 
   const candidate: import('../intelligence/sparks.js').SparkCandidate = {
     handle: targetHandle,
-    matchingEntries: targetEntries,
+    matchingEntries: targetEntries.filter(hasPublicAudience),
     overlapTopics: [],
   };
 

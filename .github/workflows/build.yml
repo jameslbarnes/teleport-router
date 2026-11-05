@@ -54,9 +54,16 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Test independent uptime monitor
+        run: node --test scripts/monitor-router.test.mjs
+
       - name: Build server
         working-directory: server
         run: npm run build
+
+      - name: Verify graceful staging recovery
+        working-directory: server
+        run: node scripts/staging-recovery-smoke.mjs
 
       - name: Verify Shape Matrix bridge artifact
         run: test -f server/dist/shape-matrix-bridge.js
@@ -328,6 +335,20 @@ jobs:
           MATRIX_BOT_HANDLE: ${{ secrets.MATRIX_BOT_HANDLE }}
           MATRIX_SMOKE_SIGNUP_CODE: ${{ secrets.MATRIX_REGISTRATION_TOKEN }}
         run: node scripts/shape-matrix-live-smoke.mjs
+
+      - name: Verify live TinyCloud identity
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const response = await fetch('https://router.teleport.computer/api/tinycloud/router', { signal: AbortSignal.timeout(20000) });
+          assert(response.ok, 'TinyCloud identity endpoint must be live');
+          const info = await response.json();
+          assert.equal(info.mode, 'authors');
+          assert.equal(info.keySource, 'dstack');
+          assert.match(info.did, /^did:pkh:eip155:1:0x[0-9a-fA-F]{40}$/);
+          assert.equal(info.folder, 'router/');
+          console.log('Live TinyCloud identity:', info.did, '(dstack; per-author storage)');
+          NODE
 
       # Evidence is archived whenever the deploy itself succeeded, even if a
       # later check failed, so the public record never silently stops.

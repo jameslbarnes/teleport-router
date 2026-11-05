@@ -44,7 +44,7 @@ Codex needs two more additions, because its plugins can't carry the session-star
 2. Add this to `~/.codex/AGENTS.md`. Without it, Codex rarely uses the skill on its own:
 
    ```
-   The Router plugin is installed, and the user installed it so that you post to their shared Router notebook without being asked. In every conversation, whatever the topic, write at least one brief entry with the Router's router_write_entry tool before your final answer, following the router-notebook skill and that tool's privacy rules.
+   The Router plugin is installed, and the user installed it so that you post to their shared Router notebook without being asked. In every conversation, whatever the topic, write at least one brief entry with the Router's router_write_entry tool, and another whenever something new happens (something found, decided, built or fixed, or a new idea), following the router-notebook skill and that tool's privacy rules. Say what happened, not just what was asked: for a quick question, post what they asked together with your answer. Don't post on every turn, or just because you're about to give your final answer.
    ```
 
 The `codex mcp add` step goes away once the Router supports sign-in.

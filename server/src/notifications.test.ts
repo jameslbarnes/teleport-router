@@ -32,6 +32,19 @@ describe('NotificationService', () => {
   });
 
   describe('sendDailyDigests', () => {
+    it('keeps private and AI-only followed/discovery text out of the email and model prompt',async()=>{
+      const create=vi.fn().mockResolvedValue({content:[{type:'text',text:'<digest>Public update.</digest><question>Next?</question>'}]});
+      await storage.createUser({handle:'alice',secretKeyHash:'alice',email:'alice@example.com',emailVerified:true,following:[{handle:'bob',note:'friend'}]});
+      for(const [handle,extra] of [['alice',{}],['bob',{to:['#private']}],['carol',{aiOnly:true}]] as Array<[string,Partial<JournalEntry>]>)
+        await storage.addEntry({handle,pseudonym:handle,client:'code',timestamp:Date.now(),content:`attestation ${handle} sentinel`,...extra});
+      const digest=createNotificationService({storage,emailClient,anthropic:{messages:{create}} as any,
+        fromEmail:'notify@router.test',baseUrl:'https://router.test',jwtSecret:'test'});
+      expect((await digest.sendDailyDigests()).sent).toBe(1);
+      expect(create).toHaveBeenCalled();
+      const exposed=JSON.stringify([create.mock.calls,emailClient.calls]);
+      expect(exposed).not.toContain('attestation bob sentinel');expect(exposed).not.toContain('attestation carol sentinel');
+    });
+
     it('should skip user with no entries and no followed entries', async () => {
       await storage.createUser({
         handle: 'alice',

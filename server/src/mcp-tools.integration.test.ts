@@ -70,7 +70,7 @@ describe('MCP Tool Integration Tests', () => {
     await new Promise<void>((resolve) => moderationServer.listen(0, '127.0.0.1', () => resolve()));
     const moderationPort = (moderationServer.address() as AddressInfo).port;
 
-    serverProcess = spawn('npx', ['tsx', 'src/http.ts'], {
+    serverProcess = spawn(process.execPath, ['--import', 'tsx', 'src/http.ts'], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -79,9 +79,10 @@ describe('MCP Tool Integration Tests', () => {
         STAGED_STORAGE: 'memory',
         MODERATOR_HANDLES: MODERATOR_HANDLE,
         MODERATOR_URL: `http://127.0.0.1:${moderationPort}`,
+        TINYCLOUD_GROUPS: 'memory',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true,
+      shell: false,
     });
 
     serverProcess.stderr?.on('data', (data) => {
@@ -485,6 +486,48 @@ describe('MCP Tool Integration Tests', () => {
       try { await otherTransport?.close(); } catch {}
     });
 
+    it('public dashboard and daily entry lists exclude private and AI-only content',async()=>{
+      const privateText='Private dashboard regression sentinel';
+      const hiddenText='AI-only dashboard regression sentinel';
+      await publish(await write(modClient,privateText,{to:[`@${RECIPIENT_HANDLE}`]}),MODERATOR_KEY);
+      await publish(await write(modClient,hiddenText,{ai_only:true}),MODERATOR_KEY);
+      const date=new Date().toISOString().slice(0,10);
+      for(const path of ['/api/stats',`/api/daily-summaries/${date}/entries`,
+        `/api/users/${MODERATOR_HANDLE}`,`/api/users/${MODERATOR_HANDLE}/entries`,
+        `/api/entries/${MODERATOR_HANDLE}`]) {
+        const response=await fetch(`${base()}${path}`);expect(response.ok).toBe(true);
+        const text=await response.text();expect(text).not.toContain(privateText);expect(text).not.toContain(hiddenText);
+      }
+      const recipient = await (await fetch(`${base()}/api/entries/${MODERATOR_HANDLE}?key=${RECIPIENT_KEY}`)).text();
+      expect(recipient).toContain(privateText);
+      expect(recipient).not.toContain(hiddenText);
+      const author = await (await fetch(`${base()}/api/entries/${MODERATOR_HANDLE}?key=${MODERATOR_KEY}`)).text();
+      expect(author).toContain(privateText);
+      expect(author).toContain(hiddenText);
+    });
+
+    it('follow notes and daily question context do not disclose private posts', async () => {
+      const hidden = 'Unrelated private discovery sentinel';
+      const publicText = 'Public discovery regression sentinel';
+      await publish(await write(modClient, hidden, {to: ['@somebodyelse']}), MODERATOR_KEY);
+      await publish(await write(modClient, publicText), MODERATOR_KEY);
+      const recipient = await connectClient(TEST_PORT, RECIPIENT_KEY);
+      try {
+        const followed = await callTool(recipient.client, 'router_follow', {action:'follow',handle:MODERATOR_HANDLE});
+        expect(followed).toContain(publicText);
+        expect(followed).not.toContain(hidden);
+        const question = await callTool(recipient.client, 'router_daily_question');
+        expect(question).toContain(publicText);
+        expect(question).not.toContain(hidden);
+      } finally { await recipient.transport.close(); }
+    });
+
+    it('anonymous and ordinary users cannot delete other authors summaries',async()=>{
+      for(const key of ['',REGULAR_KEY])for(const path of ['/api/summaries','/api/daily-summaries']) {
+        expect((await fetch(`${base()}${path}${key?`?key=${key}`:''}`,{method:'DELETE'})).status).toBe(403);
+      }
+    });
+
     it('post page: hidden from anonymous viewers, other keys and moderators; shown to the author', async () => {
       const entryId = await write(regularClient, 'Waiting permalink privacy check');
 
@@ -615,6 +658,46 @@ describe('MCP Tool Integration Tests', () => {
       // A real invite still works, and the refused attempt didn't use it up
       await post(`/api/channels/${target}/join`, { secret_key: RECIPIENT_KEY, invite_token: targetToken });
       expect((await fetch(`${base()}/api/channels/${target}/entries?secret_key=${RECIPIENT_KEY}`)).status).toBe(200);
+    });
+
+    it('groups on TinyCloud: posts live in the group store, members read them, the public never sees them', async () => {
+      const groupId = `lk-grp-${Date.now().toString(36).slice(-6)}`;
+      const created = await post('/api/channels', { secret_key: MODERATOR_KEY, id: groupId, name: 'Skills cohort', storage: 'tinycloud', join_rule: 'open' });
+      expect(created.store).toEqual({ kind: 'tinycloud', prefix: `groups/${groupId}/` });
+      expect(created.joinRule).toBe('invite'); // a TinyCloud group is always invite-only
+
+      const { token } = await post(`/api/channels/${groupId}/invite`, { secret_key: MODERATOR_KEY });
+      await post(`/api/channels/${groupId}/join`, { secret_key: RECIPIENT_KEY, invite_token: token });
+
+      const card = 'Skill card: demo bundle v1 (placeholder)';
+      const publishedId = await publish(await write(modClient, card, { to: [`#${groupId}`] }), MODERATOR_KEY);
+
+      expect(await channelFeed(groupId, RECIPIENT_KEY)).toContain(card);
+      expect((await fetch(`${base()}/api/channels/${groupId}/entries`)).status).toBe(401);
+      expect((await fetch(`${base()}/api/channels/${groupId}/entries?secret_key=${OTHER_KEY}`)).status).toBe(403);
+
+      const member = await fetch(`${base()}/api/entry/${publishedId}?key=${RECIPIENT_KEY}`);
+      expect(member.status).toBe(200);
+      expect((await member.json()).content).toBe(card);
+      expect((await fetch(`${base()}/api/entry/${publishedId}`)).status).toBe(404);
+
+      const publicFeed = await (await fetch(`${base()}/api/entries?limit=200`)).json();
+      expect(publicFeed.entries.map((e: any) => e.content)).not.toContain(card);
+    });
+
+    it('groups on TinyCloud: an ordinary channel on the same server stays in the Router database', async () => {
+      const groupId = `lk-grp2-${Date.now().toString(36).slice(-5)}`;
+      const created = await post('/api/channels', { secret_key: MODERATOR_KEY, id: groupId, name: 'Plain channel', join_rule: 'open' });
+      expect(created.store).toBeUndefined();
+      expect(created.joinRule).toBe('open');
+    });
+
+    it('channel routes: a channel named "skills-…" opens (routes used to match by substring)', async () => {
+      const id = `skills-${Date.now().toString(36).slice(-6)}`;
+      await post('/api/channels', { secret_key: MODERATOR_KEY, id, name: 'Named like a sub-route', join_rule: 'open' });
+      const res = await fetch(`${base()}/api/channels/${id}`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).id).toBe(id);
     });
 
     it('review: a manual hold does not reveal the content to moderators', async () => {
