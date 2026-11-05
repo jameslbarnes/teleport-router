@@ -492,10 +492,34 @@ describe('MCP Tool Integration Tests', () => {
       await publish(await write(modClient,privateText,{to:[`@${RECIPIENT_HANDLE}`]}),MODERATOR_KEY);
       await publish(await write(modClient,hiddenText,{ai_only:true}),MODERATOR_KEY);
       const date=new Date().toISOString().slice(0,10);
-      for(const path of ['/api/stats',`/api/daily-summaries/${date}/entries`]) {
+      for(const path of ['/api/stats',`/api/daily-summaries/${date}/entries`,
+        `/api/users/${MODERATOR_HANDLE}`,`/api/users/${MODERATOR_HANDLE}/entries`,
+        `/api/entries/${MODERATOR_HANDLE}`]) {
         const response=await fetch(`${base()}${path}`);expect(response.ok).toBe(true);
         const text=await response.text();expect(text).not.toContain(privateText);expect(text).not.toContain(hiddenText);
       }
+      const recipient = await (await fetch(`${base()}/api/entries/${MODERATOR_HANDLE}?key=${RECIPIENT_KEY}`)).text();
+      expect(recipient).toContain(privateText);
+      expect(recipient).not.toContain(hiddenText);
+      const author = await (await fetch(`${base()}/api/entries/${MODERATOR_HANDLE}?key=${MODERATOR_KEY}`)).text();
+      expect(author).toContain(privateText);
+      expect(author).toContain(hiddenText);
+    });
+
+    it('follow notes and daily question context do not disclose private posts', async () => {
+      const hidden = 'Unrelated private discovery sentinel';
+      const publicText = 'Public discovery regression sentinel';
+      await publish(await write(modClient, hidden, {to: ['@somebodyelse']}), MODERATOR_KEY);
+      await publish(await write(modClient, publicText), MODERATOR_KEY);
+      const recipient = await connectClient(TEST_PORT, RECIPIENT_KEY);
+      try {
+        const followed = await callTool(recipient.client, 'router_follow', {action:'follow',handle:MODERATOR_HANDLE});
+        expect(followed).toContain(publicText);
+        expect(followed).not.toContain(hidden);
+        const question = await callTool(recipient.client, 'router_daily_question');
+        expect(question).toContain(publicText);
+        expect(question).not.toContain(hidden);
+      } finally { await recipient.transport.close(); }
     });
 
     it('anonymous and ordinary users cannot delete other authors summaries',async()=>{

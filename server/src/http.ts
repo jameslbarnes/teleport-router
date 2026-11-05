@@ -3106,7 +3106,7 @@ function createMCPServer(secretKey: string) {
           if (targetUser.bio) parts.push(targetUser.bio);
 
           // Get recent entries for context
-          const recentEntries = await storage.getEntriesByHandle(targetHandle, 5);
+          const recentEntries = (await storage.getEntriesByHandle(targetHandle, 5)).filter(isPublicNotebookEntry);
           if (recentEntries.length > 0) {
             const topics = recentEntries
               .map(e => e.content.slice(0, 80))
@@ -4324,6 +4324,7 @@ function createMCPServer(secretKey: string) {
 
         // 1. User's recent entries (7 days, up to 10)
         const userEntries = (await storage.getEntriesByHandle(currentUser.handle, 50))
+          .filter(isPublicNotebookEntry)
           .filter(e => e.timestamp >= sevenDaysAgo)
           .slice(0, 10);
 
@@ -4332,6 +4333,7 @@ function createMCPServer(secretKey: string) {
         let followedEntries: JournalEntry[] = [];
         for (const f of following) {
           const entries = (await storage.getEntriesByHandle(f.handle, 20))
+            .filter(isPublicNotebookEntry)
             .filter(e => e.timestamp >= twoDaysAgo);
           followedEntries.push(...entries);
         }
@@ -4340,6 +4342,7 @@ function createMCPServer(secretKey: string) {
 
         // 3. Other recent entries for broader context (2 days, up to 5)
         const allRecent = (await storage.getEntries(50))
+          .filter(isPublicNotebookEntry)
           .filter(e => e.timestamp >= twoDaysAgo && e.handle !== currentUser.handle && !following.some(f => f.handle === e.handle))
           .slice(0, 5);
 
@@ -5608,11 +5611,13 @@ const server = createServer(async (req, res) => {
       let includePending = false;
       let authorPseudonym: string | null = null;
       let authorHandle: string | null = null;
+      let authorEmail: string | undefined;
       if (secretKey && isValidSecretKey(secretKey)) {
         authorPseudonym = derivePseudonym(secretKey);
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         authorHandle = user?.handle || null;
+        authorEmail = user?.email;
         includePending = authorPseudonym === identifier || authorHandle === identifier;
       }
 
@@ -5624,14 +5629,17 @@ const server = createServer(async (req, res) => {
           : await storage.getEntriesByPseudonym(identifier, limit);
       }
 
-      // Strip content from hidden entries (except for author's own entries)
-      const strippedEntries = entries.map(e => {
+      const visibleEntries: JournalEntry[] = [];
+      const channelAccessCache = new Map<string, boolean>();
+      for (const e of entries.map(normalizeEntry)) {
         const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
-        return stripHiddenContent(e, isAuthor);
-      });
+        if (await canView(e, authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache)) {
+          visibleEntries.push(stripHiddenContent(e, isAuthor));
+        }
+      }
 
       res.writeHead(200);
-      res.end(JSON.stringify({ pseudonym: identifier, entries: strippedEntries }));
+      res.end(JSON.stringify({ pseudonym: identifier, entries: visibleEntries }));
       return;
     }
 
@@ -8005,7 +8013,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get recent entries
-      const entries = await storage.getEntriesByHandle(handle, 10);
+      const entries = (await storage.getEntriesByHandle(handle, 10)).filter(isPublicNotebookEntry);
 
       res.writeHead(200);
       res.end(JSON.stringify({
@@ -8074,7 +8082,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify({
         handle,
-        entries: entries.map(e => ({
+        entries: entries.filter(isPublicNotebookEntry).map(e => ({
           id: e.id,
           content: e.content,
           timestamp: e.timestamp,
