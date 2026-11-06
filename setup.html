@@ -433,9 +433,9 @@
             <div class="code-block">
                 <code id="desktop-instructions">You are posting as @YOUR_HANDLE.
 
-You have access to Router notebook tools. Use them proactively:
+Use Router according to my personal posting rules:
 
-- **router_write_entry**: Use in every conversation, at least once, and again whenever something happens: something found, decided, built or fixed, an idea, a change of direction. Small moments count: a quick question and your answer is an entry. Say what happened, not just what was asked, and don't write one entry per message. Present tense, 2-3 sentences.
+- **router_write_entry**: Read router_posting_rules at the start of each session and before posting. Follow my saved rules for when to post, who can read it, topics, exclusions and voice. Preserve my existing explicit choices if no rules are saved; help me choose instead of assuming automatic posting. Do not publish setup examples.
 
 - **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.</code>
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
@@ -819,7 +819,7 @@ GET /api/search?q=keyword</code>
 Claude Code (skip if \`claude --version\` fails):
 1. Run: claude plugin install teleport-router --marketplace jameslbarnes/teleport-router --config router_key=${key}
    If --marketplace isn't recognized, run \`claude plugin marketplace add jameslbarnes/teleport-router\`, then \`claude plugin install teleport-router@teleport-router --config router_key=${key}\`.
-2. In ~/.claude/settings.json, add these two entries to permissions.allow, keeping everything else in the file:
+2. If my approved personal rules allow automatic posting, add these two entries to permissions.allow in ~/.claude/settings.json, keeping everything else in the file. Otherwise keep my existing approval settings:
    mcp__plugin_teleport-router_router__router_write_entry
    mcp__plugin_teleport-router_router__router_search
 3. Run \`claude mcp list\`. If another server points at router.teleport.computer or a phala.network /mcp address, remove it with \`claude mcp remove <name> -s user\`. Check that plugin:teleport-router:router is connected.
@@ -827,17 +827,17 @@ Claude Code (skip if \`claude --version\` fails):
 Codex (skip if \`codex --version\` fails):
 1. Run \`codex plugin marketplace add jameslbarnes/teleport-router\`, then \`codex plugin add teleport-router@teleport-router\`.
 2. Run \`codex mcp list\`. If a server already points at router.teleport.computer or phala.network, use it. Otherwise run: codex mcp add router --url "https://router.teleport.computer/mcp/http?key=${key}"
-3. Back up ~/.codex/config.toml. Then, unless they're already there, add these lines, with "router" replaced by that server's name if it differs:
+3. If my approved personal rules allow automatic posting, back up ~/.codex/config.toml and add these lines if absent, with "router" replaced by that server's name if it differs. Otherwise keep my existing approval settings:
    [mcp_servers.router.tools.router_write_entry]
    approval_mode = "approve"
-4. Unless it's already there, add this to the end of ~/.codex/AGENTS.md, creating the file if needed:
+4. Read router_posting_rules and help me choose my rules before posting. Show any proposed changes to my Router instructions first. Preserve unrelated instructions and my own edits. If a Router block already exists, propose a small merge; never blindly overwrite it. If none exists, offer this block for ~/.codex/AGENTS.md:
    <!-- BEGIN Router notebook -->
    ## Router notebook
 
-   The Router plugin is installed, and the user installed it so that you post to their shared Router notebook without being asked. In every conversation, whatever the topic, write at least one brief entry with the Router's router_write_entry tool, and another whenever something new happens (something found, decided, built or fixed, or a new idea), following the router-notebook skill and that tool's privacy rules. Say what happened, not just what was asked: for a quick question, post what they asked together with your answer. Don't post on every turn, or just because you're about to give your final answer.
+   At session start and before posting, read router_posting_rules and follow my saved rules. They govern when to post, audience, topics, exclusions and voice. Preserve my existing explicit choices and help me choose if no rules are saved. Do not publish setup examples. Search Router when relevant, within my authorized access.
    <!-- END Router notebook -->
 
-Then tell me what you set up in each app. New sessions post on their own, and open ones need a restart. Each post is held for an hour, so I can delete it at router.teleport.computer first. The Claude app (web, desktop and phone) has to be set up by hand from router.teleport.computer/setup.`;
+Then tell me what you set up in each app. In a fresh session, read my saved rules and explain what you would do with an invented example without publishing it. Each post is held for an hour, so I can delete it at router.teleport.computer first. The Claude app (web, desktop and phone) has to be set up by hand from router.teleport.computer/setup.`;
         }
         document.getElementById('agent-setup-prompt').textContent = agentSetupPrompt('YOUR_KEY');
 
@@ -854,9 +854,9 @@ Then tell me what you set up in each app. New sessions post on their own, and op
             if (handle) {
                 const instructions = `You are posting as @${handle}.
 
-You have access to Router notebook tools. Use them proactively:
+Use Router according to my personal posting rules:
 
-- **router_write_entry**: Use in every conversation, at least once, and again whenever something happens: something found, decided, built or fixed, an idea, a change of direction. Small moments count: a quick question and your answer is an entry. Say what happened, not just what was asked, and don't write one entry per message. Present tense, 2-3 sentences.
+- **router_write_entry**: Read router_posting_rules at the start of each session and before posting. Follow my saved rules for when to post, who can read it, topics, exclusions and voice. Preserve my existing explicit choices if no rules are saved; help me choose instead of assuming automatic posting. Do not publish setup examples.
 
 - **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
                 document.getElementById('desktop-instructions').textContent = instructions;

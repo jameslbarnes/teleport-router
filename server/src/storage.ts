@@ -8,6 +8,7 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import type { AuthorBinding } from './author-store.js';
+import { nextPostingRules, type PostingRules, type PostingRulesDraft } from './posting-rules.js';
 
 // Visibility levels for entries
 export type EntryVisibility = 'public' | 'private' | 'ai-only';
@@ -155,6 +156,8 @@ export interface User {
   tinycloud?: AuthorBinding;
   /** Private, hashed permissions for a particular Discord user and group. */
   discordGrants?: import('./discord-groups.js').DiscordGroupGrant[];
+  /** Private personal instructions. Never expose in public user/profile responses. */
+  postingRules?: PostingRules;
 }
 
 /**
@@ -335,6 +338,8 @@ export interface Storage {
 
   /** Get user by secret key hash */
   getUserByKeyHash(keyHash: string): Promise<User | null>;
+  /** Atomically save owner rules, rejecting stale edits. */
+  savePostingRules(handle: string, draft: PostingRulesDraft, expectedRevision: number): Promise<PostingRules>;
 
   /** Update user profile */
   updateUser(handle: string, updates: Partial<Omit<User, 'handle' | 'secretKeyHash' | 'createdAt'>>): Promise<User | null>;
@@ -559,6 +564,14 @@ export class MemoryStorage implements Storage {
 
   async isHandleAvailable(handle: string): Promise<boolean> {
     return !this.users.has(handle);
+  }
+
+  async savePostingRules(handle: string, draft: PostingRulesDraft, expectedRevision: number): Promise<PostingRules> {
+    const user = this.users.get(handle);
+    if (!user) throw new Error('Account not found.');
+    const rules = nextPostingRules(user.postingRules, draft, expectedRevision);
+    this.users.set(handle, { ...user, postingRules: rules });
+    return rules;
   }
 
   async migrateEntriesToHandle(pseudonym: string, handle: string): Promise<number> {
@@ -1119,6 +1132,17 @@ export class FirestoreStorage implements Storage {
   async isHandleAvailable(handle: string): Promise<boolean> {
     const doc = await this.db.collection(this.usersCollection).doc(handle).get();
     return !doc.exists;
+  }
+
+  async savePostingRules(handle: string, draft: PostingRulesDraft, expectedRevision: number): Promise<PostingRules> {
+    const ref = this.db.collection(this.usersCollection).doc(handle);
+    return this.db.runTransaction(async tx => {
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) throw new Error('Account not found.');
+      const rules = nextPostingRules(snapshot.data()?.postingRules, draft, expectedRevision);
+      tx.update(ref, { postingRules: rules });
+      return rules;
+    });
   }
 
   async migrateEntriesToHandle(pseudonym: string, handle: string): Promise<number> {
@@ -2044,6 +2068,10 @@ export class StagedStorage implements Storage {
 
   async isHandleAvailable(handle: string): Promise<boolean> {
     return this.published.isHandleAvailable(handle);
+  }
+
+  async savePostingRules(handle: string, draft: PostingRulesDraft, expectedRevision: number): Promise<PostingRules> {
+    return this.published.savePostingRules(handle, draft, expectedRevision);
   }
 
   async migrateEntriesToHandle(pseudonym: string, handle: string): Promise<number> {

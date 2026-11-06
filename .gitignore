@@ -16,6 +16,7 @@ firebase-credentials.json
 
 # Build output
 dist/
+web/.astro/
 
 # IDE
 .idea/
