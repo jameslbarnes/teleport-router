@@ -574,7 +574,10 @@
 
             // Badge
             let badgeHtml;
-            if (isQueued && entry.publishAt) {
+            const awaitingNotice = entry.sharingNotice && !entry.sharingNotice.evidence;
+            if (isQueued && awaitingNotice) {
+                badgeHtml = '<span class="inbox-badge-queued">waiting for sharing notice</span> <span class="only-you-badge">&#x1f512; only visible to you</span>';
+            } else if (isQueued && entry.publishAt) {
                 badgeHtml = `<span class="inbox-badge-queued">publishes ${formatTimeUntil(entry.publishAt)}</span> <span class="only-you-badge">&#x1f512; only visible to you</span>`;
             } else if (!isQueued) {
                 badgeHtml = `<span class="inbox-badge-received">received</span>`;
@@ -587,7 +590,7 @@
             if (isQueued) {
                 const isPending = entry.publishAt && entry.publishAt > Date.now();
                 actionsHtml = `<div class="inbox-item-actions">`;
-                if (isPending) {
+                if (isPending && !awaitingNotice) {
                     actionsHtml += `<button class="publish-btn" onclick="event.preventDefault(); event.stopPropagation(); publishEntry('${entry.id}')">publish now</button>`;
                 }
                 actionsHtml += `<button class="delete-btn" onclick="event.preventDefault(); event.stopPropagation(); deleteEntry('${entry.id}')">delete</button>`;
@@ -1038,7 +1041,8 @@
         }
 
         function renderEntry(entry) {
-            const isPending = entry.publishAt && entry.publishAt > Date.now();
+            const awaitingNotice = entry.sharingNotice && !entry.sharingNotice.evidence;
+            const isPending = awaitingNotice || entry.publishAt && entry.publishAt > Date.now();
             const isReflection = entry.isReflection;
             const isAiOnly = entry.aiOnly === true || entry.humanVisible === false;
 
@@ -1106,7 +1110,8 @@
             // Footer: [time] · [tokens] · [status] · [actions]
             let meta = [];
             meta.push(`<a href="/e/${entry.id}" class="permalink">${formatTime(entry.timestamp)}</a>`);
-            if (isPending) meta.push(`<span class="pending-badge">publishes ${formatTimeUntil(entry.publishAt)}</span>`);
+            if (awaitingNotice) meta.push('<span class="pending-badge">waiting for sharing notice</span>');
+            else if (isPending) meta.push(`<span class="pending-badge">publishes ${formatTimeUntil(entry.publishAt)}</span>`);
             if (isPending) meta.push(`<span class="only-you-badge">&#x1f512; only visible to you</span>`);
             // Check ownership by pseudonym OR handle
             const isOwner = (userPseudonym && entry.pseudonym === userPseudonym) || (userHandle && entry.handle === userHandle);
@@ -1564,6 +1569,8 @@
                 });
 
                 if (res.ok) {
+                    const saved = await res.json();
+                    void window.showRouterSharingNotice(saved.receipt, effectiveKey);
                     form.remove();
                     // Clear cache so replies reload
                     repliesCache.delete(entryId);

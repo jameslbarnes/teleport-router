@@ -31,6 +31,16 @@ let moderationServer: Server;
 
 async function callTool(client: Client, name: string, args: Record<string, any> = {}): Promise<string> {
   const result = await client.callTool({ name, arguments: args });
+  // This suite exercises existing publishing/moderation behavior after the
+  // caller has reported its notice. The notice suite tests the unreported gate.
+  const receipt = (result.structuredContent as any)?.receipt;
+  if (name === 'router_write_entry' && receipt?.notification_required) {
+    const recorded = await client.callTool({ name: 'router_record_sharing_notice', arguments: {
+      entry_id: receipt.entry_id, notice_id: receipt.notice_id, notice_sha256: receipt.notice_sha256,
+      conversation_ref: 'integration-test:synthetic-notice',
+    } });
+    expect(recorded.isError).not.toBe(true);
+  }
   const textBlock = (result.content as any[])?.find((b: any) => b.type === 'text');
   return textBlock?.text || '';
 }
