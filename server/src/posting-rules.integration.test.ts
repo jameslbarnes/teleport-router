@@ -124,9 +124,17 @@ describe('Personal rules across HTTP and fresh MCP sessions', () => {
     const guide = await api('/api/posting-rules-guide').then(r => r.json());
     expect(guide.coach).toContain('Do not post the examples');
     expect(guide.installation).toContain('Preserve all unrelated instructions and my own edits');
-    const tutorial = await api('/api/tutorial?client=code').then(r => r.json());
-    expect(tutorial.prompt).toContain('router_posting_rules');
-    expect(tutorial.prompt).not.toContain('Ambient capture');
+    // New desktop/code users and returning users take different prompt branches.
+    for (const path of ['/api/tutorial?client=code', '/api/tutorial?client=desktop', `/api/tutorial?key=${ownerKey}`]) {
+      const tutorial = await api(path).then(r => r.json());
+      expect(tutorial.prompt).toContain('router_posting_rules');
+      expect(tutorial.prompt).toContain('router_record_sharing_notice');
+      expect(tutorial.prompt).toContain('real inline card');
+      expect(tutorial.prompt).toContain('visible text notice');
+      expect(tutorial.prompt).toContain('Keep automatic posting automatic when authorized');
+      expect(tutorial.prompt).toContain('Do not create a real post or record delivery for this demonstration');
+      expect(tutorial.prompt).not.toContain('Ambient capture');
+    }
   });
 
   it('does not let a saved group default outlive membership', async () => {

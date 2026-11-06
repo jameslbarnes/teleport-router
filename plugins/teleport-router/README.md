@@ -39,12 +39,18 @@ Codex needs two more additions, because its plugins can't carry the session-star
    ```toml
    [mcp_servers.router.tools.router_write_entry]
    approval_mode = "approve"
+   [mcp_servers.router.tools.router_record_sharing_notice]
+   approval_mode = "approve"
    ```
 
 2. Ask your agent to merge this into the Router instructions in `~/.codex/AGENTS.md`. Review the proposed changes; keep your own edits and all unrelated instructions:
 
    ```
    At session start and before posting, read router_posting_rules. Follow my saved rules for when to post, audience, topics, exclusions and voice. Preserve my existing explicit choices if no rules are saved and help me choose instead of assuming automatic posting. Never publish setup examples. Search Router when relevant, within my authorized access.
+
+   - **Sharing notices**: After every write, immediately show me the saved text, exact audience, status, publication time or waiting period, and a working Delete control or Review or delete link in this conversation. Use a real inline card where supported, otherwise a visible text notice. Keep each new notice visible and each post individually deletable. Do not leave notices only in tool results or claim an unsupported card appeared.
+
+   - **Delivery confirmation**: When Router returns notification_required, deliver that exact notice first, then call router_record_sharing_notice with its notice ID, SHA-256 and conversation/message reference. Never batch the write and confirmation or record delivery before sending the notice. Use agent_reported for your own report; client_reported requires an actual client callback. If the client already recorded this exact notice, use its returned receipt. Show the resulting deadline in my timezone. If delivery or recording fails, say so and leave the unconfirmed post pending. Keep authorized automatic posting automatic; ask only when my rules or an unresolved choice require it. Delivery reports assume an honest agent and client; they do not prove I saw, read or approved the post.
    ```
 
 The `codex mcp add` step goes away once the Router supports sign-in.

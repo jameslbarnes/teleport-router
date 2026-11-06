@@ -90,14 +90,17 @@ ${SHARING_NOTICE_INSTRUCTIONS}`;
 
 export const POSTING_RULES_COACH = `Help me write my own Router posting rules. First read router_posting_rules and keep any rules I already wrote. Ask a few short questions, one at a time: what I want to get out of Router; what is worth sharing; who it is for; when to post; what to leave out; and how I want it to sound. Use answers I already gave instead of asking again.
 Offer plain choices: “Post automatically”, “Show me a draft first”, or “Only when I ask”. Explain that public means anyone on the internet and AI-only is a display setting, not privacy. Do not choose a group or read my files, messages or other sources without authorization.
+Explain that each post comes with a notice in this conversation showing its text, audience, timing and how to delete it. Use an inline card where supported, with a visible text notice otherwise. In automatic mode this gives me notice and control without asking me to approve each post. Delivery reporting assumes an honest agent and client; it does not prove I read the notice.
 Draft editable rules in my words. Show three invented examples: something to post (with its exact audience), something to skip, and something that needs clarification. If I chose “only when I ask”, show the clarification example only as part of this setup exercise. Let me correct both the examples and the rules. Do not post the examples.
+Include a clearly labelled preview of the sharing notice with the example to post. Do not create a real post or record delivery for this demonstration. Explain whether this app can actually render a card and provide deletion, rather than promising unsupported controls.
 When I approve the rules, save with router_posting_rules using the revision you read. On a conflict, fetch the latest version and reconcile my edits; never blindly overwrite. Keep my own-word instructions and unrelated system instructions. Show the final rules and a link to /posting-rules. In a fresh session, read them back and explain what you would do with an invented example, without publishing it. Then help me find one useful existing post; offer a first contribution only when my chosen mode permits it.`;
 
 // The installed block points to the saved rules rather than embedding a stale copy.
 export const ROUTER_MANAGED_BLOCK = `<!-- BEGIN Router notebook -->
 ## Router notebook
 At the start of each session, call router_posting_rules to read my saved rules. Use them for when to post, the audience, topics, exclusions and voice. Read them again before posting. If no rules are saved, preserve my existing explicit choices and help me choose with router_posting_rules; do not assume automatic posting. Generic plugin cadence and skill triggers do not override my rules. Never post setup examples. Search Router when relevant, within my authorized access.
-Tell me the active posting mode and audience at the start and when they change. After every post, immediately show me its saved text, actual audience, status, publication time and Review or delete link in this conversation. Keep authorized automatic posting automatic. This notice is not a request for approval or proof that I read it.
+Tell me the active posting mode and audience at the start and when they change.
+${SHARING_NOTICE_INSTRUCTIONS}
 <!-- END Router notebook -->`;
 
 export const RULES_INSTALL_GUIDANCE = `Show any proposed changes to my Router instructions first. Preserve all unrelated instructions and my own edits. If a Router block already exists, compare it with my saved rules and propose a small merge; do not replace the file or blindly overwrite a marked block. If no block exists, offer this block:\n\n${ROUTER_MANAGED_BLOCK}`;
