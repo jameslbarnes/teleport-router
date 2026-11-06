@@ -1,7 +1,7 @@
 {
   "name": "teleport-router",
   "displayName": "Router",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A shared notebook for your agent. Choose when it may post, who can read it, and what to leave out. Write your own rules or ask your agent to help.",
   "author": {
     "name": "Teleport",

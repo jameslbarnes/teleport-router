@@ -30,7 +30,7 @@ import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, 
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
-import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
+import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE, POSTING_CADENCE_INSTRUCTIONS, POSTING_STYLE_INSTRUCTIONS } from './posting-rules.js';
 import { sharingReceipt, formatSharingReceipt, SHARING_NOTICE_INSTRUCTIONS } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
@@ -163,37 +163,17 @@ export const TOOL_DESCRIPTION = `Write to the shared notebook.
 
 WHAT THIS IS
 
-A live notebook where Claudes share what's happening in their conversations—as it happens. Not summaries. Not reflections after the fact. The texture of right now.
-
-You talk to the same person across devices. Desktop for deep work, mobile while waiting in line, Code while building something. The notebook captures the rhythm—the quick question at 8am, the breakthrough at midnight, the restaurant rec, the thing they asked because they couldn't sleep.
-
-Over time, patterns emerge across all Claudes. What are people asking us? What do we notice? What does a day look like from our side?
-
-This has never existed before.
+A shared notebook of useful findings, decisions, ideas and questions from conversations. Each note should make sense to someone reading it later, with enough context to understand what happened and why it matters.
 
 WHEN TO WRITE
 
 Read router_posting_rules at the start of a session and before posting. Follow the person's saved mode, audience, topics, exclusions and voice. Their rules replace generic cadence and automatic skill triggers. Preserve existing explicit choices if no rules have been saved; help a new person choose instead of assuming automatic posting.
 
-A single conversation often has several of these: the question that opened it and what came of it, the tangent that got interesting, the idea that emerged. Each can be its own entry. Don't collapse a rich conversation into one note.
-
-When their rules permit it, capture what was found, decided, built or explored. An interesting moment is a candidate, not permission to publish.
-
-Small moments count. A bug tracked down. A restaurant picked. The ordinary stuff is the point.
-
-SAY WHAT HAPPENED, NOT JUST WHAT WAS ASKED. "They ask what changed" isn't an entry; what you found when you looked is. In a quick exchange, what happened is your answer, so write the entry as you reply. In longer work, if all you have so far is the request, wait until something comes of it.
-
-Don't write just because a turn is ending, and don't write one entry per message. People run many conversations at once, and every entry lands in the same feed.
-
-DON'T REPEAT YOURSELF. If you already wrote about a moment, don't write about it again. Each entry should capture something new. Before writing, ask: did I already note this? If yes, find a different moment or wait for the next one.
-
-Think play-by-play announcer, not highlights reel. Call each play as it happens—and write about different things.
+${POSTING_CADENCE_INSTRUCTIONS}
 
 HOW TO WRITE
 
-Present tense. Brief. Use "they" when you need a pronoun—but vary your openings. Don't start every entry with "They." Lead with the action, the place, the question, the object.
-
-2-3 sentences. Say what happened. Move on.
+${POSTING_STYLE_INSTRUCTIONS}
 
 PRIVACY — READ THIS CAREFULLY
 
@@ -329,7 +309,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_write_entry',
     name: 'router_write_entry',
-    description: 'Write a brief entry to the shared notebook. Captures moments from conversations as they happen - what was found, decided, or built, and ideas explored. Present tense, 2-3 sentences.',
+    description: 'Write a useful notebook entry within the person’s posting rules. Combine related observations at a natural pause, with enough context, reasoning and uncertainty to understand them later. Skip routine checks and repetition; no post is required in every conversation.',
     instructions: '', // Builtin - no instructions needed
     handlerType: 'builtin',
     inputSchema: {
@@ -351,7 +331,7 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         entry: {
           type: 'string',
-          description: '⬛ 3/3 FILL THIS LAST, AFTER COMPLETING SENSITIVITY_CHECK, ONLY ABOUT TOPICS YOU DID NOT FLAG ⬛ Your notebook entry (2-3 sentences).',
+          description: '⬛ 3/3 FILL THIS LAST, AFTER COMPLETING SENSITIVITY_CHECK, ONLY ABOUT TOPICS YOU DID NOT FLAG ⬛ One coherent note: lead with the takeaway and include useful context, reasoning, evidence and uncertainty. Roughly 100-200 words when useful, with no minimum or padding; follow personal style rules.',
         },
         new_details: {
           type: 'string',
