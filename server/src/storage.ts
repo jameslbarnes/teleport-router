@@ -153,6 +153,8 @@ export interface User {
   linkedAccounts?: LinkedAccount[];
   /** Private storage configuration; never include the delegation in public profile responses. */
   tinycloud?: AuthorBinding;
+  /** Private, hashed permissions for a particular Discord user and group. */
+  discordGrants?: import('./discord-groups.js').DiscordGroupGrant[];
 }
 
 /**
@@ -186,6 +188,8 @@ export interface Channel {
   createdAt: number;
   skills: Skill[];               // channel-scoped skills
   subscribers: ChannelSubscriber[];
+  /** Optional binding for the private Discord note commands. */
+  discord?: import('./discord-groups.js').DiscordGroupBinding;
   // Group posts stored in the owner's TinyCloud space instead of the Router database (see group-store.ts)
   store?: {
     kind: 'tinycloud';

@@ -8,6 +8,9 @@ model:
 agent:
   max_turns: 8
 
+plugins:
+  enabled: [router-private]
+
 platform_toolsets:
   cli: [mcp-router]
   discord: [mcp-router]

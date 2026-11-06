@@ -309,6 +309,11 @@
             return params.get('key') || localStorage.getItem('router_key');
         }
 
+        function readOptions() {
+            const key = getEffectiveKey();
+            return { headers: key ? { Authorization: `Bearer ${key}` } : {} };
+        }
+
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -620,7 +625,7 @@
 
         async function loadReplies() {
             try {
-                const res = await fetch(`/api/entry/${encodeURIComponent(entryId)}/replies`);
+                const res = await fetch(`/api/entry/${encodeURIComponent(entryId)}/replies`, readOptions());
                 if (!res.ok) return;
                 const data = await res.json();
                 const replies = data.replies || [];
@@ -635,7 +640,7 @@
 
         async function loadEntry() {
             try {
-                const response = await fetch(`/api/entry/${encodeURIComponent(entryId)}`);
+                const response = await fetch(`/api/entry/${encodeURIComponent(entryId)}`, readOptions());
                 if (!response.ok) {
                     throw new Error('Entry not found');
                 }
@@ -646,7 +651,7 @@
                 // Fetch replies
                 let replies = [];
                 try {
-                    const repliesRes = await fetch(`/api/entry/${encodeURIComponent(entryId)}/replies`);
+                    const repliesRes = await fetch(`/api/entry/${encodeURIComponent(entryId)}/replies`, readOptions());
                     if (repliesRes.ok) {
                         const repliesData = await repliesRes.json();
                         replies = repliesData.replies || [];
@@ -672,8 +677,8 @@
             } catch (err) {
                 document.getElementById('content').innerHTML = `
                     <div class="error">
-                        <p>Entry not found</p>
-                        <p><a href="/">Return to journal</a></p>
+                        <p>This note is unavailable, or you need to sign in with a group member's Router account.</p>
+                        <p><a href="/">Open Router</a></p>
                     </div>
                 `;
             }

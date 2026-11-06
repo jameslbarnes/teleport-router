@@ -27,6 +27,7 @@ import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type Jour
 import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
+import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
 import { isPublicNotebookEntry, channelView } from './public-views.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
@@ -1054,6 +1055,8 @@ const authorChallenges = new Map<string, {message: string; expires: number; gran
 const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progress: string; result?: unknown; error?: string}>();
 let authorLinkQueue: Promise<unknown> = Promise.resolve();
 const STATIC_DIR = join(process.cwd(), '..');
+const discordGroupService = authorLayer ? discordGroups(storage, publishedStorage,
+  handle => authorLayer.status(handle), {baseUrl: BASE_URL.replace(/\/$/, '')}) : null;
 
 /**
  * True only when the viewer wrote the entry. Each side must be present: a viewer
@@ -4970,13 +4973,31 @@ const server = createServer(async (req, res) => {
         res.writeHead(403);res.end(JSON.stringify({error:'Moderator identity required.'}));return;
       }
     }
+    // Discord commands use a bot key plus a scoped author grant, never a person's key in chat.
+    if (url.pathname.startsWith('/api/discord/')) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method !== 'POST') { res.writeHead(405); res.end(JSON.stringify({error: 'POST required.'})); return; }
+      if (!discordGroupService) { res.writeHead(503); res.end(JSON.stringify({error: 'Author storage is required.'})); return; }
+      try {
+        const body = JSON.parse(await readBody(req, 32768));
+        const result = await discordGroupService.serve(url.pathname, req.headers.authorization, body);
+        res.writeHead(200); res.end(JSON.stringify(result));
+      } catch (err) {
+        const status = err instanceof DiscordGroupError ? err.status : err instanceof SyntaxError ? 400 : 503;
+        const error = err instanceof DiscordGroupError ? err.message : err instanceof SyntaxError ? 'Invalid JSON.' : 'Private group service unavailable. Please retry.';
+        res.writeHead(status); res.end(JSON.stringify({error}));
+      }
+      return;
+    }
     // ─────────────────────────────────────────────────────────────
     // GET /api/entry/:id - Get single entry by ID (for permalinks)
     // ─────────────────────────────────────────────────────────────
     const entryByIdMatch = url.pathname.match(/^\/api\/entry\/([^/]+)$/);
     if (req.method === 'GET' && entryByIdMatch) {
       const entryId = decodeURIComponent(entryByIdMatch[1]);
-      const secretKey = url.searchParams.get('key');
+      const secretKey = req.headers.authorization?.replace(/^Bearer /i, '') || url.searchParams.get('key');
+      res.setHeader('Cache-Control', 'no-store');
       const entry = await storage.getEntry(entryId);
 
       if (!entry) {
@@ -5020,7 +5041,8 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && repliesMatch) {
       const entryId = decodeURIComponent(repliesMatch[1]);
       const limit = parseInt(url.searchParams.get('limit') || '50');
-      const secretKey = url.searchParams.get('key');
+      const secretKey = req.headers.authorization?.replace(/^Bearer /i, '') || url.searchParams.get('key');
+      res.setHeader('Cache-Control', 'no-store');
 
       // Verify parent entry exists
       const parentEntry = await storage.getEntry(entryId);
