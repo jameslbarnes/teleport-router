@@ -1,5 +1,6 @@
 # Isolated Hermes profile for the private Discord test server.
 # Secrets belong in the protected runtime home's .env, never in this file.
+_config_version: 52
 model:
   provider: anthropic
   default: claude-opus-4-6
@@ -30,6 +31,10 @@ default_reset_policy:
   idle_minutes: 1440
 
 discord:
+  group_allow_admin_from: ["1568048209002111017"]
+  # The central gateway needs its own chat grant in addition to adapter gating.
+  extra:
+    group_allowed_chats: ["1568051571751788644"]
   # Channel-only authorization also denies DMs when the user/role allowlists
   # and allow-all switches are empty/false. Do not add a user-wide grant.
   allowed_channels: ["1568051571751788644"]
@@ -47,6 +52,11 @@ discord:
 
 display:
   tool_progress: "off"
+
+# HTTP request INFO logs include the notebook's query-string credential.
+# Keep warnings/errors; inspect gateway_state.json and Discord for live status.
+logging:
+  level: WARNING
 
 auxiliary:
   title_generation:

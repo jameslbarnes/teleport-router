@@ -18,5 +18,9 @@ $launcher = Join-Path $env:HERMES_HOME 'bin\hermes.exe'
 if (-not (Test-Path -LiteralPath $launcher)) {
     throw "Hermes launcher is missing: $launcher"
 }
-& $launcher gateway run *>> (Join-Path $logDir 'discord-service.log')
-exit $LASTEXITCODE
+# Native stderr must not become terminating PowerShell NativeCommandError records.
+# Start-Process also keeps the scheduled task attached to the gateway's lifetime.
+$gatewayProcess = Start-Process -FilePath $launcher -ArgumentList @('gateway','run','--external-supervisor') -WorkingDirectory $workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir 'discord-stdout.log') -RedirectStandardError (Join-Path $logDir 'discord-stderr.log')
+$gatewayProcess.WaitForExit()
+$gatewayProcess.Refresh()
+exit $gatewayProcess.ExitCode

@@ -11,19 +11,24 @@ This profile gives the Router Test Discord bot its own Hermes home and Router id
 
 Copy `config.yaml` and `SOUL.md` to the private Hermes state directory. Its protected `.env` supplies `ANTHROPIC_API_KEY`, `DISCORD_BOT_TOKEN`, and this bot's `ROUTER_SECRET_KEY`. Never copy James's notebook key or the Shape agent's configuration into this profile.
 
-Keep `DISCORD_ALLOWED_USERS` and `DISCORD_ALLOWED_ROLES` empty and both allow-all switches false. In this Hermes release, the channel allowlist then grants access only from that channel and denies DMs. Use Discord permission overwrites to deny the bot access to the other channels as well. Set the server owner's ID as `platforms.discord.extra.group_allow_admin_from` to restrict administrative slash commands to the owner.
+Keep `DISCORD_ALLOWED_USERS` and `DISCORD_ALLOWED_ROLES` empty and both allow-all switches false. The Discord adapter requires `allowed_channels`, and the central gateway separately requires `extra.group_allowed_chats`; both must name only the test channel. Both layers deny DMs and other channels. Discord permission overwrites also deny access to the other channels. `group_allow_admin_from` restricts administrative slash commands to the owner.
 
 After installation, verify the running version, effective tool list, denied DM/other-channel authorization, and an actual Discord message and bot reply that calls notebook search. A successful REST request alone does not verify the Gateway connection.
 
 ## Setup status (November 5, 2026)
 
-The application is installed in the test server. The native Windows Hermes installation and its Discord/Anthropic extras are installed on Tulip. The bot is offline: Discord account verification has not yielded a bot token, and no gateway service has been started.
+The bot is online in the test server. Its token is stored in the protected runtime `.env`. The hidden Windows task `Teleport Router Discord Test` runs the isolated gateway at startup and retries failed exits up to three times, one minute apart; duplicate starts are ignored. No production Router deployment was changed.
 
 Verified against the pinned runtime and this profile:
 
 - Live MCP discovery and the effective Discord tool list expose exactly `mcp__router__router_search` and `mcp__router__router_get_entry`.
-- The actual Discord adapter's authorization permits the test channel and denies `general`, `feedback`, DMs, and requests without channel context.
+- The actual Discord adapter and central gateway authorization both permit the test channel and deny `general`, `feedback`, and DMs. Discord REST calls independently return 200 for test-channel messages and 403 for general/feedback; the bot cannot view the voice channel and has no administrator or management permissions.
 - A separate notebook identity can search the public notebook, and the configured model credential passes the provider's model-metadata request.
 - The private `.env` inherits access only for the Windows administrator account and SYSTEM.
 
-Before starting, finish Discord's bot-token verification and save the token directly in the protected `.env`; set the owner's numeric ID in `platforms.discord.extra.group_allow_admin_from`. Then verify real Discord permissions, run the gateway, and observe a notebook-search reply in `#router-test`. No real Discord message/reply, model completion, or automatic service startup has been tested yet.
+- A real user message in Discord triggered public notebook search and entry retrieval, followed by the bot's visible summary at 20:06 EST. The tested entry was `mnm8jri0-3mdwez`.
+- The scheduled task starts successfully and stays attached to the gateway process. Graceful profile shutdown returns task exit code 0. Reboot recovery is configured but has not been tested by rebooting Tulip.
+
+The Windows wrapper uses `Start-Process` with separate stdout/stderr files because PowerShell's terminating error preference treated a native stderr warning as a fatal error. Keep `logging.level: WARNING`: this upstream version's HTTP request INFO logger otherwise writes the notebook query-string credential. Earlier private log copies were scrubbed, and a scan after the live test found no raw credentials in logs.
+
+The test bot has no notebook publishing tool. Its conversation history stays in Discord and the private local Hermes state on Tulip.
