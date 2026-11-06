@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, accessSync, constants } from 'fs';
 import { dirname } from 'path';
 import type { PostedEntry } from './types.js';
+import type { ChannelTopicMapping } from './channel-topic-mapping.js';
 
 /** Pick a writable path for state persistence. */
 function resolveStatePath(): string {
@@ -41,6 +42,8 @@ export interface BotState {
   proactivePostTimestamps: number[];
   /** Last write-back timestamp. */
   lastWritebackTime: number;
+  /** Hermes channel ↔ Telegram topic mappings. */
+  channelTopicMappings: ChannelTopicMapping[];
 }
 
 const EMPTY_STATE: BotState = {
@@ -50,6 +53,7 @@ const EMPTY_STATE: BotState = {
   channelPostTimestamps: [],
   proactivePostTimestamps: [],
   lastWritebackTime: 0,
+  channelTopicMappings: [],
 };
 
 /** Load persisted state from disk, or return empty state. */
