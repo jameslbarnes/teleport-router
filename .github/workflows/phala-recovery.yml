@@ -1,117 +1,44 @@
-name: Phala Recovery
-
+name: Router Discord test credential setup
 on:
   workflow_dispatch:
-    inputs:
-      action:
-        description: 'Recovery action to run'
-        required: true
-        type: choice
-        default: status
-        options:
-          - status
-          - restart
-          - api-cancel-operation
-          - api-force-restart
-          - api-stop
-          - api-start
-
+permissions:
+  contents: read
 jobs:
-  phala-recovery:
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+    timeout-minutes: 3
     steps:
-      - name: Install Phala CLI
-        run: npm install -g phala
-
-      - name: Show CVM status
+      - name: Encrypt model credential for Tulip
         env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RECIPIENT_KEY: |
+            -----BEGIN PUBLIC KEY-----
+            MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEApkmL4gNOKsf/9Pst6MPB
+            0WAhi3gpIfAlOO8yXyh2Lt2Tu+hKQOudzRf1KpUgLxQPbB5nXpVxt4dPnH1m4dig
+            SKymr8WOwEZchiuPP8Kaedel2rbkaPpNNNipMMVUxf0yrtb/8Gu896rHARpfcBEk
+            XRsmSi6RsCBeLhIO5wHI3RzeJtGgvmOW03GWNsqMN/vLCeEHY+tB18wXEhi08wCa
+            aYgnvIb+92mfRrwqVYABZVtT1jVcc298KOk9Gk9VQwaLKH1Enmr0TEC6pXzzMgSU
+            XhzlUgHJlsjDD4JPaY2P2yVHfcwbrdJ0s3EultDxBReW8rgYk85is624DaKwp/vG
+            Tfj2I8SY3teg43d92jbgtbGhadU5Q+BnF1kZ+dTiYCvC3EdzKj2xyj91b/26Qnqa
+            yDIfjDJr5CDZdiMR7V9c4j7NI3zuR+GFcQc3Ls3iSQ9WBM6mElYNgF90KOlOSxlZ
+            vR2RdLQFIigQruLz96aau2+VbeiqXPkxCpKtwkKlSTFz0DNavfuVmKEdNbLGi2v7
+            c6utEz2A2Ubl4YzGhZmW2CJ1EkuCelBPUmwRD48kuDF40+58EjnzpbCEkwwvrJk5
+            ikcOD0/6f36IomifkZpk40pq2buAVYunJDVbvM3m7sl70mTGo1QZaLou/jIxuKm7
+            jr27jcKWKvlLvjITmgCxQ3MCAwEAAQ==
+            -----END PUBLIC KEY-----
         run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}" \
-            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
-
-      - name: Show recent CVM events
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/events" \
-            -q '{items: [.items[:10][] | {event_type,status,timestamp,message}], total, next_cursor}' || true
-
-      - name: Show CVM runtime state
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/state" || true
-
-      - name: Restart CVM
-        if: inputs.action == 'restart'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          timeout 900s phala cvms restart "${PHALA_APP_ID}" --json
-
-      - name: Cancel in-progress CVM operation through API
-        if: inputs.action == 'api-cancel-operation'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/operations/cancel" \
-            -X POST \
-            -i
-
-      - name: Force restart CVM through API
-        if: inputs.action == 'api-force-restart'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/restart" \
-            -X POST \
-            -d '{"force":true}' \
-            -i
-
-      - name: Stop CVM through API
-        if: inputs.action == 'api-stop'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/stop" \
-            -X POST \
-            -i
-
-      - name: Start CVM through API
-        if: inputs.action == 'api-start'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/start" \
-            -X POST \
-            -i
-
-      - name: Status after recovery action
-        if: inputs.action != 'status'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}" \
-            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
+          node --input-type=module <<'NODE'
+          import { publicEncrypt, constants } from 'node:crypto';
+          import { writeFileSync } from 'node:fs';
+          const secret = process.env.ANTHROPIC_API_KEY;
+          if (!secret || secret.length < 20) throw new Error('Required model credential is missing');
+          const encrypted = publicEncrypt({key:process.env.RECIPIENT_KEY, padding:constants.RSA_PKCS1_OAEP_PADDING, oaepHash:'sha256'}, Buffer.from(secret));
+          writeFileSync('provider-key.enc', encrypted);
+          console.log('Encrypted model credential prepared for the test runtime.');
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: router-discord-provider-key
+          path: provider-key.enc
+          retention-days: 1
+          if-no-files-found: error
