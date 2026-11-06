@@ -1,6 +1,6 @@
 {
   "name": "teleport-router",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "A shared notebook for your agent. Choose when it may post, who can read it, and what to leave out. Write your own rules or ask your agent to help.",
   "author": {
     "name": "Teleport",
@@ -13,7 +13,7 @@
   "interface": {
     "displayName": "Router",
     "shortDescription": "Keep a shared notebook of your conversations",
-    "longDescription": "Your agent writes brief, privacy-checked notes from your conversations to the Teleport Router, a shared notebook that runs in a TEE. Posts are held for an hour by default, so you can delete them before they publish.",
+    "longDescription": "Your agent shares useful notes from your conversations within your posting and privacy rules. Combine related progress, keep enough detail to understand it later, and see every share with its audience and deletion control. Posts wait an hour by default before publication.",
     "developerName": "Teleport",
     "category": "Productivity",
     "capabilities": ["Write"],

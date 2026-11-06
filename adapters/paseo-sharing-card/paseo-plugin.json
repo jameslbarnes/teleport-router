@@ -1,0 +1,5 @@
+{
+  "id": "router-sharing-card-test",
+  "description": "Inline Router sharing cards for a disposable local test.",
+  "requirements": { "paseo": ">=0.11.0-beta.5" }
+}
