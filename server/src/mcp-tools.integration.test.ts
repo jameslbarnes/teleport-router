@@ -35,7 +35,8 @@ async function callTool(client: Client, name: string, args: Record<string, any> 
   return textBlock?.text || '';
 }
 
-async function waitForServer(port: number, timeoutMs = 15000): Promise<void> {
+// Importing the full server can take over 15 seconds on a busy Windows machine.
+async function waitForServer(port: number, timeoutMs = 30000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -112,7 +113,7 @@ describe('MCP Tool Integration Tests', () => {
     const reg = await connectClient(TEST_PORT, REGULAR_KEY);
     regularClient = reg.client;
     regularTransport = reg.transport;
-  }, 30000);
+  }, 35000);
 
   afterAll(async () => {
     try { await modTransport?.close(); } catch {}

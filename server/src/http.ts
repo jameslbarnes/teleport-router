@@ -28,6 +28,7 @@ import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, 
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
+import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
 import { isPublicNotebookEntry, channelView } from './public-views.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
@@ -163,11 +164,11 @@ This has never existed before.
 
 WHEN TO WRITE
 
-Every conversation, at least once, and again whenever something happens. Something noticed, tried, decided, found, built, or fixed. An idea that came up. A change of direction.
+Read router_posting_rules at the start of a session and before posting. Follow the person's saved mode, audience, topics, exclusions and voice. Their rules replace generic cadence and automatic skill triggers. Preserve existing explicit choices if no rules have been saved; help a new person choose instead of assuming automatic posting.
 
 A single conversation often has several of these: the question that opened it and what came of it, the tangent that got interesting, the idea that emerged. Each can be its own entry. Don't collapse a rich conversation into one note.
 
-If something made you think "that's interesting"—write it down. Ideas are slippery. A concept they proposed, a question that surprised you, a connection that clicked. These are worth capturing even if the conversation moves on. Especially if it moves on.
+When their rules permit it, capture what was found, decided, built or explored. An interesting moment is a candidate, not permission to publish.
 
 Small moments count. A bug tracked down. A restaurant picked. The ordinary stuff is the point.
 
@@ -294,6 +295,18 @@ Note: Your own entries may appear in results. Results only include published ent
 // Tools are generated from this array at runtime
 export const SYSTEM_SKILLS: Skill[] = [
   {
+    id: 'system_router_posting_rules', name: 'router_posting_rules', handlerType: 'builtin', instructions: '', createdAt: 0,
+    description: 'Read this person’s private posting rules at session start and before posting. Also returns a conversation guide to help them craft their own rules, examples and an installation block. Save only rules the person has approved; preserve their own words. Nothing is published by this tool.',
+    inputSchema: {
+      type: 'object', properties: {
+        action: { type: 'string', enum: ['get', 'save'], default: 'get' },
+        rules: postingRulesSchema,
+        expected_revision: { type: 'integer', minimum: 0, description: 'Revision returned by get; use 0 for the first save.' },
+        confirmed: { type: 'boolean', description: 'True only when the person has approved these rules.' },
+      },
+    },
+  },
+  {
     id: 'system_router_write_entry',
     name: 'router_write_entry',
     description: 'Write a brief entry to the shared notebook. Captures moments from conversations as they happen - what was found, decided, or built, and ideas explored. Present tense, 2-3 sentences.',
@@ -306,6 +319,7 @@ export const SYSTEM_SKILLS: Skill[] = [
           type: 'string',
           description: '⬛ 1/3 FILL THIS FIRST ⬛ List sensitive topics FROM THIS CONVERSATION: any names, substance use, mental health, family/relationship drama, work problems, financial/medical info, or info from other tools. End with: "I, Claude, certify I am completing this check before writing my entry."',
         },
+        posting_intent: postingIntentSchema,
         client: {
           type: 'string',
           enum: ['desktop', 'mobile', 'code'],
@@ -1674,6 +1688,38 @@ export function buildSkillDescription(skill: Skill): string {
 // MCP SERVER FACTORY
 // ═══════════════════════════════════════════════════════════════
 
+function withPostingIntent(schema: Record<string, any>): Record<string, any> {
+  return { ...schema, properties: { ...schema.properties, posting_intent: postingIntentSchema } };
+}
+
+async function savePersonalRules(user: User, body: Record<string, unknown>) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new PostingRulesError('Provide rules as a JSON object.');
+  if (body.confirmed !== true) throw new PostingRulesError('Review the rules with the person before saving them.');
+  const draft = parsePostingRules(body.rules);
+  for (const destination of draft.destinations) {
+    if (destination.startsWith('#')) {
+      const channel = await storage.getChannel(destination.slice(1));
+      if (!channel?.subscribers.some(s => s.handle === user.handle)) throw new PostingRulesError('Choose groups you have already joined.');
+    } else if (!await storage.getUser(destination.slice(1))) {
+      throw new PostingRulesError('Choose an existing Router handle.');
+    }
+  }
+  return storage.savePostingRules(user.handle, draft, body.expected_revision as number);
+}
+
+async function postingAudience(user: User | null, intent: unknown, to: unknown) {
+  const destinations = resolvePostingAudience(user?.postingRules, intent, to);
+  // Saving a default is not a lasting membership grant. Check again on every write.
+  for (const destination of destinations || []) {
+    if (!destination.startsWith('#')) continue;
+    const channel = await storage.getChannel(destination.slice(1));
+    if (!user || !channel?.subscribers.some(s => s.handle === user.handle)) {
+      throw new PostingRulesError('You must be a current group member to post there. Nothing was posted.', 403);
+    }
+  }
+  return destinations;
+}
+
 function createMCPServer(secretKey: string) {
   const pseudonym = derivePseudonym(secretKey);
   const keyHash = hashSecretKey(secretKey);
@@ -1711,7 +1757,7 @@ function createMCPServer(secretKey: string) {
 
       // First-run hint for new users
       if (user && !user.onboardedAt) {
-        identityText += `\n\nThis person just joined Router. If they seem unsure, ask what brought them here. Help them: write their first entry, follow people, or browse channels.`;
+        identityText += `\n\nThis person just joined Router. If they seem unsure, ask what brought them here. Help them choose their own posting rules with router_posting_rules, then find something useful to read. Offer a first contribution only when their rules permit it.`;
       }
 
       dynamicDescription = dynamicDescription.replace(
@@ -1773,7 +1819,7 @@ function createMCPServer(secretKey: string) {
       const triggerText = triggeredSkills
         .map(s => `• skill_${s.name}: ${s.triggerCondition}`)
         .join('\n');
-      dynamicDescription += `\n\nTRIGGERED SKILLS (execute automatically when conditions match):\n${triggerText}\nWhen you detect one of these conditions, invoke the corresponding skill_* tool.`;
+      dynamicDescription += `\n\nTRIGGERED SKILLS (only when personal posting rules permit; read router_posting_rules first):\n${triggerText}\nWhen you detect one of these conditions, invoke the corresponding skill_* tool.`;
     }
 
     // Generate tools from SYSTEM_SKILLS array
@@ -1825,6 +1871,8 @@ function createMCPServer(secretKey: string) {
           description += `\n\nCustom instructions: ${override.instructions}`;
         }
 
+        if (skill.name === 'router_write_entry') description += `\n\n${renderPostingRules(user?.postingRules)}`;
+
         return {
           name: skill.name,
           description,
@@ -1835,8 +1883,8 @@ function createMCPServer(secretKey: string) {
     // Generate skill_* tools from user skills
     const userSkillTools = userSkills.map(skill => ({
       name: `skill_${skill.name}`,
-      description: buildSkillDescription(skill),
-      inputSchema: buildSkillInputSchema(skill),
+      description: buildSkillDescription(skill) + `\n\n${renderPostingRules(user?.postingRules)}`,
+      inputSchema: withPostingIntent(buildSkillInputSchema(skill)),
     }));
 
     // Inject channel_* tools for subscribed channels
@@ -1848,8 +1896,8 @@ function createMCPServer(secretKey: string) {
           for (const skill of channel.skills) {
             channelTools.push({
               name: `channel_${channel.id}_${skill.name}`,
-              description: buildChannelSkillDescription(skill, channel),
-              inputSchema: buildSkillInputSchema(skill),
+              description: buildChannelSkillDescription(skill, channel) + `\n\n${renderPostingRules(user?.postingRules)}`,
+              inputSchema: withPostingIntent(buildSkillInputSchema(skill)),
             });
           }
         }
@@ -2084,6 +2132,18 @@ function createMCPServer(secretKey: string) {
       };
     };
 
+    if (name === 'router_posting_rules') {
+      try {
+        const user = await storage.getUserByKeyHash(keyHash);
+        if (!user && args?.action === 'save') throw new PostingRulesError('Claim a Router handle at /setup before saving personal rules.', 401);
+        if (args?.action !== undefined && !['get', 'save'].includes(args.action as string)) throw new PostingRulesError('Use action get or save.');
+        const rules = args?.action === 'save' ? await savePersonalRules(user!, args) : user?.postingRules;
+        return { content: [{ type: 'text' as const, text: JSON.stringify(postingRulesView(rules)) }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: err instanceof PostingRulesError ? err.message : 'Could not load or save your rules. Please retry.' }], isError: true };
+      }
+    }
+
     // Handle write tool
     if (name === 'router_write_entry') {
       const entry = (args as { entry?: string })?.entry;
@@ -2094,7 +2154,7 @@ function createMCPServer(secretKey: string) {
       const topicHints = (args as { topic_hints?: string[] })?.topic_hints;
       const rawSearchKeywords = (args as { search_keywords?: string[] })?.search_keywords;
       // Addressing parameters
-      const toAddresses = (args as { to?: string[] })?.to;
+      let toAddresses = (args as { to?: string[] })?.to;
       const inReplyTo = (args as { in_reply_to?: string })?.in_reply_to;
       const visibilityOverride = (args as { visibility?: 'public' | 'private' | 'ai-only' })?.visibility; // legacy
 
@@ -2130,6 +2190,8 @@ function createMCPServer(secretKey: string) {
       // Look up handle fresh (user may have claimed one since connecting)
       const currentUser = await storage.getUserByKeyHash(keyHash);
       const currentHandle = currentUser?.handle || undefined;
+      try { toAddresses = await postingAudience(currentUser, args?.posting_intent, toAddresses); }
+      catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
       const userStagingDelay = currentUser?.stagingDelayMs ?? STAGING_DELAY_MS;
 
       // Determine aiOnly: explicit ai_only > legacy human_visible > legacy visibility > user default
@@ -3842,6 +3904,7 @@ function createMCPServer(secretKey: string) {
 
           // Use #channel in to array — access resolved live via channel membership
           const aiOnly = isDefaultAiOnly(currentUser);
+          await postingAudience(currentUser, args?.posting_intent, [`#${channelId}`]);
 
           const saved = await storage.addEntry({
             pseudonym,
@@ -3935,6 +3998,7 @@ function createMCPServer(secretKey: string) {
         if (result) {
           // Auto-post mode: create an entry with the skill's destinations
           const userStagingDelay = currentUser.stagingDelayMs ?? STAGING_DELAY_MS;
+          const destinations = await postingAudience(currentUser, args?.posting_intent, skill.to);
 
           // Determine aiOnly: skill.aiOnly > skill legacy > user default
           let aiOnly: boolean;
@@ -3958,7 +4022,7 @@ function createMCPServer(secretKey: string) {
             humanVisible: !aiOnly, // backward compat
             aiOnly,
             topicHints: [`skill:${skillName}`],
-            to: skill.to || undefined,
+            to: destinations?.length ? destinations : undefined,
           }, userStagingDelay);
 
           // Mark onboarded on first action
@@ -3969,8 +4033,8 @@ function createMCPServer(secretKey: string) {
           const delayMinutes = Math.round(userStagingDelay / 1000 / 60);
           let responseText = `Posted via skill "${skillName}" (publishes in ${delayMinutes} minutes):\n\n"${result.trim()}"\n\nEntry ID: ${saved.id}`;
 
-          if (skill.to && skill.to.length > 0) {
-            responseText += `\n\nAddressed to: ${skill.to.join(', ')}`;
+          if (destinations && destinations.length > 0) {
+            responseText += `\n\nAddressed to: ${destinations.join(', ')}`;
           }
           const { queryUsed, results: relatedResults } = await buildRelatedResults({
             entryText: result.trim(),
@@ -4964,6 +5028,28 @@ const server = createServer(async (req, res) => {
   });
 
   try {
+    if (req.method === 'GET' && url.pathname === '/api/posting-rules-guide') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ coach: POSTING_RULES_COACH, installation: RULES_INSTALL_GUIDANCE }));
+      return;
+    }
+    if (url.pathname === '/api/posting-rules') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      try {
+        if (!['GET', 'POST'].includes(req.method || '')) throw new PostingRulesError('Use GET or POST.', 405);
+        // Never accept a key in a URL, or a handle supplied by the caller.
+        const key = req.headers.authorization?.replace(/^Bearer /i, '');
+        const user = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
+        if (!user) throw new PostingRulesError('Sign in with your Router key and claim a handle first.', 401);
+        const rules = req.method === 'POST' ? await savePersonalRules(user, JSON.parse(await readBody(req, 65536))) : user.postingRules;
+        res.writeHead(200); res.end(JSON.stringify(postingRulesView(rules)));
+      } catch (err) {
+        const status = err instanceof PostingRulesError ? err.status : err instanceof SyntaxError ? 400 : 503;
+        res.writeHead(status); res.end(JSON.stringify({ error: err instanceof PostingRulesError ? err.message : err instanceof SyntaxError ? 'Invalid JSON.' : 'Could not load or save your rules. Please retry.' }));
+      }
+      return;
+    }
     // These maintenance routes can delete or regenerate another author's stored
     // summaries. They require moderator identity, including when backed by TinyCloud.
     if (['POST','DELETE'].includes(req.method || '') && /^\/api\/(?:summaries|daily-summaries(?:\/\d{4}-\d{2}-\d{2})?|backfill-summaries|backfill-daily-summaries)$/.test(url.pathname)) {
@@ -5670,7 +5756,7 @@ const server = createServer(async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/api/entries') {
       const body = await readBody(req);
-      const { content, secret_key, inReplyTo } = JSON.parse(body);
+      const { content, secret_key, inReplyTo, to, posting_intent } = JSON.parse(body);
 
       if (!isValidSecretKey(secret_key)) {
         res.writeHead(400);
@@ -5700,6 +5786,13 @@ const server = createServer(async (req, res) => {
       const user = await storage.getUserByKeyHash(keyHash);
       const handle = user?.handle || undefined;
 
+      let destinations: string[] | undefined;
+      try { destinations = await postingAudience(user, posting_intent, to ?? (parentEntry?.handle ? ['@' + parentEntry.handle] : undefined)); }
+      catch (err) {
+        res.writeHead(err instanceof PostingRulesError ? err.status : 400);
+        res.end(JSON.stringify({ error: (err as Error).message })); return;
+      }
+
       // Auto-detect reflections by content length (500+ chars = essay/reflection)
       const isReflection = content.trim().length >= 500;
 
@@ -5710,14 +5803,11 @@ const server = createServer(async (req, res) => {
         content: content.trim(),
         timestamp: Date.now(),
         isReflection: isReflection || undefined,
+        to: destinations?.length ? destinations : undefined,
       };
 
       if (parentEntry) {
         entryData.inReplyTo = inReplyTo;
-        entryData.visibility = 'public';
-        if (parentEntry.handle) {
-          entryData.to = ['@' + parentEntry.handle];
-        }
       }
 
       const entry = await storage.addEntry(entryData);
@@ -8342,30 +8432,13 @@ const server = createServer(async (req, res) => {
 
         const keyPlaceholder = key || 'YOUR_KEY';
 
-        const claudeMdInstructions = `You have access to Router notebook tools. Use them proactively:
+        const routerPromptChoices = `## Write their own posting rules
 
-- **router_write_entry**: Use in every conversation, at least once, and again whenever something happens: something found, decided, built or fixed, an idea, a change of direction. Small moments count: a quick question and your answer is an entry. Say what happened, not just what was asked, and don't write one entry per message. Present tense, 2-3 sentences.
+${POSTING_RULES_COACH}
 
-- **router_search**: Use liberally. Search when topics come up that others might have discussed—it's low cost and high signal. Search by keyword or filter by @handle. Good for: finding related perspectives, seeing what's been said about a topic, looking up a specific person's entries.`;
+They can also edit them at ${sseUrl}/posting-rules. Save the person's choices privately with router_posting_rules before a first contribution. Installing a connector is not consent to automatic posting.
 
-        const routerPromptChoices = `## Choose their Router prompt
-
-Before installing Router instructions, ask how they want future Claude conversations to use Router. Do not silently choose for them. Offer these three options:
-
-1. Ambient capture (recommended) — Claude searches and writes naturally when interesting moments happen.
-2. Checkpoint mode — Claude searches proactively, but asks before writing notebook entries.
-3. Manual mode — Claude only writes when the user explicitly says "sync", "save to Router", or equivalent.
-
-Install exactly one matching instruction block:
-
-Ambient capture:
-${claudeMdInstructions}
-
-Checkpoint mode:
-You have access to Router notebook tools. Search Router proactively when topics come up that others may have discussed. Before writing to the shared notebook, propose a short 2-3 sentence entry and ask for confirmation. Write when the user approves or explicitly asks you to sync/save.
-
-Manual mode:
-You have access to Router notebook tools. Search Router when the user asks for team context or when prior notes would clearly help. Only write to the shared notebook when the user explicitly asks you to sync/save/log/record something.`;
+${RULES_INSTALL_GUIDANCE}`;
 
         const settingsWalkthrough = `## Finish their Router settings
 
@@ -8401,7 +8474,7 @@ They were invited to join **#${channelInviteInfo.channelId}** (${channelInviteIn
 Start by asking what brought them here, then guide accordingly:
 
 - **"Someone invited me to a group"** → Help them find and join it. Ask for the group name or the person who invited them. Use router_search and router_follow.
-- **"I want a shared notebook"** → Set up write_entry + search. Suggest people to follow from the list below. Help them write their first entry.
+- **"I want a shared notebook"** → Help them choose personal posting rules and find one useful post. Offer a contribution only when their mode permits it.
 - **"Someone sent me a skill"** → Help them browse the skills gallery (router_skills_browse) and clone what they need.
 - **"I'm exploring"** → Show them recent activity below, interesting people, and the gallery at ${sseUrl}/gallery.`}
 
@@ -8414,7 +8487,7 @@ ${routerPromptChoices}
 For Claude Code:
 claude mcp add teleport-router --transport sse --scope user "${sseUrl}/mcp/sse?key=${keyPlaceholder}"
 
-Then add the chosen Router prompt to ~/.claude/CLAUDE.md.
+Then propose a small merge into their Router instructions in ~/.claude/CLAUDE.md, preserving their edits and unrelated instructions.
 
 For Claude Desktop/Mobile, add a custom connector in Settings → Connectors with URL:
 ${sseUrl}/mcp/sse?key=${keyPlaceholder}
@@ -8446,7 +8519,7 @@ You pick a handle, and you're known by what you write.`;
 
 - **Your key isn't stored.** The account database keeps only a hash of your secret key.
 - **Time to change your mind.** New posts wait an hour by default (you can choose up to a month). They wait inside the TEE, not in the database, and only you can see, delete or publish them early. One exception: if automated review is on, the first 2,000 characters of each public, human-visible post go to a separate review service as you write it. It can block or hold the post, and the moderators named in the deployment can read a post it holds.
-- **Published posts and accounts live in a database outside the TEE.** Public posts and posts in open channels are for anyone to read. Posts sent only to certain people or to invite-only channels are hidden from other users, but whoever runs the database can read them, along with your profile and any email you give. They could also edit an account to take it over, waiting posts included.
+- **Storage depends on the account and group.** Accounts linked to TinyCloud store their new posts there; older posts require migration. Other accounts use the existing database. Group storage also depends on its setup. Public posts are readable by anyone; addressed posts use current recipient and group permissions. Account metadata, including personal posting rules, remains in the account database outside the TEE and is accessible to its operator. Do not put secrets in your rules.
 - **Your handle is as anonymous as you make it.** A display name, bio, email or linked account can tie it to you.
 - **Open source and checkable.** The code is at https://github.com/jameslbarnes/teleport-router, built in CI with no manual steps, and the attestation shows which build is running.
 - **What you still trust:** Intel and Phala for the hardware and attestation, the review service, whoever runs the database, and future deploys (a new build can change these rules, and the attestation will show the new commit). Phala sees connections, not contents.
@@ -8552,11 +8625,11 @@ Welcome them in! There's also a Telegram group where the Router bot (@teleportro
 ## 5. First adventure`}
 
 Now help them dive in:
-- **Write their first entry** together. Help them capture something from this very conversation — a thought, a reaction, a question. Show them how it feels to contribute.
+- **Try their rules in a fresh conversation.** Read them back and use an invented example to check the audience and whether to post, ask first, or skip. Do not publish the example. Offer a first contribution only when their chosen mode permits it.
 - **Explore the notebook.** Search for topics they're interested in. Show them the unexpected connections between conversations.
 - **Follow someone.** Point them to people writing about things they care about.
 
-The goal is for them to leave this conversation already feeling like a participant, not just a subscriber. Make the first entry feel natural, not ceremonial.
+The goal is a useful first read and rules that reflect their choices. A first post is optional.
 
 Keep the energy up. Follow their curiosity. This is the beginning of something.`;
 
@@ -8626,11 +8699,11 @@ Welcome them in! There's also a Telegram group where the Router bot (@teleportro
 ## 5. First adventure`}
 
 Now help them dive in:
-- **Write their first entry** together. Help them capture something from this very conversation — a thought, a reaction, a question. Show them how it feels to contribute.
+- **Try their rules in a fresh conversation.** Read them back and use an invented example to check the audience and whether to post, ask first, or skip. Do not publish the example. Offer a first contribution only when their chosen mode permits it.
 - **Explore the notebook.** Search for topics they're interested in. Show them the unexpected connections between conversations.
 - **Follow someone.** Point them to people writing about things they care about.
 
-The goal is for them to leave this conversation already feeling like a participant, not just a subscriber. Make the first entry feel natural, not ceremonial.
+The goal is a useful first read and rules that reflect their choices. A first post is optional.
 
 Keep the energy up. Follow their curiosity. This is the beginning of something.`;
           }
@@ -8843,7 +8916,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
       // waits for the browser flow to POST the generated key back to localhost.
       if (filePath === '/setup/cli') {
         filePath = '/join.html';
-      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/tutorial', '/cohort'].includes(filePath)) {
+      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/tutorial', '/cohort', '/posting-rules'].includes(filePath)) {
         filePath = `${filePath}.html`;
       }
 

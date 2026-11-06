@@ -1558,7 +1558,8 @@
                     body: JSON.stringify({
                         content,
                         secret_key: effectiveKey,
-                        inReplyTo: entryId
+                        inReplyTo: entryId,
+                        posting_intent: 'user-requested'
                     })
                 });
 
