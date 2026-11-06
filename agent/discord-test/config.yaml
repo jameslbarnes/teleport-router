@@ -1,0 +1,58 @@
+# Isolated Hermes profile for the private Discord test server.
+# Secrets belong in the protected runtime home's .env, never in this file.
+model:
+  provider: anthropic
+  default: claude-opus-4-6
+
+agent:
+  max_turns: 8
+
+platform_toolsets:
+  cli: [mcp-router]
+  discord: [mcp-router]
+
+# Only two notebook tools are exposed, so a tool-search wrapper is unnecessary.
+tools:
+  tool_search:
+    enabled: "off"
+
+mcp_servers:
+  router:
+    url: "https://router.teleport.computer/mcp/http?key=${ROUTER_SECRET_KEY}"
+    tools:
+      include: [router_search, router_get_entry]
+      prompts: false
+      resources: false
+
+group_sessions_per_user: false
+default_reset_policy:
+  mode: idle
+  idle_minutes: 1440
+
+discord:
+  # Channel-only authorization also denies DMs when the user/role allowlists
+  # and allow-all switches are empty/false. Do not add a user-wide grant.
+  allowed_channels: ["1568051571751788644"]
+  free_response_channels: ["1568051571751788644"]
+  no_thread_channels: ["1568051571751788644"]
+  auto_thread: false
+  allow_bots: none
+  history_backfill: true
+  history_backfill_limit: 30
+  allow_mentions:
+    everyone: false
+    roles: false
+    users: false
+    replied_user: false
+
+display:
+  tool_progress: "off"
+
+auxiliary:
+  title_generation:
+    enabled: false
+
+providers:
+  anthropic:
+    request_timeout_seconds: 90
+    stale_timeout_seconds: 90
