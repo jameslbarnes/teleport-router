@@ -34,7 +34,9 @@ async function setup(groupStatus,create=false){
       try{await import(${JSON.stringify(script.href)});}catch(error){console.error(error.message);process.exitCode=1;}
       finally{await writeFile(${JSON.stringify(calls)},JSON.stringify(calls));}
     `;
-    const child=spawnSync(process.execPath,['--input-type=module','--eval',source],{encoding:'utf8',timeout:10000});
+    const runner=join(dir,'run-setup.mjs');
+    await writeFile(runner,source);
+    const child=spawnSync(process.execPath,[runner],{encoding:'utf8',timeout:10000});
     return {status:child.status,stderr:child.stderr,calls:JSON.parse(await readFile(calls,'utf8'))};
   } finally {
     const inside=relative(tempRoot,resolve(dir));
