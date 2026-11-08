@@ -5,7 +5,7 @@ import {discordGroups} from './discord-groups.js';
 import {derivePseudonym, hashSecretKey} from './identity.js';
 import type {GroupStore} from './group-store.js';
 
-async function fixture() {
+async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const base = new MemoryStorage();
   const keys = {alice: 'a'.repeat(43), bob: 'b'.repeat(43), outsider: 'c'.repeat(43), router_bot: 'd'.repeat(43)};
   let clock = 1_000_000;
@@ -29,10 +29,11 @@ async function fixture() {
   const service = discordGroups(layer.storage, layer.storage, layer.status, {baseUrl:'https://router.example',now:()=>clock});
   const context = {guildId:'100000000000000001', channelId:'100000000000000002', discordUserId:'100000000000000003'};
   const call = (who: keyof typeof keys, path: string, body: Record<string,unknown>) => service.serve('/api/discord/'+path, `Bearer ${keys[who]}`, body) as Promise<any>;
-  await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',...context});
-  async function link(who: 'alice'|'bob' = 'alice', discordUserId=context.discordUserId) {
+  await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',
+    ...(scope === 'guild' ? {scope, guildId:context.guildId} : context)});
+  async function link(who: 'alice'|'bob' = 'alice', discordUserId=context.discordUserId, channelId=context.channelId) {
     const challenge = await call(who,'link/start',{groupId:'test-group',discordUserId});
-    return call('router_bot','link/complete',{...context,discordUserId,code:challenge.code});
+    return call('router_bot','link/complete',{...context,discordUserId,channelId,code:challenge.code});
   }
   const operate = (grant: string, body: Record<string,unknown> = {}) => call('router_bot','operate',{grant,...context,...body});
   const save = (grant: string, content='Selected synthetic note', interactionId='100000000000000010') => operate(grant,{action:'save',content,interactionId});
@@ -40,6 +41,65 @@ async function fixture() {
 }
 
 describe('Scoped private Discord group access',()=>{
+  it('lets linked members use the same private group from different channels of one server',async()=>{
+    const f=await fixture('guild');
+    const otherChannel='100000000000000020';
+    const {grant}=await f.link('alice',f.context.discordUserId,otherChannel);
+    const first=await f.save(grant,'Question from general');
+    const second=await f.operate(grant,{channelId:otherChannel,action:'save',content:'Reading group note',interactionId:'100000000000000021'});
+    expect(first.groupId).toBe('test-group');
+    expect(second.groupId).toBe('test-group');
+    expect((await f.operate(grant,{channelId:otherChannel,action:'read',entryId:first.entry.id})).entry.content).toBe('Question from general');
+    expect((await f.operate(grant,{action:'search'})).entries).toHaveLength(2);
+    const retry=await f.operate(grant,{channelId:otherChannel,action:'save',content:'Reading group note',interactionId:'100000000000000021'});
+    expect(retry.duplicate).toBe(true);
+    expect(retry.entry.id).toBe(second.entry.id);
+    for(const entry of [first.entry,second.entry]) {
+      expect((await f.layer.storage.getEntry(entry.id))?.to).toEqual(['#test-group']);
+      expect(await f.base.getEntry(entry.id)).toBeNull();
+    }
+  });
+  it('keeps server-wide grants bound to the Discord user, server, bot and current group membership',async()=>{
+    const f=await fixture('guild'), {grant}=await f.link();
+    for(const body of [{guildId:'100000000000000099'}, {discordUserId:'100000000000000099'}, {channelId:null}, {channelId:'*'}])
+      await expect(f.operate(grant,{action:'search',...body})).rejects.toMatchObject({status:403});
+    await expect(f.call('bob','operate',{...f.context,grant,action:'search'})).rejects.toMatchObject({status:403});
+    await expect(f.call('outsider','link/start',{groupId:'test-group',discordUserId:'100000000000000099'})).rejects.toMatchObject({status:403});
+    await f.base.removeSubscriber('test-group','alice');
+    await expect(f.operate(grant,{action:'search',channelId:'100000000000000020'})).rejects.toMatchObject({status:403});
+    await expect(f.save(grant)).rejects.toMatchObject({status:403});
+  });
+  it('never treats an omitted, malformed or mixed binding as permission for the whole server',async()=>{
+    const f=await fixture();
+    for(const extra of [{}, {scope:'all'}, {scope:null,channelId:null}, {scope:'guild',channelId:f.context.channelId}, {scope:'channel',channelId:'*'}, {scope:[]}])
+      await expect(f.call('alice','bind',{groupId:'test-group',guildId:f.context.guildId,botHandle:'router_bot',...extra})).rejects.toMatchObject({status:400});
+    const {grant}=await f.link();
+    await expect(f.operate(grant,{action:'search',channelId:'100000000000000020'})).rejects.toMatchObject({status:403});
+  });
+  it('preserves old single-channel grants when the same binding is saved again',async()=>{
+    const f=await fixture();
+    const binding=(await f.base.getChannel('test-group'))!.discord!;
+    const {scope:_,...legacy}=binding;
+    await f.base.updateChannel('test-group',{discord:legacy});
+    const {grant}=await f.link();
+    const result=await f.call('alice','bind',{groupId:'test-group',botHandle:'router_bot',...f.context});
+    expect(result.version).toBe(legacy.version);
+    expect((await f.operate(grant,{action:'status'})).groupId).toBe('test-group');
+    await expect(f.operate(grant,{action:'status',channelId:'100000000000000020'})).rejects.toMatchObject({status:403});
+  });
+  it('requires new links after widening, narrowing or moving a server binding',async()=>{
+    const f=await fixture(), old=await f.link();
+    const binding={groupId:'test-group',botHandle:'router_bot',guildId:f.context.guildId};
+    await f.call('alice','bind',{...binding,scope:'guild'});
+    await expect(f.operate(old.grant,{action:'search'})).rejects.toMatchObject({status:403});
+    const wide=await f.link();
+    await f.call('alice','bind',{...binding,scope:'channel',channelId:f.context.channelId});
+    await expect(f.operate(wide.grant,{action:'search'})).rejects.toMatchObject({status:403});
+    await f.call('alice','bind',{...binding,scope:'guild'});
+    const staging=await f.link();
+    await f.call('alice','bind',{...binding,scope:'guild',guildId:'100000000000000030'});
+    await expect(f.operate(staging.grant,{action:'search'})).rejects.toMatchObject({status:403});
+  });
   it('requires a private group admin to bind the channel',async()=>{
     const f=await fixture();
     await expect(f.call('bob','bind',{groupId:'test-group',...f.context,botHandle:'router_bot'})).rejects.toMatchObject({status:403});

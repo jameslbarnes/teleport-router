@@ -22,6 +22,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class PrivateRouter:
     def __init__(self, settings, state_dir, bot_key, request=None):
         self.settings = settings
+        self.scope = settings.get("scope", "channel")
+        snowflake = lambda value: isinstance(value, str) and re.fullmatch(r"\d{16,22}", value)
+        if (not snowflake(settings.get("guild_id")) or self.scope not in ("channel", "guild")
+                or (self.scope == "channel" and not snowflake(settings.get("channel_id")))
+                or (self.scope == "guild" and "channel_id" in settings)):
+            raise ValueError("Choose one Discord channel or guild scope; a guild binding has no channel_id.")
+        if (self.scope == "guild" or "group_id" in settings) and not re.fullmatch(
+                r"[a-z0-9][a-z0-9-]{0,28}[a-z0-9]", str(settings.get("group_id", ""))):
+            raise ValueError("Invalid private Router group ID.")
         self.state_dir = Path(state_dir)
         self.bot_key = bot_key
         self.lock = asyncio.Lock()
@@ -31,14 +40,20 @@ class PrivateRouter:
             raise ValueError("Router base URL must be HTTPS (or loopback for tests)")
 
     def actor(self, interaction):
+        channel_id = str(interaction.channel_id or "")
         if (str(interaction.guild_id or "") != self.settings["guild_id"]
-                or str(interaction.channel_id or "") != self.settings["channel_id"]
+                or not re.fullmatch(r"\d{16,22}", channel_id)
+                or (self.scope == "channel" and channel_id != self.settings["channel_id"])
                 or getattr(interaction.user, "bot", True)):
-            raise PrivateError("Private note commands are available only in #router-test.")
+            raise PrivateError("Private note commands are not connected to this Discord channel.")
         user_id = str(interaction.user.id)
         if not re.fullmatch(r"\d{16,22}", user_id):
             raise PrivateError("A Discord member account is required.")
-        return {"guildId": self.settings["guild_id"], "channelId": self.settings["channel_id"], "discordUserId": user_id}
+        return {"guildId": self.settings["guild_id"], "channelId": channel_id, "discordUserId": user_id}
+
+    def check_group(self, link):
+        if self.settings.get("group_id") and link.get("groupId") != self.settings["group_id"]:
+            raise PrivateError("This permission belongs to a different Router group. Link to this server's configured group first.")
 
     def _load(self):
         try:
@@ -96,6 +111,7 @@ class PrivateRouter:
             result = await self.request("link/complete", {**actor, "code": code.strip()})
             if not isinstance(result.get("grant"), str) or not result["grant"].startswith("rdg1."):
                 raise PrivateError("Router did not return a valid private group permission.")
+            self.check_group(result)
             links = self._load()
             links[actor["discordUserId"]] = {key: result[key] for key in ("grant", "handle", "groupId", "expiresAt")}
             self._store(links)
@@ -107,6 +123,7 @@ class PrivateRouter:
             link = self._load().get(actor["discordUserId"])
         if not link:
             raise PrivateError("Link your Router account with /router-link before using private notes.")
+        self.check_group(link)
         result = await self.request("operate", {**fields, **actor, "action": action, "grant": link["grant"]})
         if action == "unlink":
             async with self.lock:

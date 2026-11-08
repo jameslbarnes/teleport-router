@@ -44,6 +44,39 @@ class PrivateCommandsTest(unittest.IsolatedAsyncioTestCase):
                 await self.router.link(actor, "RD-LINK-" + "x" * 32)
         self.assertEqual(self.calls, [])
 
+    async def test_guild_scope_uses_the_actual_channel_and_still_rejects_other_servers(self):
+        settings = {"base_url": "https://router.example", "guild_id": self.settings["guild_id"],
+                    "scope": "guild", "group_id": "private-test"}
+        self.router = module.PrivateRouter(settings, self.temp.name, "private-bot-test-key", self.router.request)
+        await self.link()
+        other = SimpleNamespace(**{**vars(self.actor), "channel_id": 100000000000000020})
+        await self.router.save(other, "A note from another topic")
+        self.assertEqual(self.calls[-1][1]["channelId"], "100000000000000020")
+        self.assertEqual(self.calls[-1][1]["guildId"], self.settings["guild_id"])
+        before = len(self.calls)
+        for change in ({"guild_id": None}, {"guild_id": 100000000000000099}, {"channel_id": None},
+                       {"user": SimpleNamespace(id=100000000000000003, bot=True)}):
+            actor = SimpleNamespace(**{**vars(self.actor), **change})
+            with self.assertRaises(module.PrivateError):
+                await self.router.save(actor, "Must not leave this test")
+        self.assertEqual(len(self.calls), before)
+
+    async def test_group_change_does_not_reuse_a_link_to_another_group(self):
+        await self.link()
+        self.settings["group_id"] = "different-group"
+        before = len(self.calls)
+        with self.assertRaises(module.PrivateError):
+            await self.router.save(self.actor, "Would be sent to the old group")
+        self.assertEqual(len(self.calls), before)
+        with self.assertRaises(module.PrivateError):
+            await self.link()
+        self.assertEqual(self.router._load()[str(self.actor.user.id)]["groupId"], "private-test")
+
+    async def test_invalid_scope_never_widens_channel_access(self):
+        for changes in ({"scope": "all"}, {"scope": "guild"}, {"channel_id": None}, {"guild_id": None}):
+            with self.assertRaises(ValueError):
+                module.PrivateRouter({**self.settings, **changes}, self.temp.name, "test-key", self.router.request)
+
     async def test_no_link_means_no_private_read(self):
         with self.assertRaises(module.PrivateError):
             await self.router.operate(self.actor, "search")

@@ -54,6 +54,9 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Test private Discord commands
+        run: python3 -m unittest discover -s agent/discord-test/router-private -p 'test_*.py'
+
       - name: Check native sharing-card adapter
         working-directory: adapters/paseo-sharing-card
         run: |

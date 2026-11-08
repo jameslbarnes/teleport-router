@@ -61,7 +61,7 @@ def register(ctx):
             async def operation():
                 result = await router.save(interaction, note)
                 entry = result["entry"]
-                return f"Saved as @{entry['handle']} in your TinyCloud storage, shared with the private Router group.\n[Open note]({router.source_url(entry)})\nUse /router-recall to find it here."
+                return f"Saved as @{entry['handle']} in your TinyCloud storage, shared with private group #{result['groupId']}.\n[Open note]({router.source_url(entry)})\nUse /router-recall to find it here."
             await run(interaction, operation)
 
         @app_commands.command(name="router-recall", description="Find and summarize currently accessible private group notes")

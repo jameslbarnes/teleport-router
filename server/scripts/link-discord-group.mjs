@@ -6,10 +6,13 @@ import {dirname,resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
 
 const {values:v}=parseArgs({options:Object.fromEntries([
-  'base','router-key-file','bot-key-file','bot-handle','group','guild','channel','discord-user','code-file'
+  'base','router-key-file','bot-key-file','bot-handle','group','guild','channel','scope','discord-user','code-file'
 ].map(key=>[key,{type:'string'}]))});
-for(const key of ['router-key-file','bot-key-file','bot-handle','group','guild','channel','discord-user','code-file'])
+for(const key of ['router-key-file','bot-key-file','bot-handle','group','guild','discord-user','code-file'])
   if(!v[key])throw new Error('Missing --'+key);
+const scope=v.scope||'channel';
+if(!['channel','guild'].includes(scope)||(scope==='channel'&&!v.channel)||(scope==='guild'&&v.channel))
+  throw new Error('Use --scope channel with --channel, or --scope guild without --channel.');
 const base=v.base||'https://router.teleport.computer';
 if(new URL(base).protocol!=='https:')throw new Error('Setup requires HTTPS.');
 const ownerKey=(await readFile(v['router-key-file'],'utf8')).trim();
@@ -35,7 +38,11 @@ const identity=await post('/api/identity/register',botKey,{secret_key:botKey,han
 if(identity.result.handle!==v['bot-handle'])throw new Error('The private service handle belongs to a different identity.');
 await post('/api/channels',ownerKey,{secret_key:ownerKey,id:v.group,name:'Discord Router Test',
   description:'Selected test notes from the linked Discord channel.',visibility:'private',join_rule:'invite'},true);
-await post('/api/discord/bind',ownerKey,{groupId:v.group,guildId:v.guild,channelId:v.channel,botHandle:v['bot-handle']});
+const binding={groupId:v.group,guildId:v.guild,scope,...(scope==='channel'?{channelId:v.channel}:{}),botHandle:v['bot-handle']};
+const bound=await post('/api/discord/bind',ownerKey,binding);
+if((bound.result.scope||'channel')!==scope||bound.result.guildId!==v.guild||bound.result.channelId!==v.channel)
+  throw new Error('Router did not confirm the requested Discord scope.');
 const {result}=await post('/api/discord/link/start',ownerKey,{groupId:v.group,discordUserId:v['discord-user']});
 await protectedWrite(v['code-file'],JSON.stringify({code:result.code,expiresAt:result.expiresAt,groupId:result.groupId},null,2)+'\n');
-console.log(JSON.stringify({groupId:result.groupId,botHandle:v['bot-handle'],codeFile:resolve(v['code-file']),expiresAt:result.expiresAt}));
+console.log(JSON.stringify({groupId:result.groupId,scope,guildId:v.guild,...(v.channel?{channelId:v.channel}:{}),
+  botHandle:v['bot-handle'],codeFile:resolve(v['code-file']),expiresAt:result.expiresAt}));
