@@ -67,3 +67,28 @@ Deploy the Router API change before enabling guild scope in the plugin. Older AP
 Recall sends the matching notes to this profile's configured model provider for a stateless summary. Discord processes the command text and ephemeral replies. These are part of this test workflow; it is not end-to-end encrypted against Discord or the model provider.
 
 Validation commands: server TypeScript build and Vitest suite, `node scripts/discord-groups-e2e.mjs` from `server/` (three synthetic authors with real hosted TinyCloud, no personal grants), and the pinned runtime Python `-m unittest discover -s agent/discord-test/router-private -p 'test_*.py'`. Verify actual slash-command responses in Discord and the source-link page after installation; local registration tests alone do not establish that Discord received the commands.
+
+## Speaking without an @-mention
+
+`router-participation/` is a second Hermes plugin. It ports the retired Telegram bot's group-chat behavior: the March 2026 bot in `server/src/telegram/` (see commit `9081484^`) and the unmerged classifier and analytics in PRs #13 and #17. Hermes keeps answering @-mentions. The plugin watches the rest of `#router-test`, and after each burst of messages a Claude Haiku 5.5 check scores the latest message: question, wrong, stuck, relevant, directed at the bot, social. PR #13's rules then decide:
+
+- Silence is the default. The check must say speak, or the adjusted confidence must reach 0.85.
+- Two people trading quick messages are never interrupted. An answered question isn't answered again.
+- The bar rises each time the bot speaks (0.30, plus 0.25 for each recent post, half-life 30 minutes, capped at 0.90). Messages addressed to the bot use the base bar.
+- A two-person conversation backs the confidence off by 0.3 unless a question is waiting or a claim that matters is wrong (PR #17).
+- A question with no real answer is checked again after 8 and 20 minutes. On Nov 7, 2026 Haiku 5.5 waited at 3 and 5 minutes and spoke in 8 of 8 runs at 8 minutes. Chatter such as "brb" doesn't count as an answer.
+- Unprompted posts are limited to 6 an hour and 30 a day, 5 minutes apart. Checks are capped at 400 a day and drafts at 40.
+
+When the rules say speak, Claude Opus 5.5 drafts at most a matching number of words. It can search the public notebook (addressed entries are dropped even if the server returns them), call the read-only MCP servers listed in `compose_mcp_servers`, and search the web. It answers `SKIP` when there's nothing worth adding, and the reply is posted as a Discord reply to the message that prompted it, with mentions and link previews off.
+
+Modes, set in `settings.json` or the runtime-only `settings.local.json`: `off` records messages only; `shadow` decides and drafts but never posts, so a person can compare what it would have said; `live` posts. Every decision is logged with its scores, adjustments and draft.
+
+In #router-test, replies visible only to the person asking:
+
+- `/router-quiet hours`: no unprompted replies here for that many hours (0 resumes). @-mentions still work.
+- `/router-why`: the last five decisions, with confidence, bar, top scores, reason and any draft.
+- `/router-stats days`: the bot's posts by kind (unprompted, answers to mentions, other posts such as digests), with how many drew a human reply or reaction.
+
+Privacy: the plugin keeps the channel's messages, reactions and decisions in `plugin-data/router-participation/participation.db` on this machine for `retention_days` (30); deleted messages lose their text at once. The last 15 to 30 messages are sent to the model provider each time the check or a draft runs. Logs carry IDs and counts, never message text.
+
+Install: copy the folder to `C:\RouterDiscord\plugins\router-participation`, add `router-participation` to `plugins.enabled`, optionally add `settings.local.json` with `channel_note` (what the channel is for) and `compose_mcp_servers` (`[{"name", "command", "args"}]`), and restart the gateway. The plugin reads `ANTHROPIC_API_KEY` from the profile's environment and records messages only when it has none. Tests run with the pinned runtime Python: `-m unittest discover -s agent/discord-test/router-participation -p 'test_*.py'`.
