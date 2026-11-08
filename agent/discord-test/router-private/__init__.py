@@ -55,7 +55,9 @@ def register(ctx):
                 return f"Linked @{result['handle']} to #{result['groupId']}. Use /router-save to save a selected note to your own TinyCloud storage."
             await run(interaction, operation)
 
-        @app_commands.command(name="router-save", description="Save a selected note to your private Router group")
+        save_description = (f"Save selected text to the private #{settings['group_id']} Router group"
+                            if settings.get("group_id") else "Save a selected note to your private Router group")
+        @app_commands.command(name="router-save", description=save_description)
         @app_commands.describe(note="The exact note to save under your own authorship")
         async def save(interaction, note: str):
             async def operation():

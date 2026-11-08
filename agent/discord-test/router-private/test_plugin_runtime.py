@@ -76,6 +76,7 @@ class NativeCommandsTest(unittest.IsolatedAsyncioTestCase):
             self.factory(self.bot, SimpleNamespace())
         await asyncio.sleep(0.01)
         self.interaction.channel_id=1568051146172403816
+        self.assertIn("#private-test", self.bot.tree.get_command("router-save", guild=self.guild).description)
         operation=AsyncMock(return_value={"groupId":"private-test", "entry":{"id":"sample", "handle":"alice"}})
         with patch.object(plugin.PrivateRouter, "operate", operation):
             await self.bot.tree.get_command("router-save", guild=self.guild).callback(self.interaction, "Selected note")
