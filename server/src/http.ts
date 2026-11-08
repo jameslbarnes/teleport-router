@@ -8371,14 +8371,28 @@ const server = createServer(async (req, res) => {
       // Check if requester is authenticated
       let authorPseudonym: string | null = null;
       let authorHandle: string | null = null;
+      let authorEmail: string | undefined;
       if (secretKey && isValidSecretKey(secretKey)) {
         authorPseudonym = derivePseudonym(secretKey);
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         authorHandle = user?.handle || null;
+        authorEmail = user?.email;
       }
 
-      const results = await storage.searchEntries(query, limit);
+      // Same visibility checks as the feed: entries addressed to people or groups
+      // are returned only to their author and recipients. Over-fetch so filtering
+      // doesn't shrink the page.
+      const candidates = (await storage.searchEntries(query, Math.min(Math.max(limit, 1) * 4, 200))).map(normalizeEntry);
+      const results: JournalEntry[] = [];
+      const channelAccessCache = new Map<string, boolean>();
+      for (const e of candidates) {
+        if (results.length >= limit) break;
+        const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
+        if (await canView(e, authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache)) {
+          results.push(e);
+        }
+      }
 
       // Strip content from hidden entries (except for author's own)
       const strippedResults = results.map(e => {
