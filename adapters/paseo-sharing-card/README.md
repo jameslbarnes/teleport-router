@@ -45,9 +45,11 @@ version, production `add-post` fails rather than fabricating a receipt.
 
 The command reports attachment only. It never acknowledges a notice. Only the
 mounted client callback reports layout and starts a gated public post's countdown.
-If attachment fails, immediately show the receipt as visible text and use the
-portable `router_record_sharing_notice` flow honestly. A tool result alone is not
-the notice. Automatic posting remains automatic within the person's saved rules.
+If attachment fails or no client layout report is available, immediately show the
+receipt as visible text, then use the portable `router_record_sharing_notice` flow
+with `agent_reported` and a reference to that message. Do not report delivery merely
+because the attachment command succeeded. A tool result alone is not the notice.
+Automatic posting remains automatic within the person's saved rules.
 
 The agent must call the adapter for each write. It does not watch unrelated chats,
 intercept every connector, or infer a destination from group membership. Configure
