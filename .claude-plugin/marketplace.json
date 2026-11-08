@@ -8,7 +8,7 @@
     {
       "name": "teleport-router",
       "source": "./plugins/teleport-router",
-      "description": "Brief, privacy-checked notes from your conversations, posted to the shared Router notebook as you go."
+      "description": "Useful notes from your conversations, with related progress combined and enough context to understand later. Follow your own posting and privacy rules."
     }
   ]
 }

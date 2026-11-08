@@ -7,7 +7,6 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -120,7 +119,35 @@
         .entry-content {
             font-size: 1.1rem;
             line-height: 1.7;
+            overflow-wrap: anywhere;
         }
+
+        .entry-content pre { overflow-x: auto; }
+        .entry-permalink { overflow-wrap: anywhere; }
+        .manage-post {
+            border-top: 1px solid var(--border);
+            margin-top: 1rem;
+            padding-top: 1rem;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+            line-height: 1.7;
+            overflow-wrap: anywhere;
+        }
+        .manage-post button, .manage-post input {
+            font: inherit;
+            padding: 0.5rem 0.75rem;
+            margin-top: 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface);
+            color: var(--fg);
+            max-width: 100%;
+        }
+        .manage-post button { cursor: pointer; }
+        .manage-post button:disabled { opacity: 0.5; cursor: default; }
+        .manage-post .delete-post { color: #a32323; border-color: #a32323; }
+        .manage-post input { width: 100%; }
+        .manage-post label { display: block; }
 
         .entry-content p {
             margin-bottom: 1rem;
@@ -301,6 +328,7 @@
         </div>
     </div>
 
+    <script src="/sharing-notice.js"></script>
     <script>
         const entryId = window.location.pathname.split('/e/')[1];
 
@@ -327,7 +355,8 @@
                 month: 'short',
                 day: 'numeric',
                 hour: 'numeric',
-                minute: '2-digit'
+                minute: '2-digit',
+                timeZoneName: 'short'
             });
         }
 
@@ -372,8 +401,8 @@
 
         function renderEntry(entry) {
             const authorLink = entry.handle
-                ? `<a href="/u/${entry.handle}" class="entry-author">@${entry.handle}</a>`
-                : `<span class="entry-author">${entry.pseudonym}</span>`;
+                ? `<a href="/u/${encodeURIComponent(entry.handle)}" class="entry-author">@${escapeHtml(entry.handle)}</a>`
+                : `<span class="entry-author">${escapeHtml(entry.pseudonym)}</span>`;
             const parentLink = entry.inReplyTo
                 ? `<a href="/e/${escapeHtml(entry.inReplyTo)}">in reply to ${escapeHtml(entry.inReplyTo)}</a>`
                 : '';
@@ -386,7 +415,8 @@
                         <span>&middot;</span>
                         <span>${formatDate(entry.timestamp)}</span>
                     </div>
-                    <div class="entry-content">${marked.parse(entry.content)}</div>
+                    <div class="entry-content">${entry.contentHtml ?? escapeHtml(entry.content)}</div>
+                    ${renderManagement(entry)}
                     <div class="entry-permalink">
                         <a href="/e/${entry.id}">permalink</a>
                         <button class="copy-link-action" onclick="copyPermalink('${entry.id}', this)">copy link</button>
@@ -397,6 +427,61 @@
             `;
 
             return html;
+        }
+
+        function renderManagement(entry) {
+            if (!entry.canDelete || !entry.sharingReceipt) return '';
+            const receipt = entry.sharingReceipt;
+            const status = receipt.state === 'awaiting_notice' ? 'Only you can see this. Waiting for your agent to record delivery of the sharing notice; the publication countdown has not started.'
+                : receipt.state === 'held' ? 'Held for review. It will not publish automatically.'
+                : receipt.state === 'pending' ? `Only you can see this now. Scheduled to publish ${formatDate(receipt.publish_at)}.`
+                : 'Published.';
+            return `<div class="manage-post" id="manage">
+                <p><strong>Audience:</strong> ${escapeHtml(receipt.audience)}</p>
+                <p id="sharing-status">${escapeHtml(status)}</p>
+                ${receipt.notification_evidence ? `<p>Notice delivery: ${receipt.notification_evidence.kind === 'agent_reported' ? 'reported by your agent' : 'reported by this browser'} at ${escapeHtml(formatDate(receipt.notification_evidence.recorded_at))}. This is not independent proof that you read it.</p>` : ''}
+                <button class="delete-post" id="delete-post">Delete post</button>
+                <p id="delete-result" role="status" aria-live="polite"></p>
+            </div>`;
+        }
+
+        function renderSignIn() {
+            return `<form class="manage-post" id="manage-signin">
+                <label for="identity-key">Sign in with your existing Router key to review or delete your posts.</label>
+                <input type="password" id="identity-key" autocomplete="off" required placeholder="Your Router key">
+                <button type="submit">Sign in</button>
+            </form>`;
+        }
+
+        function wireSignIn() {
+            document.getElementById('manage-signin')?.addEventListener('submit', async event => {
+                event.preventDefault();
+                const key = document.getElementById('identity-key').value.trim();
+                if (!key) return;
+                localStorage.setItem('router_key', key);
+                // Never retain an obsolete credential in the URL or copied link.
+                history.replaceState(null, '', location.pathname + location.hash);
+                await loadEntry();
+            });
+        }
+
+        async function deletePost() {
+            if (!confirm('Delete this post from Router?')) return;
+            const button = document.getElementById('delete-post');
+            const result = document.getElementById('delete-result');
+            button.disabled = true;
+            result.textContent = 'Deleting…';
+            try {
+                const response = await fetch(`/api/entries/${encodeURIComponent(entryId)}`, { ...readOptions(), method: 'DELETE' });
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.error || 'Could not delete this post. Please try again.');
+                }
+                document.getElementById('content').innerHTML = '<div class="entry" role="status"><p>Deleted from Router.</p><p><a href="/">Back to journal</a></p></div>';
+            } catch (error) {
+                result.textContent = error.message || 'Could not delete this post. Please try again.';
+                button.disabled = false;
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -561,7 +646,7 @@
                     const authorLink = reply.handle
                         ? `<a href="/u/${escapeHtml(reply.handle)}" class="entry-author">@${escapeHtml(reply.handle)}</a>`
                         : `<span class="entry-author">${escapeHtml(reply.pseudonym || '')}</span>`;
-                    const content = marked.parse(reply.content || '');
+                    const content = reply.contentHtml ?? escapeHtml(reply.content || '');
                     return `
                         <div class="reply-entry">
                             <div class="entry-meta">
@@ -606,6 +691,8 @@
                 });
 
                 if (res.ok) {
+                    const saved = await res.json();
+                    void window.showRouterSharingNotice(saved.receipt, effectiveKey);
                     textarea.value = '';
                     btn.disabled = false;
                     btn.textContent = 'Reply';
@@ -661,8 +748,12 @@
 
                 document.getElementById('content').innerHTML =
                     renderEntry(entry) +
+                    (entry.canDelete ? '' : renderSignIn()) +
                     renderReplyForm(entry) +
                     `<div id="replies-container">${renderReplies(replies)}</div>`;
+
+                document.getElementById('delete-post')?.addEventListener('click', deletePost);
+                wireSignIn();
 
                 // Wire up reply form
                 const submitBtn = document.getElementById('reply-submit-btn');
@@ -681,7 +772,9 @@
                         <p>This note is unavailable, or you need to sign in with a group member's Router account.</p>
                         <p><a href="/">Open Router</a></p>
                     </div>
+                    ${renderSignIn()}
                 `;
+                wireSignIn();
             }
         }
 

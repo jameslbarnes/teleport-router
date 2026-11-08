@@ -119,7 +119,11 @@ async function ensureMatrixCredentials({ accessTokenEnv, userIdEnv, deviceIdEnv,
   });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(`${label} signup failed ${response.status}: ${JSON.stringify(body)}`);
+    // Do not echo an upstream body: it may contain submitted credentials.
+    const hint = response.status === 403 && body?.error === 'invalid_code'
+      ? ' (invalid signup code; configure MATRIX_SMOKE_SIGNUP_CODE or a pre-provisioned MATRIX_SMOKE_SENDER_ACCESS_TOKEN and MATRIX_SMOKE_SENDER_USER_ID)'
+      : '';
+    throw new Error(`${label} signup failed ${response.status}${hint}`);
   }
   const creds = {
     access_token: body.access_token,

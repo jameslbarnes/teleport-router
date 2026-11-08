@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MemoryStorage, type JournalEntry } from '../storage.js';
+import { MemoryStorage, StagedStorage, type JournalEntry } from '../storage.js';
 import { MatrixPlatform, type MatrixHistoryMessage } from '../platform/matrix.js';
 import type { Platform } from '../platform/types.js';
 import {
@@ -12,8 +12,11 @@ import {
   hasLinkedPlatformAccount,
   notifyLinkedMatrixPendingEntry,
   triggerManualSpark,
+  registerAgentHooks,
 } from './agent.js';
 import type { HookContext } from './types.js';
+import type { HookRegistration } from './types.js';
+import { HookDispatcher } from './dispatcher.js';
 
 function makeEntry(overrides: Partial<JournalEntry> = {}): JournalEntry {
   return {
@@ -25,6 +28,43 @@ function makeEntry(overrides: Partial<JournalEntry> = {}): JournalEntry {
     ...overrides,
   };
 }
+
+describe('Matrix reply writeback with notice gating', () => {
+  it.each(['public', 'private-group', 'manual', 'unverified'] as const)('%s reply preserves the audience and posting rules', async mode => {
+    const published = new MemoryStorage();
+    const storage = new StagedStorage(3600000, published, 'https://router.test');
+    const hooks: HookRegistration[] = [];
+    const dispatcher = new HookDispatcher();
+    vi.spyOn(dispatcher, 'register').mockImplementation(hook => { hooks.push(hook); });
+    registerAgentHooks(dispatcher);
+    const handler = hooks.find(h => h.id === 'agent:platform-message')!.handler;
+    try {
+      await storage.createUser({ handle: 'alice', secretKeyHash: 'hash-alice',
+        linkedAccounts: [{ platform: 'matrix', platformUserId: '@alice:matrix.org', verified: true, linkedAt: 1 }],
+        ...(mode === 'manual' ? { postingRules: { schemaVersion: 1 as const, revision: 1, updatedAt: 1,
+          mode: 'manual' as const, audience: 'public' as const, destinations: [], purpose: '', share: '', avoid: '', style: '', instructions: '' } } : {}),
+      });
+      await storage.createChannel({ id: 'lab', name: 'Private lab', visibility: 'private', joinRule: 'invite', createdBy: 'bob', createdAt: 1, skills: [],
+        subscribers: [{ handle: 'bob', role: 'admin', joinedAt: 1 }, { handle: 'alice', role: 'member', joinedAt: 1 }] });
+      const parent = await published.addEntry({ pseudonym: 'bob', handle: 'bob', client: 'code', content: 'Parent', timestamp: 1,
+        ...(mode === 'private-group' ? { to: ['#lab'] } : {}) });
+      const platform = makePlatform();
+      await handler({ trigger: 'platform_message', storage, platforms: [platform], event: {
+        id: 1, type: 'platform_message', timestamp: Date.now(), data: { platform: 'matrix', room_id: '!room', message_id: '$reply',
+          sender_handle: 'alice', sender_id: mode === 'unverified' ? '@impostor:matrix.org' : '@alice:matrix.org', text: 'Exact reply text', reply_to_entry_id: parent.id },
+      } });
+      const pending = storage.getAllPendingEntries();
+      if (mode === 'manual' || mode === 'unverified') {
+        expect(pending).toEqual([]); expect(platform.sendMessage).not.toHaveBeenCalled(); return;
+      }
+      expect(pending).toHaveLength(1);
+      expect(pending[0].to).toEqual(mode === 'private-group' ? ['#lab'] : []);
+      expect(platform.sendMessage).toHaveBeenCalledWith('!room', expect.stringContaining('Exact reply text'), { replyTo: '$reply' });
+      if (mode === 'public') expect(pending[0].sharingNotice?.evidence?.kind).toBe('agent_reported');
+      else expect(pending[0].sharingNotice).toBeUndefined();
+    } finally { storage.stop(); }
+  });
+});
 
 class PendingMemoryStorage extends MemoryStorage {
   private pending = new Map<string, JournalEntry>();

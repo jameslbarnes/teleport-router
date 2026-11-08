@@ -9,6 +9,7 @@ import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import type { AuthorBinding } from './author-store.js';
 import { nextPostingRules, type PostingRules, type PostingRulesDraft } from './posting-rules.js';
+import { prepareNotice, noticeDestinations, noticeRecorded, recordNotice, SharingNoticeError, type SharingNotice } from './sharing-notice.js';
 
 // Visibility levels for entries
 export type EntryVisibility = 'public' | 'private' | 'ai-only';
@@ -22,6 +23,7 @@ export interface JournalEntry {
   timestamp: number;
   keywords?: string[]; // Tokenized content for search
   publishAt?: number; // When entry becomes public. If undefined or in past, entry is published.
+  sharingNotice?: SharingNotice; // Public-post notice and explicitly reported delivery; never proof of attention.
   isReflection?: boolean; // True for longform markdown reflections
   model?: string; // Model that wrote the entry (e.g., "claude-sonnet-4", "opus-4")
   humanVisible?: boolean; // @deprecated Use aiOnly. Show full content in human feed? Default true. False = AI-only (stub shown)
@@ -945,6 +947,8 @@ export class FirestoreStorage implements Storage {
       docData.channel = newEntry.channel;
     }
 
+    if (newEntry.sharingNotice) docData.sharingNotice = newEntry.sharingNotice;
+
     await this.db.collection(this.collection).doc(id).set(docData);
 
     return newEntry;
@@ -1774,7 +1778,7 @@ export class StagedStorage implements Storage {
   private onStageCallback: ((entry: JournalEntry) => void) | null = null;
   private onPublishCallback: ((entry: JournalEntry) => void) | null = null;
 
-  constructor(publishDelayMs = 60 * 60 * 1000, publishedStorage?: Storage) { // Default 1 hour
+  constructor(publishDelayMs = 60 * 60 * 1000, publishedStorage?: Storage, private noticeBaseUrl?: string) { // Default 1 hour
     this.published = (publishedStorage || new FirestoreStorage()) as Storage & Record<string, any>;
     this.publishDelayMs = publishDelayMs;
     this.startPublishLoop();
@@ -1807,7 +1811,7 @@ export class StagedStorage implements Storage {
     // An unavailable author's store must not stop other authors from publishing.
     // All failures leave the original waiting record available for retry/recovery.
     const jobs: Promise<unknown>[] = [];
-    for (const [id, entry] of this.pending) if (entry.publishAt && entry.publishAt <= now && !entry.moderationHeld) jobs.push(this.publishEntry(id));
+    for (const [id, entry] of this.pending) if (entry.publishAt && entry.publishAt <= now && !entry.moderationHeld && noticeRecorded(entry)) jobs.push(this.publishEntry(id));
     for (const [id, conversation] of this.pendingConversations) if (conversation.publishAt && conversation.publishAt <= now) {
       let task = this.publishingConversations.get(id);
       if (!task) {
@@ -1834,6 +1838,11 @@ export class StagedStorage implements Storage {
       id,
       publishAt: Date.now() + delay,
     };
+    // All public entry writers using this server share the same publication gate.
+    // Existing recovered entries retain their prior schedule; private groups are unchanged.
+    if (this.noticeBaseUrl && noticeDestinations(newEntry).length === 0) {
+      newEntry.sharingNotice = prepareNotice(newEntry, this.noticeBaseUrl, delay);
+    }
     this.pending.set(id, newEntry);
 
     // Call the onStage callback if registered
@@ -1932,6 +1941,13 @@ export class StagedStorage implements Storage {
     return this.pending.has(id);
   }
 
+  recordSharingNotice(id: string, input: unknown): JournalEntry {
+    const entry = this.pending.get(id);
+    if (!entry) throw new SharingNoticeError('Entry is no longer pending.');
+    recordNotice(entry, input);
+    return entry;
+  }
+
   /**
    * Publish a pending entry immediately (move from pending to Firestore)
    * Returns the published entry, or null if entry was not found in pending
@@ -1941,6 +1957,7 @@ export class StagedStorage implements Storage {
     if (inflight) return inflight;
     const entry = this.pending.get(id);
     if (!entry) return null;
+    if (!noticeRecorded(entry)) throw new SharingNoticeError('Show the sharing notice in the conversation, then record its delivery with router_record_sharing_notice before publishing.');
     const task = (async () => {
       const { publishAt, moderationHeld, moderationHoldReason, moderationHeldBy, scheduledPublishAt, ...publishedEntry } = entry;
       const saved = await this.published.addEntry(publishedEntry);

@@ -12,6 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { BotContext } from './types.js';
 import type { MessageBuffer } from './buffer.js';
 import { WRITEBACK_PROMPT } from './prompts.js';
+import { announcePlatformEntry } from '../platform-sharing-notice.js';
 
 /** Minimum time between write-backs (ms). */
 const MIN_WRITEBACK_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -95,6 +96,11 @@ export class Writer {
         },
         0,
       );
+
+      await announcePlatformEntry(entry, this.ctx.storage, this.ctx.config.baseUrl, async notice => {
+        await this.ctx.sendToGroup(notice);
+        return `telegram:${this.ctx.config.groupChatId}:router-entry:${entry.id}`;
+      });
 
       this.lastWritebackTime = now;
       console.log(`[Telegram/Writer] Wrote entry ${entry.id} (${summary.length} chars)`);

@@ -54,6 +54,13 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Check native sharing-card adapter
+        working-directory: adapters/paseo-sharing-card
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+
       - name: Test independent uptime monitor
         run: node --test scripts/monitor-router.test.mjs
 
@@ -311,6 +318,7 @@ jobs:
         run: rm -f docker-compose.deploy.yml /tmp/phala.env
 
       - name: Verify Phala deployment
+        id: phala_verify
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
           PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
@@ -323,6 +331,8 @@ jobs:
           bash scripts/verify-phala-deploy.sh
 
       - name: Run deployed Shape Matrix DM smoke
+        id: matrix_smoke
+        if: ${{ !cancelled() && steps.phala_verify.outcome == 'success' }}
         env:
           SHAPE_ROUTER_SECRET_KEY: ${{ secrets.SHAPE_ROUTER_SECRET_KEY }}
           SHAPE_MATRIX_SMOKE_RUNNING_BRIDGE: '1'
@@ -333,10 +343,17 @@ jobs:
           MATRIX_SERVER_NAME: mtrx.shaperotator.xyz
           MATRIX_USER_ID: ${{ secrets.MATRIX_USER_ID }}
           MATRIX_BOT_HANDLE: ${{ secrets.MATRIX_BOT_HANDLE }}
-          MATRIX_SMOKE_SIGNUP_CODE: ${{ secrets.MATRIX_REGISTRATION_TOKEN }}
+          MATRIX_SMOKE_SENDER_ACCESS_TOKEN: ${{ secrets.MATRIX_SMOKE_SENDER_ACCESS_TOKEN }}
+          MATRIX_SMOKE_SENDER_USER_ID: ${{ secrets.MATRIX_SMOKE_SENDER_USER_ID }}
+          MATRIX_SMOKE_SENDER_DEVICE_ID: ${{ secrets.MATRIX_SMOKE_SENDER_DEVICE_ID }}
+          MATRIX_SMOKE_SIGNUP_CODE: ${{ secrets.MATRIX_SMOKE_SIGNUP_CODE || secrets.MATRIX_REGISTRATION_TOKEN }}
         run: node scripts/shape-matrix-live-smoke.mjs
 
       - name: Verify live TinyCloud identity
+        id: tinycloud_verify
+        # Independent of Matrix signup/messaging; neither failure masks the other.
+        # The job still fails if either check fails.
+        if: ${{ !cancelled() && steps.phala_verify.outcome == 'success' }}
         run: |
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
@@ -377,10 +394,21 @@ jobs:
           fi
 
       - name: Deployment summary
+        if: always()
+        env:
+          DEPLOY_OUTCOME: ${{ steps.phala_deploy.outcome }}
+          PHALA_OUTCOME: ${{ steps.phala_verify.outcome }}
+          MATRIX_OUTCOME: ${{ steps.matrix_smoke.outcome }}
+          TINYCLOUD_OUTCOME: ${{ steps.tinycloud_verify.outcome }}
         run: |
           echo "## Phala TEE Deployment" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Deployed to Phala Cloud CVM" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Outcome |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Phala deployment | $DEPLOY_OUTCOME |" >> $GITHUB_STEP_SUMMARY
+          echo "| TEE metadata and health | $PHALA_OUTCOME |" >> $GITHUB_STEP_SUMMARY
+          echo "| Shape Matrix messages | $MATRIX_OUTCOME |" >> $GITHUB_STEP_SUMMARY
+          echo "| TinyCloud identity | $TINYCLOUD_OUTCOME |" >> $GITHUB_STEP_SUMMARY
           echo "**App ID:** \`${{ secrets.PHALA_APP_ID }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Image Digest:** \`${{ needs.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Agent Digest:** \`${{ needs.build.outputs.agent_digest }}\`" >> $GITHUB_STEP_SUMMARY

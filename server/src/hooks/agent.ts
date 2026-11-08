@@ -19,6 +19,11 @@ import { generateLinkToken } from '../intelligence/link-tokens.js';
 import { MatrixPlatform, type MatrixHistoryMessage } from '../platform/matrix.js';
 import type { Platform } from '../platform/types.js';
 import { hasPublicAudience, isPublicNotebookEntry } from '../public-views.js';
+import { sharingReceipt, formatVisibleSharingNotice } from '../sharing-receipt.js';
+import { announcePlatformEntry } from '../platform-sharing-notice.js';
+import { canView, normalizeEntry } from '../delivery.js';
+import { noticeDestinations } from '../sharing-notice.js';
+import { resolvePostingAudience } from '../posting-rules.js';
 
 // ── State ────────────────────────────────────────────────────
 
@@ -350,20 +355,8 @@ export async function notifyLinkedMatrixPendingEntry(ctx: HookContext, entry: Jo
   const matrixUserId = getVerifiedLinkedAccount(author, 'matrix');
   if (!matrixUserId) return;
 
-  const destinationLine = entry.to && entry.to.length > 0
-    ? `\nDestinations: ${entry.to.join(', ')}`
-    : '';
-  const visibilityLine = entry.aiOnly || entry.humanVisible === false
-    ? '\nVisibility: AI-only'
-    : '';
-  const preview = truncateForMatrix(entry.content, 1800);
   const message = [
-    `Review this Router post before it publishes.`,
-    ``,
-    `Entry: \`${entry.id}\``,
-    `Automatic publish: ${formatRelativePublishTime(entry.publishAt)}${destinationLine}${visibilityLine}`,
-    ``,
-    preview,
+    formatVisibleSharingNotice(sharingReceipt(entry, process.env.BASE_URL || 'https://router.teleport.computer', true)),
     ``,
     `Reply to this message with \`publish\` to publish now, or \`delete\` to remove it.`,
   ].join('\n');
@@ -642,15 +635,33 @@ async function onPlatformMessage(ctx: HookContext): Promise<void> {
   const replyToEntryId = event.data.reply_to_entry_id;
   if (replyToEntryId && sender_handle) {
     try {
-      const keyHash = await findKeyHashForHandle(sender_handle, storage);
-      if (keyHash) {
-        await storage.addEntry({
+      const writer = await storage.getUser(sender_handle);
+      const parent = await storage.getEntry(replyToEntryId);
+      // Platform replies remain automatic copies, subject to the writer's rules
+      // and the parent's audience. Never turn a private thread into a public post.
+      const isAuthor = !!parent && (parent.handle === sender_handle || !!writer?.legacyPseudonym && parent.pseudonym === writer.legacyPseudonym);
+      if (writer && parent && getVerifiedLinkedAccount(writer, platformName) === sender_id
+        && (!hasPendingEntryApi(storage) || !storage.isPending(parent.id) || isAuthor)
+        && await canView(normalizeEntry(parent), writer.handle, writer.email, isAuthor, storage, new Map())) {
+        let destinations = noticeDestinations(parent);
+        if (destinations.length && !destinations.some(d => d.startsWith('#')) && parent.handle) {
+          destinations = [...new Set([...destinations, '@' + parent.handle])];
+        }
+        const to = resolvePostingAudience(writer.postingRules, 'automatic', destinations);
+        const saved = await storage.addEntry({
           pseudonym: sender_handle,
           handle: sender_handle,
           client: 'code' as const,
           content: text,
           timestamp: Date.now(),
           inReplyTo: replyToEntryId,
+          to,
+          visibility: parent.visibility === 'private' ? 'private' : undefined,
+        });
+        const origin = platforms.find(platform => platform.name === platformName);
+        if (origin) await announcePlatformEntry(saved, storage, process.env.BASE_URL || 'https://router.teleport.computer', async notice => {
+          const messageId = await origin.sendMessage(room_id, notice, { replyTo: event.data.message_id });
+          return `${platformName}:${room_id}:${messageId}`;
         });
         console.log(`[Agent] Wrote Matrix reply from @${sender_handle} as notebook reply to ${replyToEntryId}`);
       }

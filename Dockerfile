@@ -38,7 +38,7 @@ COPY --from=builder /app/server/dist ./dist
 
 # Copy legacy static files (except index, now built by Astro)
 COPY prompt.html setup.html profile.html entry.html dashboard.html join.html settings.html connect.html release.html RELEASE_NOTES.md /app/
-COPY posting-rules.html posting-rules.js /app/
+COPY posting-rules.html posting-rules.js sharing-notice.js /app/
 
 # Copy Astro-built index + static assets
 COPY --from=web-builder /app/web/dist/index.html /app/index.html
