@@ -5,9 +5,9 @@ import {randomBytes} from 'node:crypto';
 import {dirname,resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
 
-const {values:v}=parseArgs({options:Object.fromEntries([
+const {values:v}=parseArgs({options:{...Object.fromEntries([
   'base','router-key-file','bot-key-file','bot-handle','group','guild','channel','scope','discord-user','code-file'
-].map(key=>[key,{type:'string'}]))});
+].map(key=>[key,{type:'string'}])), 'create-group':{type:'boolean',default:false}}});
 for(const key of ['router-key-file','bot-key-file','bot-handle','group','guild','discord-user','code-file'])
   if(!v[key])throw new Error('Missing --'+key);
 const scope=v.scope||'channel';
@@ -30,14 +30,28 @@ async function post(path,key,body,allowConflict=false){
   if(!response.ok&&!(allowConflict&&response.status===409))throw new Error(`${path}: HTTP ${response.status}`);
   return {status:response.status,result};
 }
+// Reusing a group is the default. A typo must never create and bind an empty group.
+const groupUrl=new URL('/api/channels/'+encodeURIComponent(v.group),base);
+groupUrl.searchParams.set('secret_key',ownerKey);
+let existing;
+try {existing=await fetch(groupUrl,{redirect:'error',signal:AbortSignal.timeout(45000)});}
+catch {throw new Error('Could not verify the private group. Nothing was changed.');}
+if(existing.status===404){
+  if(!v['create-group'])throw new Error('The private group does not exist. Use --create-group only to deliberately create a new group.');
+  await post('/api/channels',ownerKey,{secret_key:ownerKey,id:v.group,name:v.group,
+    description:'Selected notes from a linked Discord space.',visibility:'private',join_rule:'invite'});
+} else {
+  if(!existing.ok)throw new Error('Could not read the private group: HTTP '+existing.status);
+  const group=await existing.json();
+  if(group.id!==v.group||(group.joinRule||(group.visibility==='private'?'invite':'open'))!=='invite')
+    throw new Error('The existing group must match the requested ID and be invite-only.');
+}
 let botKey;
 try{botKey=(await readFile(v['bot-key-file'],'utf8')).trim();}
 catch(error){if(error.code!=='ENOENT')throw error;botKey=randomBytes(32).toString('base64url');await protectedWrite(v['bot-key-file'],botKey+'\n');}
 if(!/^[A-Za-z0-9_-]{32,64}$/.test(botKey)||botKey===ownerKey)throw new Error('Use a separate private service key.');
 const identity=await post('/api/identity/register',botKey,{secret_key:botKey,handle:v['bot-handle']},true);
 if(identity.result.handle!==v['bot-handle'])throw new Error('The private service handle belongs to a different identity.');
-await post('/api/channels',ownerKey,{secret_key:ownerKey,id:v.group,name:'Discord Router Test',
-  description:'Selected test notes from the linked Discord channel.',visibility:'private',join_rule:'invite'},true);
 const binding={groupId:v.group,guildId:v.guild,scope,...(scope==='channel'?{channelId:v.channel}:{}),botHandle:v['bot-handle']};
 const bound=await post('/api/discord/bind',ownerKey,binding);
 if((bound.result.scope||'channel')!==scope||bound.result.guildId!==v.guild||bound.result.channelId!==v.channel)

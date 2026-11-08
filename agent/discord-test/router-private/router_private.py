@@ -125,6 +125,10 @@ class PrivateRouter:
             raise PrivateError("Link your Router account with /router-link before using private notes.")
         self.check_group(link)
         result = await self.request("operate", {**fields, **actor, "action": action, "grant": link["grant"]})
+        # Older APIs confirm saves without returning the group. The grant used for this
+        # operation already fixes it; do not turn a successful write into a retry prompt.
+        if action == "save" and "groupId" not in result:
+            result = {**result, "groupId": link["groupId"]}
         if action == "unlink":
             async with self.lock:
                 links = self._load()

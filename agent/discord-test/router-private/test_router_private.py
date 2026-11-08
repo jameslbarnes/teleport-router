@@ -93,7 +93,8 @@ class PrivateCommandsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_identity_comes_from_discord_interaction_and_save_is_exact(self):
         await self.link()
-        await self.router.save(self.actor, "Exact selected note")
+        result = await self.router.save(self.actor, "Exact selected note")
+        self.assertEqual(result["groupId"], "private-test")  # legacy API response has no groupId
         body = self.calls[-1][1]
         self.assertEqual(body["discordUserId"], "100000000000000003")
         self.assertEqual(body["interactionId"], "100000000000000010")
