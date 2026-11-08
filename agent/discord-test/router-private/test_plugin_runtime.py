@@ -67,6 +67,25 @@ class NativeCommandsTest(unittest.IsolatedAsyncioTestCase):
         self.interaction.response.defer.assert_not_called()
         self.ctx.llm.acomplete.assert_not_called()
 
+    async def test_guild_mode_saves_from_general_with_a_named_private_audience(self):
+        settings={"base_url":"https://router.example", "guild_id":str(self.guild.id),
+                  "scope":"guild", "group_id":"private-test"}
+        with patch.dict(os.environ, {"HERMES_HOME":self.temp.name, "ROUTER_PRIVATE_SECRET_KEY":"synthetic"}), \
+                patch.object(plugin.json, "loads", return_value=settings):
+            plugin.register(self.ctx)
+            self.factory(self.bot, SimpleNamespace())
+        await asyncio.sleep(0.01)
+        self.interaction.channel_id=1568051146172403816
+        operation=AsyncMock(return_value={"groupId":"private-test", "entry":{"id":"sample", "handle":"alice"}})
+        with patch.object(plugin.PrivateRouter, "operate", operation):
+            await self.bot.tree.get_command("router-save", guild=self.guild).callback(self.interaction, "Selected note")
+        operation.assert_awaited_once()
+        self.interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        response=self.interaction.followup.send.call_args
+        self.assertTrue(response.kwargs["ephemeral"])
+        self.assertIn("#private-test", response.args[0])
+        self.ctx.llm.acomplete.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
