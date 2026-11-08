@@ -161,6 +161,15 @@ deployment secret store, local shell env, or the Matrix operator's password
 manager. The live-smoke script reads the reserved smoke signup code from
 `MATRIX_SMOKE_SIGNUP_CODE` and should not print its value.
 
+CI accepts a dedicated `MATRIX_SMOKE_SIGNUP_CODE` secret, or a pre-provisioned
+`MATRIX_SMOKE_SENDER_ACCESS_TOKEN` plus `MATRIX_SMOKE_SENDER_USER_ID` (optional
+`MATRIX_SMOKE_SENDER_DEVICE_ID`). The registration token remains a fallback for
+existing setups. A 403 `invalid_code` is a failed smoke prerequisite, not evidence
+that messaging passed. Replace the rejected code with the Matrix operator's valid
+reserved smoke code or sender credentials; do not suppress the failure.
+TinyCloud identity verification runs independently after deployment verification,
+even if this Matrix check fails. The job and summary preserve both outcomes.
+
 ## Deployment
 
 Build the normal `teleport-router` server image. Before deploying, confirm the

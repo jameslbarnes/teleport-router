@@ -1,5 +1,5 @@
 {
-  "id": "router-sharing-card-test",
-  "description": "Inline Router sharing cards for a disposable local test.",
+  "id": "router-sharing-card",
+  "description": "Show Router posts, audiences, timing and Delete controls in their agent conversation.",
   "requirements": { "paseo": ">=0.11.0-beta.5" }
 }

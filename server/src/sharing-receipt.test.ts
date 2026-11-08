@@ -16,6 +16,7 @@ describe('Sharing receipts', () => {
     expect(receipt.destinations).toEqual(['#aria', '@reader']);
     expect(receipt.audience).toBe('Only: #aria, @reader');
     expect(sharingReceipt({ ...entry, aiOnly: true }, 'https://router.test', false).audience).toContain('Public Router');
+    expect(sharingReceipt({ ...entry, visibility: 'private' }, 'https://router.test', false).audience).toBe('Only you — private post');
   });
   it('does not invent a countdown for held, removed or already published entries', () => {
     expect(sharingReceipt({ ...entry, moderationHeld: true }, 'https://router.test', true)).toMatchObject({ state: 'held', publish_at: null });

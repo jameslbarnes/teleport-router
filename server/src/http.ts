@@ -34,7 +34,7 @@ import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRule
 import { sharingReceipt, formatSharingReceipt, SHARING_NOTICE_INSTRUCTIONS } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
-import { isPublicNotebookEntry, channelView } from './public-views.js';
+import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -935,7 +935,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_search_sparks',
     name: 'router_search_sparks',
-    description: 'Search for potential introduction opportunities (sparks) between notebook users. Returns pairs of people with overlapping interests and their connection status.',
+    description: 'Search public-audience notebook posts for potential introduction opportunities (sparks). Returns pairs of people with overlapping interests. Private and addressed posts never contribute, even when the caller can read them.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -4830,15 +4830,18 @@ function createMCPServer(secretKey: string) {
         let results: string[] = [];
 
         if (a.handle) {
-          const entries = await storage.getEntriesByHandle(a.handle, 5);
-          for (const entry of entries.slice(0, 2)) {
-            const candidates = await detect(entry, storage);
+          const entries = await publishedStorage.getEntriesByHandle(a.handle, 50);
+          for (const entry of entries.filter(hasPublicAudience).slice(0, 2)) {
+            const candidates = await detect(entry, publishedStorage);
             for (const c of candidates) {
               results.push(`@${a.handle} ↔ @${c.handle}: ${c.overlapTopics.join(', ')} (${c.matchingEntries.length} matching entries)`);
             }
           }
         } else if (a.query) {
-          const entries = await storage.searchEntries(a.query, 10);
+          // Sparks are public discovery, not a way to infer private participation.
+          // Apply the same policy as detectSparks before deriving authors or counts.
+          const entries = (await publishedStorage.searchEntries(a.query, 100))
+            .filter(hasPublicAudience).slice(0, 10);
           const handles = [...new Set(entries.map(e => e.handle).filter(Boolean))] as string[];
           if (handles.length >= 2) {
             for (let i = 0; i < handles.length - 1; i++) {
@@ -7491,11 +7494,11 @@ const server = createServer(async (req, res) => {
       try {
         const { detectSparks } = await import('./intelligence/sparks.js');
         const { getConnectionInfo } = await import('./intelligence/sparks.js');
-        const userEntries = await storage.getEntriesByHandle(sparksUser.handle, 5);
+        const userEntries = (await publishedStorage.getEntriesByHandle(sparksUser.handle, 50)).filter(hasPublicAudience);
         const sparks: any[] = [];
 
         for (const entry of userEntries.slice(0, 3)) {
-          const candidates = await detectSparks(entry, storage);
+          const candidates = await detectSparks(entry, publishedStorage);
           for (const candidate of candidates.slice(0, 3)) {
             const connInfo = await getConnectionInfo(sparksUser.handle, candidate.handle, getAllPlatforms(), storage);
             sparks.push({

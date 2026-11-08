@@ -1,14 +1,19 @@
 // Starts only a disposable, loopback-only Router. Never use a production key here.
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, writeFile } from 'node:fs/promises';
+import { access, mkdir, open, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { privateDirectory } from './private-files.mjs';
 
 const agentId = process.argv[2];
 if (!agentId || !/^[a-f0-9-]{36}$/.test(agentId)) throw new Error('Pass the test conversation UUID');
 const directory = join(homedir(), '.paseo', 'router-card-test');
+const sessions = join(homedir(), '.paseo', 'router-sharing-card', 'sessions');
+const sessionFile = join(sessions, `${agentId}.json`);
+try { await access(sessionFile); throw new Error('Conversation already configured; preserve its posts'); }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
 const base = 'http://127.0.0.1:18571';
 try { await fetch(base + '/health'); throw new Error('Port 18571 is already in use; preserve the running test'); }
 catch (error) { if (error.message?.includes('already in use')) throw error; }
@@ -45,5 +50,6 @@ const created = await api('/api/entries', {
 });
 if (!created.receipt?.notification_required) throw new Error('Expected a gated test receipt');
 const card = { version: 1, test: true, updated_at: Date.now(), receipts: [created.receipt] };
-await writeFile(join(directory, 'session.json'), JSON.stringify({ agent_id: agentId, base_url: base, test_key: key, card }, null, 2), { mode: 0o600 });
+await privateDirectory(sessions);
+await writeFile(sessionFile, JSON.stringify({ agent_id: agentId, mode: 'test', base_url: base, router_key: key, card }, null, 2), { flag: 'wx', mode: 0o600 });
 console.log(JSON.stringify({ ready: true, pid: child.pid, entry_id: created.receipt.entry_id, state: created.receipt.state }));

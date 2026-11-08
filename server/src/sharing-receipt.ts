@@ -31,7 +31,8 @@ export function sharingReceipt(entry: JournalEntry, baseUrl: string, pending: bo
     version: 1,
     entry_id: entry.id,
     state: removed ? 'removed' : held ? 'held' : waiting ? 'awaiting_notice' : pending ? 'pending' : 'published',
-    audience: destinations.length ? `Only: ${destinations.join(', ')}` : 'Public Router — anyone on the internet',
+    audience: destinations.length ? `Only: ${destinations.join(', ')}`
+      : entry.visibility === 'private' ? 'Only you — private post' : 'Public Router — anyone on the internet',
     destinations,
     content: entry.content,
     publish_at: !removed && pending && !held && !waiting ? entry.publishAt ?? null : null,
@@ -42,12 +43,16 @@ export function sharingReceipt(entry: JournalEntry, baseUrl: string, pending: bo
   };
 }
 
-export function formatSharingReceipt(receipt: SharingReceipt): string {
+export function formatVisibleSharingNotice(receipt: SharingReceipt): string {
   const status = receipt.state === 'removed' ? 'Removed; it will not publish.'
     : receipt.state === 'awaiting_notice' ? `Private until this notice is delivered in the conversation and its delivery is recorded. Publication follows after ${receipt.delay_after_notice_ms! / 60000} minutes.`
     : receipt.state === 'held' ? 'Held for review; automatic publication is on hold.'
     : receipt.state === 'pending' ? 'Pending; only you can see it until it publishes.'
     : 'Published.';
   const schedule = receipt.publish_at === null ? '' : `\nScheduled publication: ${new Date(receipt.publish_at).toISOString()} (UTC; display in the person’s timezone).`;
-  return `${SHARING_NOTICE_INSTRUCTIONS}\n\nRouter sharing receipt\nAudience: ${receipt.audience}\nStatus: ${status}${schedule}\n\n${receipt.content.split('\n').map(line => `> ${line}`).join('\n')}\n\n[Review or delete](${receipt.review_url})\nEntry ID: ${receipt.entry_id}${receipt.notice_id ? `\nNotice ID: ${receipt.notice_id}\nNotice SHA-256: ${receipt.notice_sha256}` : ''}`;
+  return `Router sharing receipt\nAudience: ${receipt.audience}\nStatus: ${status}${schedule}\n\n${receipt.content.split('\n').map(line => `> ${line}`).join('\n')}\n\n[Review or delete](${receipt.review_url})\nEntry ID: ${receipt.entry_id}`;
+}
+
+export function formatSharingReceipt(receipt: SharingReceipt): string {
+  return `${SHARING_NOTICE_INSTRUCTIONS}\n\n${formatVisibleSharingNotice(receipt)}${receipt.notice_id ? `\nNotice ID: ${receipt.notice_id}\nNotice SHA-256: ${receipt.notice_sha256}` : ''}`;
 }

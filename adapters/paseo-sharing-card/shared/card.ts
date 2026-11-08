@@ -25,14 +25,15 @@ export const receiptSchema = z.object({
 export type Receipt = z.output<typeof receiptSchema>;
 export const cardSchema = z.object({
   version: z.literal(1),
-  test: z.literal(true),
+  test: z.boolean(),
   updated_at: z.number(),
-  receipts: z.array(receiptSchema).max(20),
+  receipts: z.array(receiptSchema).max(200),
 });
 export type Card = z.output<typeof cardSchema>;
 const sessionInput = z.object({ agent_id: z.string() });
 const entryInput = sessionInput.extend({ entry_id: z.string() });
 export const showCardRpc = defineRpc({ name: 'show-card', input: sessionInput, output: cardSchema });
+export const addPostRpc = defineRpc({ name: 'add-post', input: entryInput, output: cardSchema });
 export const refreshCardRpc = defineRpc({ name: 'refresh-card', input: sessionInput, output: cardSchema });
 export const renderedRpc = defineRpc({
   name: 'notice-rendered',
