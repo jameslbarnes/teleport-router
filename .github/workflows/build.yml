@@ -54,6 +54,13 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Test private Discord commands
+        run: |
+          python3 -m venv "$RUNNER_TEMP/router-discord-tests"
+          "$RUNNER_TEMP/router-discord-tests/bin/pip" install --disable-pip-version-check discord.py==2.7.1
+          "$RUNNER_TEMP/router-discord-tests/bin/python" -m unittest discover -s agent/discord-test/router-private -p 'test_*.py'
+          node --test server/scripts/link-discord-group.test.mjs
+
       - name: Check native sharing-card adapter
         working-directory: adapters/paseo-sharing-card
         run: |

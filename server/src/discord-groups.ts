@@ -5,7 +5,9 @@ import type { Channel, JournalEntry, Storage, User } from './storage.js';
 
 export interface DiscordGroupBinding {
   guildId: string;
-  channelId: string;
+  /** Omitted on older bindings, which remain restricted to their one channel. */
+  scope?: 'channel' | 'guild';
+  channelId?: string;
   botHandle: string;
   version: string;
 }
@@ -55,11 +57,18 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     if (!group || !privateGroup(group)) return fail(403, 'Private group access unavailable.');
     return group;
   }
+  function sameDestination(a: Omit<DiscordGroupBinding, 'version'>, b: Omit<DiscordGroupBinding, 'version'>) {
+    return a.guildId === b.guildId && (a.scope ?? 'channel') === (b.scope ?? 'channel')
+      && a.channelId === b.channelId && a.botHandle === b.botHandle;
+  }
   function sameBinding(a: DiscordGroupBinding, b: DiscordGroupBinding) {
-    return a.guildId === b.guildId && a.channelId === b.channelId && a.botHandle === b.botHandle && a.version === b.version;
+    return sameDestination(a, b) && a.version === b.version;
   }
   function checkContext(body: Body, binding: DiscordGroupBinding, discordUserId?: string) {
-    if (body.guildId !== binding.guildId || body.channelId !== binding.channelId
+    const scope = binding.scope ?? 'channel';
+    if (body.guildId !== binding.guildId || (scope !== 'guild' && body.channelId !== binding.channelId)
+      || !['channel', 'guild'].includes(scope) || !snowflake(body.channelId)
+      || (scope === 'guild' && binding.channelId !== undefined)
       || !snowflake(body.discordUserId) || (discordUserId && body.discordUserId !== discordUserId))
       fail(403, 'This permission does not cover this Discord account or channel.');
   }
@@ -90,13 +99,17 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
       return exclusive('links', async () => {
         const group = await groupFor(body.groupId);
         if (!group.subscribers.some(s => s.handle === user.handle && s.role === 'admin')) return fail(403, 'Group admin required.');
-        if (!snowflake(body.guildId) || !snowflake(body.channelId) || typeof body.botHandle !== 'string')
-          return fail(400, 'Discord server, channel and Router bot identity are required.');
+        const scope = body.scope ?? 'channel';
+        if (!snowflake(body.guildId) || (scope !== 'channel' && scope !== 'guild') || typeof body.botHandle !== 'string'
+          || (scope === 'channel' && !snowflake(body.channelId)) || (scope === 'guild' && body.channelId !== undefined))
+          return fail(400, 'Provide a Discord server, Router bot identity, and either channel scope with a channel ID or guild scope without one.');
         const bot = await storage.getUser(body.botHandle);
         if (!bot) return fail(400, 'Register the separate private-command bot identity first.');
         const prior = group.discord;
-        const binding: DiscordGroupBinding = {guildId: body.guildId, channelId: body.channelId, botHandle: bot.handle,
-          version: prior && prior.guildId === body.guildId && prior.channelId === body.channelId && prior.botHandle === bot.handle
+        const destination: Omit<DiscordGroupBinding, 'version'> = {guildId: body.guildId, scope: scope as 'channel' | 'guild',
+          ...(scope === 'channel' ? {channelId: body.channelId as string} : {}), botHandle: bot.handle};
+        const binding: DiscordGroupBinding = {...destination,
+          version: prior && sameDestination(prior, destination)
             ? prior.version : randomBytes(16).toString('hex')};
         // The admin explicitly grants this service identity membership, without a cross-platform invitation.
         if (!member(group, bot.handle)) await storage.addSubscriber(group.id, bot.handle, 'member');
@@ -178,7 +191,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
       if (typeof body.content !== 'string' || !body.content.trim() || body.content.length > 12000 || !snowflake(body.interactionId))
         return fail(400, 'Provide a note of 1-12000 characters and a Discord interaction ID.');
       const content = body.content.trim();
-      const id = `discord-${digest(`${group.id}\0${owner.handle}\0${grant.guildId}\0${grant.channelId}\0${body.interactionId}`).slice(0,40)}`;
+      const id = `discord-${digest(`${group.id}\0${owner.handle}\0${grant.guildId}\0${body.channelId}\0${body.interactionId}`).slice(0,40)}`;
       return exclusive(`save:${id}`, async () => {
         // Recheck after waiting for an earlier write; revoked/removed permissions cannot queue new writes.
         const current = await authorize(user, body);
@@ -188,7 +201,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
         if (previous) {
           if (previous.handle !== owner.handle || previous.content !== content || previous.to?.length !== 1 || previous.to[0] !== `#${group.id}`)
             return fail(409, 'This Discord interaction already saved a different note.');
-          return {saved: true, duplicate: true, entry: view(previous)};
+          return {saved: true, duplicate: true, groupId: group.id, entry: view(previous)};
         }
         let saved: JournalEntry;
         try {
@@ -196,7 +209,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
             content, client: 'code', timestamp: now(), to: [`#${group.id}`], visibility: 'private', humanVisible: true,
             aiOnly: false, isReflection: content.length >= 500} as JournalEntry);
         } catch { return fail(503, 'Storage did not confirm the save. Retry this interaction before assuming the note is saved.'); }
-        return {saved: true, entry: view(saved)};
+        return {saved: true, groupId: group.id, entry: view(saved)};
       });
     }
     if (body.action === 'read') {
