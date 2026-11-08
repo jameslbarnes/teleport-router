@@ -11,11 +11,14 @@ import asyncio
 import dataclasses
 import logging
 import time
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
-from .models import Brain, format_context
-from .participation import DAY_S, AdaptiveCooldown, Msg, RateLimiter, analyze_flow, decide, looks_like_question, speech_acts, word_cap
+from .participation import (DAY_S, AdaptiveCooldown, Msg, RateLimiter, analyze_flow, decide, format_context,
+                            looks_like_question, speech_acts, word_cap)
 from .store import Store
+
+if TYPE_CHECKING:  # the SDK loads after the plugin does; see __init__.py
+    from .models import Brain
 
 log = logging.getLogger(__name__)
 Poster = Callable[[int, str, int], Awaitable[int]]
@@ -39,7 +42,7 @@ DEFAULTS = {
 
 
 class Controller:
-    def __init__(self, settings: dict, store: Store, brain: Brain, poster: Poster | None = None,
+    def __init__(self, settings: dict, store: Store, brain: "Brain | None", poster: Poster | None = None,
                  now: Callable[[], float] = time.time):
         self.s = {**DEFAULTS, **settings}
         self.store, self.brain, self.poster, self.now = store, brain, poster, now
@@ -128,6 +131,8 @@ class Controller:
             return skip("rate-limited", "unprompted-post limit reached")
         if self.store.count_checks(now - DAY_S) >= self.s["max_checks_per_day"]:
             return skip("budget", "daily check budget reached")
+        if self.brain is None:
+            return skip("check-failed", "the model client hasn't loaded yet")
 
         c, usage = await self.brain.classify(format_context(msgs, now))
         if c is None:

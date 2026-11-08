@@ -38,6 +38,24 @@ class PluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(platform, "discord")
             self.factory = factory
 
+        # Recent history the plugin catches up on at start: a person's message and a bot post with a reaction.
+        when = dt.datetime(2026, 11, 8, 11, 0, tzinfo=dt.timezone.utc)
+
+        async def reactors():
+            yield NS(id=7)
+        earlier = [
+            NS(id=11, content="An earlier question?", type=discord.MessageType.default, reference=None, reactions=[],
+               author=NS(id=7, display_name="Ada", bot=False), created_at=when),
+            NS(id=12, content="Scaling digest", type=discord.MessageType.default, reference=None,
+               reactions=[NS(emoji="👍", users=reactors)], author=NS(id=BOT_USER.id, display_name="Router Test", bot=True),
+               created_at=when + dt.timedelta(minutes=1)),
+        ]
+
+        async def history(limit):
+            for m in reversed(earlier):
+                yield m
+        self.bot.wait_until_ready = AsyncMock()
+        self.bot.get_channel = lambda cid: NS(history=history) if cid == CHANNEL else None
         settings = {"guild_id": str(GUILD), "channel_id": str(CHANNEL), "mode": "shadow", "test_webhook_ids": [TEST_HOOK]}
         self.stores, real_store = [], plugin.Store
         self.human_patch = patch.object(plugin.Controller, "human_message")
@@ -71,6 +89,12 @@ class PluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({c.name for c in self.bot.tree.get_commands(guild=guild)}, {"router-quiet", "router-why", "router-stats"})
         self.assertEqual(self.bot.tree.get_commands(), [])
         self.bot.tree.sync.assert_awaited_once_with(guild=guild)
+
+    async def test_catches_up_on_recent_history_without_checking_it(self):
+        store = self.stores[0]
+        self.assertEqual([(m.id, m.is_self) for m in store.recent(CHANNEL)], [(11, False), (12, True)])
+        self.assertEqual(store.engagement(CHANNEL, 0)["post"]["reactions"], 1)
+        self.human.assert_not_called()
 
     async def test_only_unmentioned_human_messages_reach_the_check(self):
         await self.on_message(self.message(1, "Does anyone know?"))

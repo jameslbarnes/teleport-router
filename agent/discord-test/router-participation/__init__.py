@@ -33,15 +33,21 @@ def register(ctx):
     settings = load_settings(root)
     store = Store(Path(os.environ["HERMES_HOME"]) / "plugin-data" / "router-participation" / "participation.db",
                   settings.get("retention_days", 30))
-    brain = None
-    if settings.get("mode", "shadow") != "off":
-        if os.environ.get("ANTHROPIC_API_KEY"):
+    if settings.get("mode", "shadow") != "off" and not os.environ.get("ANTHROPIC_API_KEY"):
+        log.warning("router-participation has no model key; it will record messages only")
+        settings["mode"] = "off"
+    controller = Controller(settings, store, None)
+
+    async def load_models():
+        # Not in register(): Hermes gives a plugin 10 seconds to load, and on a cold start the
+        # SDK import alone took most of that. Until it's loaded, checks are skipped and logged.
+        def build():
             from .models import Brain
-            brain = Brain(settings)
-        else:
-            log.warning("router-participation has no model key; it will record messages only")
-            settings["mode"] = "off"
-    controller = Controller(settings, store, brain)
+            return Brain(settings)
+        try:
+            controller.brain = await asyncio.to_thread(build)
+        except Exception as exc:
+            log.warning("router-participation couldn't load its model client (%s)", type(exc).__name__)
 
     def install(native, adapter):
         import discord
@@ -155,8 +161,32 @@ def register(ctx):
                 store.purge()
                 await asyncio.sleep(6 * 3600)
 
+        async def catch_up(limit: int = 100):
+            """Record what was said while the plugin wasn't running, without checking any of it,
+            so a restart keeps the context and the stats cover earlier posts (the Telegram bot
+            lost its buffer on every restart)."""
+            try:
+                await native.wait_until_ready()
+                channel = native.get_channel(channel_id) or await native.fetch_channel(channel_id)
+                async for message in channel.history(limit=limit):
+                    if message.type not in (discord.MessageType.default, discord.MessageType.reply):
+                        continue
+                    m = to_msg(message)
+                    store.add_message(channel_id, m)
+                    if m.is_self:
+                        for reaction in message.reactions:
+                            async for user in reaction.users():
+                                if user.id != native.user.id:
+                                    store.add_reaction(m.id, user.id, str(reaction.emoji), m.ts)
+                controller.cooldowns.clear()  # rebuilt from the store, with the bot's earlier posts
+            except Exception as exc:
+                log.warning("router-participation couldn't read recent channel history (%s)", type(exc).__name__)
+
         asyncio.ensure_future(sync())
         asyncio.ensure_future(purge_daily())
+        asyncio.ensure_future(catch_up())
+        if controller.s["mode"] != "off":
+            asyncio.ensure_future(load_models())
         log.info("router-participation watching channel %s in %s mode", channel_id, settings.get("mode", "shadow"))
 
     ctx.register_platform_handler("discord", install)

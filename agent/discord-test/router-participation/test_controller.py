@@ -113,6 +113,12 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await c.evaluate(CH, "t"))["outcome"], "budget")
         self.assertEqual(brain.checks, 1)
 
+    async def test_skips_and_logs_until_the_model_client_has_loaded(self):
+        c = self.make(None, mode="shadow")
+        self.say(c, 1, ADA, "Anyone know a good survey on this?")
+        self.assertEqual((await c.evaluate(CH, "t"))["outcome"], "check-failed")
+        self.assertIn("hasn't loaded", self.store.decisions(CH)[0]["reason"])
+
     async def test_a_burst_of_messages_is_checked_once(self):
         brain = FakeBrain(speak=False, confidence=0.9)
         c = self.make(brain, mode="shadow")
@@ -155,6 +161,22 @@ class ControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(e["unprompted"], {"posts": 1, "engaged": 1, "replies": 1, "reactions": 1, "people": 1})
         self.assertEqual(e["post"]["reactions"], 1)
         self.assertEqual(e["reply"]["engaged"], 0)
+
+    def test_store_works_from_another_thread(self):
+        # Found on the first live start: Hermes loads plugins on one thread and runs events on another.
+        import threading
+        errors = []
+
+        def use():
+            try:
+                self.store.add_message(CH, p.Msg(1, ADA, "Ada", "hello", T0))
+                self.store.purge(now=T0)
+            except Exception as exc:
+                errors.append(exc)
+        t = threading.Thread(target=use)
+        t.start()
+        t.join()
+        self.assertEqual(errors, [])
 
     def test_deleting_keeps_the_row_but_drops_the_text_and_purge_forgets(self):
         s = self.store

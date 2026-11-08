@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS pauses (channel_id INTEGER PRIMARY KEY, until REAL NO
 class Store:
     def __init__(self, path: Path | str, retention_days: float = 30):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path))
+        # Hermes loads plugins on one thread and runs Discord events on its event-loop thread.
+        # All use after loading happens on that one loop, so sharing the connection is safe.
+        self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.retention_s = retention_days * 86400

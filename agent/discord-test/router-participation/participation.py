@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+import time
 from dataclasses import dataclass, field
 
 AXES = ("is_question", "is_wrong", "is_stuck", "is_relevant", "is_directed", "is_social")
@@ -315,3 +316,28 @@ def heat(messages: list[Msg], now: float, window_s: float = 900) -> dict:
     avg = sum(len(m.text) for m in recent) / len(recent)
     return {"messages": len(recent), "people": people, "avg_chars": round(avg),
             "hot": people >= 3 and len(recent) >= 8 and avg > 40}
+
+
+def format_context(messages: list[Msg], now: float | None = None, bot_label: str = "Router (you)") -> str:
+    """Oldest first, each line indexed from the end (#0 = most recent), as the prompts expect.
+    With `now`, each line also says how long ago it was posted, so the model can tell when a
+    question has gone unanswered."""
+    index = {m.id: len(messages) - 1 - i for i, m in enumerate(messages)}
+    lines = [f"It is {time.strftime('%H:%M', time.gmtime(now))} UTC now."] if now else []
+    for i, m in enumerate(messages):
+        who = bot_label if m.is_self else m.author
+        reply = f" (replying to #{index[m.reply_to]})" if m.reply_to in index else ""
+        text = " ".join(m.text.split())[:1500]
+        stamp = time.strftime('%H:%M', time.gmtime(m.ts)) + " UTC"
+        if now:
+            stamp += f", {ago(now - m.ts)}"
+        lines.append(f"#{len(messages) - 1 - i} [{stamp}] {who}{reply}: {text}")
+    return "\n".join(lines)
+
+
+def ago(seconds: float) -> str:
+    if seconds < 90:
+        return "just now"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} min ago"
+    return f"{round(seconds / 3600)} h ago"

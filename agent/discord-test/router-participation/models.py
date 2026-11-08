@@ -15,7 +15,7 @@ import time
 import anthropic
 import httpx
 
-from .participation import AXES, INTENTS, Classification, Decision, Msg
+from .participation import AXES, INTENTS, Classification, Decision, Msg, format_context  # noqa: F401 (re-exported)
 from .prompts import CLASSIFIER, COMPOSE
 
 log = logging.getLogger(__name__)
@@ -45,31 +45,6 @@ SEARCH_TOOL = {
 WEB_SEARCH = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 MAX_TOOL_RESULT_CHARS = 15000
 MAX_ROUNDS = 8
-
-
-def format_context(messages: list[Msg], now: float | None = None, bot_label: str = "Router (you)") -> str:
-    """Oldest first, each line indexed from the end (#0 = most recent), as the prompts expect.
-    With `now`, each line also says how long ago it was posted, so the model can tell when a
-    question has gone unanswered."""
-    index = {m.id: len(messages) - 1 - i for i, m in enumerate(messages)}
-    lines = [f"It is {time.strftime('%H:%M', time.gmtime(now))} UTC now."] if now else []
-    for i, m in enumerate(messages):
-        who = bot_label if m.is_self else m.author
-        reply = f" (replying to #{index[m.reply_to]})" if m.reply_to in index else ""
-        text = " ".join(m.text.split())[:1500]
-        stamp = time.strftime('%H:%M', time.gmtime(m.ts)) + " UTC"
-        if now:
-            stamp += f", {ago(now - m.ts)}"
-        lines.append(f"#{len(messages) - 1 - i} [{stamp}] {who}{reply}: {text}")
-    return "\n".join(lines)
-
-
-def ago(seconds: float) -> str:
-    if seconds < 90:
-        return "just now"
-    if seconds < 5400:
-        return f"{round(seconds / 60)} min ago"
-    return f"{round(seconds / 3600)} h ago"
 
 
 class Brain:
