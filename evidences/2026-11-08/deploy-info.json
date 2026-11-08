@@ -1,10 +1,13 @@
 {
-  "git_sha": "",
-  "git_sha_short": "",
-  "image_digest": "",
-  "agent_image_digest": "",
+  "git_sha": "5b0d870b9f47e2043888d1f5c6097d2dc81cfd1c",
+  "git_sha_short": "5b0d870",
+  "image_digest": "sha256:4c4041b29031edbbcf9ff875e14d1a018ee974ac6ecb2d5fb17cfb1b898aad84",
+  "agent_image_digest": "sha256:89ad8eedadcfc33a680e019fe541b21a5904be0c1faf7af46b033601dbde0c0a",
   "app_id": "db82f581256a3c9244c4d7129a67336990d08cdf",
   "evidence_source": "Phala attestation API",
-  "deployed_at": "2026-11-08T16:03:09Z",
-  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/42497849378"
+  "deployed_at": "2026-11-08T15:58:08Z",
+  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/42496200372/attempts/2",
+  "public_base_url": "https://router.teleport.computer",
+  "evidence_archived_at": "2026-11-08T16:03:09Z",
+  "evidence_archive_workflow": "https://github.com/jameslbarnes/teleport-router/actions/runs/42497849378"
 }
