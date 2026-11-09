@@ -1,0 +1,34 @@
+name: TinyCloud encrypted author storage
+on:
+  pull_request:
+    paths:
+      - 'server/src/author-*.ts'
+      - 'server/src/group-store*.ts'
+      - 'server/src/tinycloud-*.ts'
+      - 'server/src/http.ts'
+      - 'server/scripts/*tinycloud*'
+      - 'server/scripts/decrypt-my-router-data.mjs'
+      - 'server/package*.json'
+      - '.github/workflows/tinycloud-authors.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hosted-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run build
+        working-directory: server
+      # Random synthetic owner/Router keys only. No repository secrets or live
+      # Router connection. Exercises the real node's ETags and owner recovery.
+      - run: node scripts/tinycloud-authors-e2e.mjs
+        working-directory: server

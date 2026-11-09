@@ -135,7 +135,7 @@ describe('Scoped private Discord group access',()=>{
     expect(saved.entry.url).toBe(`https://router.example/e/${saved.entry.id}`);
     expect(await f.base.getEntry(saved.entry.id)).toBeNull();
     expect(f.data.get('alice')!.has(`posts/${saved.entry.id}`)).toBe(true);
-    expect(f.data.get('bob')!.size).toBe(0);
+    expect([...f.data.get('bob')!.keys()].filter(k=>k.startsWith('posts/'))).toEqual([]);
     expect((await f.layer.storage.getEntry(saved.entry.id))?.to).toEqual(['#test-group']);
     const search=await f.operate(linked.grant,{action:'search',query:'synthetic'});
     expect(search.entries.map((e:JournalEntry)=>e.id)).toEqual([saved.entry.id]);
@@ -147,7 +147,7 @@ describe('Scoped private Discord group access',()=>{
     const [first,second]=await Promise.all([f.save(grant),f.save(grant)]);
     expect(first.entry.id).toBe(second.entry.id);
     expect(second.duplicate).toBe(true);
-    expect(f.data.get('alice')!.size).toBe(1);
+    expect([...f.data.get('alice')!.keys()].filter(k=>k.startsWith('posts/'))).toEqual([`posts/${first.entry.id}`]);
     await expect(f.save(grant,'Changed')).rejects.toMatchObject({status:409});
   });
   it('rejects a wrong Discord sender, server, channel, bot or forged grant',async()=>{
