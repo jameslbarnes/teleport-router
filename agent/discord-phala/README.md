@@ -65,8 +65,8 @@ sync; do not have the task follow a changing development worktree.
    CI measures offline Linux startup under the 512 MiB cap; this is not a live
    workload measurement or evidence of a real Discord reply.
 3. Copy only the existing bot/model/public/private service credentials into the
-   five `DISCORD_*` GitHub secrets named in the compose/workflow. The optional
-   `DISCORD_INITIAL_LINKS_B64` is the existing scoped `links.json`, base64 encoded.
+   five `DISCORD_*` GitHub secrets named in the compose/workflow. For this migration,
+   `DISCORD_INITIAL_LINKS_B64` must contain the existing scoped `links.json`, base64 encoded.
    Never use James's personal key. Secret values do not enter compose or logs.
 4. Publish/verify the research attachment and install its sync task. Disable
    **Teleport Router Discord Test**, then gracefully stop that gateway through

@@ -41,7 +41,8 @@ def prepare(home: Path, env):
                 raise ValueError("Invalid link seed")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps(data), encoding="utf-8")
-        marker.touch()
+        if target.exists():
+            marker.touch()
     aliases = {"DISCORD_MODEL_API_KEY": "ANTHROPIC_API_KEY",
                "DISCORD_PUBLIC_ROUTER_KEY": "ROUTER_SECRET_KEY",
                "DISCORD_PRIVATE_ROUTER_KEY": "ROUTER_PRIVATE_SECRET_KEY"}

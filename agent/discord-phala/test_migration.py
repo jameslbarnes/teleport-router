@@ -119,6 +119,10 @@ class StartupTests(unittest.TestCase):
                         "DISCORD_INITIAL_LINKS_B64": base64.b64encode(json.dumps(initial).encode()).decode()}
             values = env()
             with patch.object(entrypoint, "ROOT", root):
+                missing = env()
+                missing.pop("DISCORD_INITIAL_LINKS_B64")
+                entrypoint.prepare(home, missing)
+                self.assertFalse((home / ".links-seeded").exists(), "An absent seed must remain retryable")
                 entrypoint.prepare(home, values)
                 links = home / "plugin-data/router-private/links.json"
                 self.assertEqual(json.loads(links.read_text()), initial)

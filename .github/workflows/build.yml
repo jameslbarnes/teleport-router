@@ -207,22 +207,28 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Discord image metadata
-        id: metadata
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.DISCORD_IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=
       - name: Publish tested Discord image
         id: publish
-        uses: docker/build-push-action@v5
-        with:
-          context: ./agent
-          file: ./agent/discord-phala/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.metadata.outputs.tags }}
-          cache-from: type=gha,scope=discord
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          export PUBLISH_REF="docker.io/${DISCORD_IMAGE_NAME}:${GITHUB_SHA:0:7}"
+          docker tag router-discord:ci "$PUBLISH_REF"
+          docker push "$PUBLISH_REF"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync } from 'node:fs';
+          const inspect = ref => JSON.parse(execFileSync('docker', ['image', 'inspect', ref], {encoding: 'utf8'}))[0];
+          const tested = inspect('router-discord:ci');
+          const published = inspect(process.env.PUBLISH_REF);
+          assert.equal(published.Id, tested.Id, 'Publish the exact tested image, without rebuilding');
+          const ref = published.RepoDigests.find(r => r.startsWith(`${process.env.DISCORD_IMAGE_NAME}@`) || r.startsWith(`docker.io/${process.env.DISCORD_IMAGE_NAME}@`));
+          const digest = ref?.split('@')[1];
+          assert.match(digest || '', /^sha256:[a-f0-9]{64}$/);
+          appendFileSync(process.env.GITHUB_OUTPUT, `digest=${digest}\n`);
+          console.log(`Published tested Discord image: ${digest}`);
+          NODE
 
   deploy:
     needs: [build, discord-image]
@@ -339,7 +345,7 @@ jobs:
             printf 'MATRIX_CRYPTO_SECRET=%s\n' "$MATRIX_BOT_SECRET_KEY" >> "$env_file"
           fi
 
-          for required in HERMES_AGENT_SECRET_KEY SHAPE_ROUTER_SECRET_KEY SHAPE_MATRIX_SERVICE_KEY MATRIX_BOT_SECRET_KEY MATRIX_REGISTRATION_TOKEN DISCORD_BOT_TOKEN DISCORD_MODEL_API_KEY DISCORD_PUBLIC_ROUTER_KEY DISCORD_PRIVATE_ROUTER_KEY; do
+          for required in HERMES_AGENT_SECRET_KEY SHAPE_ROUTER_SECRET_KEY SHAPE_MATRIX_SERVICE_KEY MATRIX_BOT_SECRET_KEY MATRIX_REGISTRATION_TOKEN DISCORD_BOT_TOKEN DISCORD_MODEL_API_KEY DISCORD_PUBLIC_ROUTER_KEY DISCORD_PRIVATE_ROUTER_KEY DISCORD_INITIAL_LINKS_B64; do
             if ! grep -q "^${required}=." "$env_file"; then
               echo "Missing required Phala env: ${required}"
               exit 1
