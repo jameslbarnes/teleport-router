@@ -5,11 +5,12 @@ on:
       action:
         type: choice
         default: status
-        options: [status]
+        options: [status, package]
 permissions:
   contents: read
 jobs:
   inventory:
+    if: inputs.action == 'status'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -29,4 +30,24 @@ jobs:
         with:
           name: encrypted-author-inventory
           path: ${{ runner.temp }}/author-inventory.enc.json
+          retention-days: 2
+  package:
+    if: inputs.action == 'package'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dab0447013904e3fe51beb25420e3c1d04b94f44
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: approved-router-cli-dist
+          path: server/dist/
           retention-days: 2
