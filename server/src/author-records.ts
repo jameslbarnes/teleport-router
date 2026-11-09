@@ -48,6 +48,8 @@ export function ownerPublicKey(b: RecordContext, key: string): string {
 }
 const recordAAD = (b: RecordContext, kind: RecordKind, id: string) => info('teleport-router/record/v2', b, kind, id);
 const recoveryAAD = (b: RecordContext, recipient: string, ephemeral: string) => info('teleport-router/owner-recovery/v1', b, recipient, ephemeral);
+export const ownerRecoveryProof = (key: Uint8Array, b: RecordContext, challenge: string, recovery: string) =>
+  mac(key, info('teleport-router/recovery-confirmation/v1', b, challenge, recovery));
 
 /** Encryption hides the entire signed record, including its audience and metadata.
  * Keep the independent Router MAC INSIDE the ciphertext: recovery gives the owner
@@ -92,6 +94,9 @@ export function recordCodec(integrityKey: Uint8Array, encryptionRoot: Uint8Array
         || canonical(context(envelope)) !== canonical(context(b)) || envelope.recipient !== ownerPublicKey(b, publicKey))
         throw new Error('Owner recovery context mismatch');
       checkMac(actual, recoveryMac(b, envelope));
+    },
+    verifyOwnerRecovery(proof: unknown, b: RecordContext, challenge: string, recovery: string) {
+      checkMac(proof, ownerRecoveryProof(authorKey(b), b, challenge, recovery));
     },
   };
 }

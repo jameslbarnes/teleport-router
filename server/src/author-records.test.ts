@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {createCipheriv,createDecipheriv,randomBytes} from 'node:crypto';
-import {canonical,recordCodec,recoverAuthorKey,decryptOwnerRecord,type RecordKind} from './author-records.js';
+import {canonical,recordCodec,recoverAuthorKey,decryptOwnerRecord,ownerRecoveryProof,type RecordKind} from './author-records.js';
 import {testWallet,legacyRecord} from './author-test-fixtures.js';
 import type {JournalEntry} from './storage.js';
 
@@ -63,5 +63,15 @@ describe('Encrypted author records and independent owner recovery',()=>{
     const ciphertext=Buffer.concat([encrypt.update(canonical(signed)),encrypt.final()]);
     const forged=JSON.stringify({version:2,nonce:nonce.toString('base64url'),ciphertext:ciphertext.toString('base64url'),tag:encrypt.getAuthTag().toString('base64url')});
     expect(()=>codec.decode(forged,b,'posts',value.id)).toThrow('integrity');
+  });
+  it('requires proof of decryption bound to this challenge, context and exact recovery envelope',()=>{
+    const recovery=codec.createRecovery(b,wallet.signingKey.publicKey),challenge='one-time signed link request';
+    const key=recoverAuthorKey(wallet.privateKey,recovery,b),proof=ownerRecoveryProof(key,b,challenge,recovery);
+    codec.verifyOwnerRecovery(proof,b,challenge,recovery);
+    expect(()=>codec.verifyOwnerRecovery(undefined,b,challenge,recovery)).toThrow();
+    expect(()=>codec.verifyOwnerRecovery('a'.repeat(64),b,challenge,recovery)).toThrow();
+    expect(()=>codec.verifyOwnerRecovery(proof,b,'a later signed request',recovery)).toThrow();
+    expect(()=>codec.verifyOwnerRecovery(proof,{...b,prefix:'other/'},challenge,recovery)).toThrow();
+    expect(()=>codec.verifyOwnerRecovery(proof,b,challenge,codec.createRecovery(b,wallet.signingKey.publicKey))).toThrow();
   });
 });

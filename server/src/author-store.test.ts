@@ -177,6 +177,25 @@ describe('Encryption migration of an already-linked author',()=>{
     await expect(replay.link(f.users[0],f.b)).rejects.toThrow();
     expect((await f.base.getUser('alice'))?.tinycloud?.minRecordVersion).toBe(2);
   });
+  it('retains a waiting post across recovery while encryption setup is pending, and fails direct imports/summaries cleanly',async()=>{
+    const f=await legacyFixture();const staged=new StagedStorage(60000,f.layer.storage);
+    const imported={pseudonym:'alice#123',content:'pending import',title:'Import',sourceUrl:'https://example.test/chat',platform:'claude',summary:'Summary',timestamp:1000,keywords:[]};
+    let restarted:StagedStorage|undefined;
+    try {
+      const pending=await staged.addEntry(post('alice','waiting through upgrade'));
+      await expect(staged.publishEntry(pending.id)).rejects.toThrow('Re-link');
+      await expect(staged.addConversation(imported)).rejects.toThrow('Re-link');
+      await expect(staged.addSummary({pseudonym:'alice#123',content:'summary',timestamp:1000,entryIds:['old-a'],startTime:0,endTime:1000})).rejects.toThrow('Re-link');
+      const saved=staged.getPendingState();staged.stop();
+      const fresh=authorStorage(f.base,f.resolve,codec);restarted=new StagedStorage(60000,fresh.storage);restarted.restorePendingState(saved);
+      expect(restarted.isPending(pending.id)).toBe(true);
+      expect(await f.base.getConversations()).toEqual([]);
+      await fresh.link(f.users[0],f.b);
+      await restarted.publishEntry(pending.id);
+      expect((await fresh.storage.getEntry(pending.id))?.content).toBe('waiting through upgrade');
+      expect(restarted.isPending(pending.id)).toBe(false);
+    } finally {staged.stop();restarted?.stop();}
+  });
   it('resumes a partially committed migration without losing records or accepting a downgrade afterwards',async()=>{
     const f=await legacyFixture();let fail=true;
     const partial=authorStorage(f.base,async b=>{const s=await f.resolve(b);return {...s,async put(k,v,c){
@@ -189,6 +208,18 @@ describe('Encryption migration of an already-linked author',()=>{
     await fresh.link(f.users[0],f.b);
     expect((await f.base.getUser('alice'))?.tinycloud?.minRecordVersion).toBe(2);
     for(const value of f.values)expect(codec.decode(f.map.get(`posts/${value.id}`)!,f.b,'posts',value.id)).toEqual(value);
+  });
+  it('recovers from a lost acknowledgement creating the recovery record without replacing it',async()=>{
+    const f=await legacyFixture();let fail=true;
+    const interrupted=authorStorage(f.base,async b=>{const s=await f.resolve(b);return {...s,async put(k,v,c){
+      await s.put(k,v,c);if(k===RECOVERY_KEY&&fail){fail=false;throw new Error('recovery acknowledgement lost');}
+    }};},codec);
+    await expect(interrupted.link(f.users[0],f.b)).rejects.toThrow('recovery acknowledgement');
+    const saved=f.map.get(RECOVERY_KEY);
+    expect((await f.base.getUser('alice'))?.tinycloud?.minRecordVersion).toBeUndefined();
+    await interrupted.link(f.users[0],f.b);
+    expect(f.map.get(RECOVERY_KEY)).toBe(saved);
+    expect((await f.base.getUser('alice'))?.tinycloud?.minRecordVersion).toBe(2);
   });
   it.each(['delete','edit'])('does not overwrite an owner %s between reading and conditional migration',async action=>{
     const f=await legacyFixture();let changed=false;

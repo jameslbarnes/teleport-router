@@ -12,7 +12,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {SSEClientTransport} from '@modelcontextprotocol/sdk/client/sse.js';
 import {tinyCloudGroups} from '../dist/tinycloud-group-store.js';
 import {serializeDelegation} from '@tinycloud/node-sdk';
-import {linkOwner,request} from './tinycloud-link-lib.mjs';
+import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {canonical,recoverAuthorKey,decryptOwnerRecord,RECOVERY_KEY} from '../dist/author-records.js';
 import {derivePseudonym} from '../dist/identity.js';
 
@@ -27,7 +27,7 @@ const server=spawn(process.execPath,['dist/http.js'],{cwd:process.cwd(),shell:fa
   FIREBASE_SERVICE_ACCOUNT:'',FIREBASE_SERVICE_ACCOUNT_BASE64:'',GOOGLE_APPLICATION_CREDENTIALS:'',
   ANTHROPIC_API_KEY:'',MODERATOR_URL:'',MODERATOR_API_KEY:'',
   TINYCLOUD_GROUPS:'',TINYCLOUD_AUTHORS:'tinycloud',TINYCLOUD_KEY_SOURCE:'test-key',TINYCLOUD_ROUTER_KEY:routerPrivateKey,
-  TINYCLOUD_HOST:host,TINYCLOUD_LEASE_MS:'1000',STAGED_STORAGE:'memory',STAGING_DELAY_MS:'3600000',
+  TINYCLOUD_HOST:host,TINYCLOUD_LEASE_MS:'5000',STAGED_STORAGE:'memory',STAGING_DELAY_MS:'3600000',
   RECOVERY_FILE:join(privateDir,'pending.json'),
 }});
 // Drain output without exposing incidental credentials or synthetic content in logs.
@@ -64,7 +64,13 @@ try {
     const refused=await fetch(`${base}/api/tinycloud/link`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({secret_key:secretKey,delegation:serializeDelegation(grant),signature:wrongSignature})});
     assert.equal(refused.status,400,'A signature from another identity must be refused');
-    const linked=await linkOwner({base,secretKey,signMessage:m=>wallet.signMessage(m),grant});assert(linked.linked&&linked.available);
+    const correctSignature=await wallet.signMessage(challenge.message);
+    const unconfirmed=await fetch(`${base}/api/tinycloud/link`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({secret_key:secretKey,delegation:serializeDelegation(grant),signature:correctSignature})});
+    assert.equal(unconfirmed.status,400,'A signature alone cannot activate encryption without proving recovery');
+    assert.equal((await request(base,'/api/tinycloud/status',{secret_key:secretKey})).linked,false);
+    const linked=await linkOwner({base,secretKey,signMessage:m=>wallet.signMessage(m),
+      confirmRecovery:prepared=>confirmOwnerRecovery(ownerKey,prepared),grant});assert(linked.linked&&linked.available);
     assert.equal(linked.encryption.version,2);assert.equal(linked.encryption.setupRequired,false);
     accounts.push({handle,secretKey,owner,ownerKey,grant,legacy});
     console.log(`PASS ${name} proves both identities and links their own space`);
@@ -115,7 +121,7 @@ try {
   console.log('PASS a fresh Router client reopens the existing grant with the same account key');
 
   await accounts[1].owner.revokeDelegation(accounts[1].grant.cid);
-  await new Promise(r=>setTimeout(r,1100));
+  await new Promise(r=>setTimeout(r,5100));
   assert.deepEqual((await feed()).entries.map(e=>e.id).sort(),[ids[0],ids[2]].sort());
   assert.equal((await fetch(`${base}/api/entry/${ids[1]}?key=${first.secretKey}`)).status,404);
   assert((await accounts[1].owner.kv.get(`router/posts/${ids[1]}`)).ok);
