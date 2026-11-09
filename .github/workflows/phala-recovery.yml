@@ -8,10 +8,15 @@ on:
         required: true
         type: choice
         default: status
-        options: [status]
+        options: [status, resize4gb]
+      confirmation:
+        description: Explicit approval token for the one-time capacity increase
+        type: string
+        required: false
 
 jobs:
   phala-recovery:
+    if: inputs.action == 'status'
     runs-on: ubuntu-latest
     timeout-minutes: 6
     permissions:
@@ -49,3 +54,134 @@ jobs:
             echo "$url"
             curl -sS --connect-timeout 5 --max-time 15 -o /dev/null -w 'HTTP %{http_code}; %{errormsg}\n' "$url" || true
           done
+
+  approved-resize:
+    if: inputs.action == 'resize4gb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    concurrency:
+      group: production-phala-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+      PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+      APPROVED_RESIZE: ${{ inputs.confirmation }}
+    steps:
+      - name: Resize existing CVM and verify live services
+        shell: bash
+        run: |
+          node <<'ELLIS_RESIZE_JS'
+          'use strict';
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const apiRoot = 'https://cloud-api.phala.com/api/v1';
+          const id = process.env.PHALA_APP_ID;
+          const key = process.env.PHALA_CLOUD_API_KEY;
+          const expectedCvm = 'cvm_BKy27Gwl';
+          const expectedCompose = 'f5fc9f99b4d93d03a6276e47f49097d6c35514314bd5ef95c11eed0e5ca853cc';
+          const expectedDid = 'did:pkh:eip155:1:0xA72963f16852a24A0B9956813BAf3dbcFd7C5868';
+          const report = {actor:'Ellis', approved:true, startedAt:new Date().toISOString(), samples:[]};
+          const log = (event, value) => console.log(JSON.stringify({at:new Date().toISOString(),event,...value}));
+          const pause = ms => new Promise(resolve => setTimeout(resolve,ms));
+          function invariant(condition, label) { if (!condition) throw new Error(label); }
+          async function api(path, method='GET', body) {
+            const response = await fetch(apiRoot + path, {
+              method, redirect:'error', signal:AbortSignal.timeout(45000),
+              headers:{'X-API-Key':key,'X-Phala-Version':'2026-01-21','Content-Type':'application/json'},
+              ...(body ? {body:JSON.stringify(body)} : {})
+            });
+            const text = await response.text();
+            if (!response.ok) throw new Error(`${method} ${path} returned HTTP ${response.status}`);
+            return text ? JSON.parse(text) : null;
+          }
+          async function publicJson(url) {
+            const response=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(20000)});
+            invariant(response.ok, `${url} HTTP ${response.status}`);
+            return response.json();
+          }
+          const base = `/cvms/${id}`;
+          function images(composition) {
+            return (composition.containers || []).map(c=>({names:c.names,image:c.image})).sort((a,b)=>a.names.join().localeCompare(b.names.join()));
+          }
+          function healthy(composition) {
+            return composition.is_online && composition.containers?.length===6 && composition.containers.every(c=>c.state==='running') && composition.containers.some(c=>c.names.some(n=>n.includes('discord-bot')) && /\(healthy\)/.test(c.status));
+          }
+          function identity(value) {
+            invariant(value.did===expectedDid && value.keySource==='dstack' && value.mode==='authors', 'TinyCloud identity/mode changed');
+          }
+          async function sample(beforeImages) {
+            const [cvm,stats,composition,tinycloud] = await Promise.all([
+              api(base), api(base+'/stats'), api(base+'/composition'),
+              publicJson('https://router.teleport.computer/api/tinycloud/router')
+            ]);
+            invariant(cvm.id===expectedCvm && cvm.app_id===id.replace(/^app_/,''), 'CVM identity changed');
+            invariant(cvm.compose_hash===expectedCompose, 'Compose hash changed');
+            invariant(cvm.resource.disk_in_gb===20, 'Disk size changed');
+            invariant(cvm.resource.vcpu===2 && cvm.resource.memory_in_gb===4 && cvm.resource.instance_type==='tdx.medium', 'Target resources not active');
+            invariant(cvm.status==='running' && !cvm.in_progress, 'CVM not settled');
+            assert.deepEqual(images(composition),beforeImages,'Container images changed');
+            invariant(healthy(composition), 'Six services/Discord not healthy');
+            identity(tinycloud);
+            await Promise.all([
+              publicJson('https://router.teleport.computer/health'),
+              publicJson('https://hermes.teleport.computer/health'),
+              publicJson('https://router.teleport.computer/api/entries?limit=1')
+            ]);
+            invariant(stats.sysinfo?.total_memory>3.5e9, 'Guest memory does not reflect 4 GB');
+            const result = {resource:cvm.resource,uptime:stats.sysinfo.uptime,totalMemory:stats.sysinfo.total_memory,availableMemory:stats.sysinfo.available_memory,usedMemory:stats.sysinfo.used_memory,loadOne:stats.sysinfo.loadavg_one,services:composition.containers.map(c=>({names:c.names,state:c.state,status:c.status})),tinycloudIdentityUnchanged:true,composeUnchanged:true,imagesUnchanged:true};
+            report.samples.push({at:new Date().toISOString(),...result});
+            log('verified',result);
+            return result;
+          }
+          (async()=>{
+            invariant(id && key, 'Missing credentials');
+            invariant(process.env.APPROVED_RESIZE==='4gb-2cpu-20261109', 'Approved resize guard missing');
+            const [before,composition,stats,tinycloud,types,nodes] = await Promise.all([
+              api(base),api(base+'/composition'),api(base+'/stats'),
+              publicJson('https://router.teleport.computer/api/tinycloud/router'),
+              api('/instance-types/cpu'),api('/teepods/available')
+            ]);
+            invariant(before.id===expectedCvm && before.app_id===id.replace(/^app_/,''), 'Unexpected CVM identity');
+            invariant(before.status==='running' && !before.in_progress, 'Another operation or unhealthy CVM');
+            invariant(before.compose_hash===expectedCompose, 'Deployment changed since approval');
+            invariant(before.resource.disk_in_gb===20 && healthy(composition), 'Unexpected disk or service state');
+            identity(tinycloud);
+            const target = types.items?.find(t=>t.id==='tdx.medium');
+            invariant(target?.vcpu===2 && target.memory_mb===4096 && Number(target.hourly_rate)<=0.116, 'Target shape or approved price changed');
+            const node = nodes.nodes?.find(n=>n.name===before.node_info?.name || n.teepod_id===before.node_info?.id);
+            if (node) invariant(node.remaining_vcpu>=1 && node.remaining_memory>=2048,'Insufficient node capacity');
+            report.before={id:before.id,resource:before.resource,composeHash:before.compose_hash,node:before.node_info?.name,totalMemory:stats.sysinfo.total_memory,availableMemory:stats.sysinfo.available_memory,images:images(composition),did:tinycloud.did};
+            report.target={id:target.id,vcpu:target.vcpu,memoryMB:target.memory_mb,hourlyRate:target.hourly_rate};
+            log('preflight',{before:report.before,target:report.target,nodeCapacity:node?{remainingVcpu:node.remaining_vcpu,remainingMemory:node.remaining_memory}:null});
+            const alreadyTarget = before.resource.vcpu===2 && before.resource.memory_in_gb===4 && before.resource.instance_type==='tdx.medium';
+            if (!alreadyTarget) {
+              invariant(before.resource.vcpu===1 && before.resource.memory_in_gb===2 && before.resource.instance_type==='tdx.small', 'Unexpected starting resources');
+              // Exactly one PATCH; no automatic retry if the request outcome is uncertain.
+              report.resizeRequestedAt=new Date().toISOString();
+              await api(base+'/resources','PATCH',{vcpu:2,memory:4096,instance_type:'tdx.medium',allow_restart:1});
+              log('resize_accepted',{target:report.target});
+            } else log('already_at_target',{});
+            const deadline=Date.now()+12*60*1000;
+            let passed=false;
+            while(Date.now()<deadline) {
+              await pause(15000);
+              try { await sample(report.before.images); passed=true; break; }
+              catch(error) { log('waiting',{reason:error.message}); }
+            }
+            invariant(passed,'Resize did not pass all live checks within 12 minutes');
+            for(let i=0;i<3;i++) { await pause(30000); await sample(report.before.images); }
+            report.finishedAt=new Date().toISOString();report.success=true;
+            fs.writeFileSync('resize-receipt.json',JSON.stringify(report,null,2));
+            log('complete',{receipt:'resize-receipt.json'});
+          })().catch(error=>{report.success=false;report.error=error.message;fs.writeFileSync('resize-receipt.json',JSON.stringify(report,null,2));console.error(error.message);process.exitCode=1;});
+          
+          ELLIS_RESIZE_JS
+      - name: Preserve resize receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ellis-router-resize-4gb
+          path: resize-receipt.json
+          if-no-files-found: error
