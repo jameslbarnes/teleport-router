@@ -76,13 +76,6 @@ jobs:
         working-directory: server
         run: npm run build
 
-      - name: Check group onboarding in a browser
-        working-directory: server
-        run: |
-          npm install --prefix "$RUNNER_TEMP/router-browser" --ignore-scripts --no-audit --no-fund playwright@1.59.1
-          node "$RUNNER_TEMP/router-browser/node_modules/playwright/cli.js" install --with-deps chromium
-          PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/group-onboarding-browser-smoke.mjs
-
       - name: Verify graceful staging recovery
         working-directory: server
         run: node scripts/staging-recovery-smoke.mjs
@@ -173,6 +166,28 @@ jobs:
           echo "${{ steps.agent_build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
+  group-onboarding:
+    # This pinned browser release supports Ubuntu 24.04, not ubuntu-latest's 26.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - name: Check group onboarding in a browser
+        working-directory: server
+        run: |
+          npm install --prefix "$RUNNER_TEMP/router-browser" --ignore-scripts --no-audit --no-fund playwright@1.59.1
+          node "$RUNNER_TEMP/router-browser/node_modules/playwright/cli.js" install --with-deps chromium
+          PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/group-onboarding-browser-smoke.mjs
+
   discord-image:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -238,7 +253,7 @@ jobs:
           NODE
 
   deploy:
-    needs: [build, discord-image]
+    needs: [build, discord-image, group-onboarding]
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-latest
     concurrency:
