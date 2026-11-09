@@ -18,6 +18,7 @@ env:
   REGISTRY: docker.io
   IMAGE_NAME: generalsemantics/teleport-router
   AGENT_IMAGE_NAME: generalsemantics/teleport-router-agent
+  DISCORD_IMAGE_NAME: generalsemantics/teleport-router-discord
 
 jobs:
   build:
@@ -165,8 +166,66 @@ jobs:
           echo "${{ steps.agent_build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
+  discord-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Validate Discord service boundaries
+        run: node scripts/discord-compose-check.mjs
+      - name: Build exact Discord runtime for testing
+        uses: docker/build-push-action@v5
+        with:
+          context: ./agent
+          file: ./agent/discord-phala/Dockerfile
+          load: true
+          tags: router-discord:ci
+          cache-from: type=gha,scope=discord
+          cache-to: type=gha,scope=discord,mode=max
+      - name: Test both plugins and portable source reader in the shipped runtime
+        run: |
+          for suite in router-private router-participation; do
+            docker run --rm --network none --memory 512m --memory-swap 512m --cpus 1 \
+              --read-only --tmpfs /tmp:rw,size=64m,mode=1777 -v "$PWD:/checks:ro" \
+              --entrypoint /opt/hermes/.venv/bin/python router-discord:ci \
+              -m unittest discover -s "/checks/agent/discord-test/$suite" -p 'test_*.py'
+          done
+          docker run --rm --network none --memory 512m --memory-swap 512m --cpus 1 \
+            --read-only --tmpfs /tmp:rw,size=64m,mode=1777 -v "$PWD:/checks:ro" \
+            --entrypoint /opt/hermes/.venv/bin/python router-discord:ci \
+            -m unittest discover -s /checks/agent/discord-phala -p 'test_*.py'
+      - name: Start the actual gateway offline under production limits
+        run: python3 scripts/discord-container-smoke.py
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Discord image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.DISCORD_IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+      - name: Publish tested Discord image
+        id: publish
+        uses: docker/build-push-action@v5
+        with:
+          context: ./agent
+          file: ./agent/discord-phala/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          cache-from: type=gha,scope=discord
+
   deploy:
-    needs: build
+    needs: [build, discord-image]
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-latest
     concurrency:
@@ -194,6 +253,7 @@ jobs:
           GIT_SHA_FULL: ${{ github.sha }}
           IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
           AGENT_IMAGE_DIGEST: ${{ needs.build.outputs.agent_digest }}
+          DISCORD_IMAGE_DIGEST: ${{ needs.discord-image.outputs.digest }}
         run: |
           # Only non-secret values go into the compose (visible in TEE metadata)
           export GIT_SHA=$(echo "$GIT_SHA_FULL" | cut -c1-7)
@@ -223,6 +283,11 @@ jobs:
           MATRIX_DEVICE_ID: ${{ secrets.MATRIX_DEVICE_ID }}
           MATRIX_BOT_HANDLE: ${{ secrets.MATRIX_BOT_HANDLE }}
           MATRIX_REGISTRATION_TOKEN: ${{ secrets.MATRIX_REGISTRATION_TOKEN }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_MODEL_API_KEY: ${{ secrets.DISCORD_MODEL_API_KEY }}
+          DISCORD_PUBLIC_ROUTER_KEY: ${{ secrets.DISCORD_PUBLIC_ROUTER_KEY }}
+          DISCORD_PRIVATE_ROUTER_KEY: ${{ secrets.DISCORD_PRIVATE_ROUTER_KEY }}
+          DISCORD_INITIAL_LINKS_B64: ${{ secrets.DISCORD_INITIAL_LINKS_B64 }}
         run: |
           set -euo pipefail
           env_file=/tmp/phala.env
@@ -257,6 +322,11 @@ jobs:
           write_env MATRIX_DEVICE_ID
           write_env MATRIX_BOT_HANDLE
           write_env MATRIX_REGISTRATION_TOKEN
+          write_env DISCORD_BOT_TOKEN
+          write_env DISCORD_MODEL_API_KEY
+          write_env DISCORD_PUBLIC_ROUTER_KEY
+          write_env DISCORD_PRIVATE_ROUTER_KEY
+          write_env DISCORD_INITIAL_LINKS_B64
 
           if [ -n "$HERMES_AGENT_SECRET_KEY" ]; then
             printf 'ROUTER_SECRET_KEY=%s\n' "$HERMES_AGENT_SECRET_KEY" >> "$env_file"
@@ -269,7 +339,7 @@ jobs:
             printf 'MATRIX_CRYPTO_SECRET=%s\n' "$MATRIX_BOT_SECRET_KEY" >> "$env_file"
           fi
 
-          for required in HERMES_AGENT_SECRET_KEY SHAPE_ROUTER_SECRET_KEY SHAPE_MATRIX_SERVICE_KEY MATRIX_BOT_SECRET_KEY MATRIX_REGISTRATION_TOKEN; do
+          for required in HERMES_AGENT_SECRET_KEY SHAPE_ROUTER_SECRET_KEY SHAPE_MATRIX_SERVICE_KEY MATRIX_BOT_SECRET_KEY MATRIX_REGISTRATION_TOKEN DISCORD_BOT_TOKEN DISCORD_MODEL_API_KEY DISCORD_PUBLIC_ROUTER_KEY DISCORD_PRIVATE_ROUTER_KEY; do
             if ! grep -q "^${required}=." "$env_file"; then
               echo "Missing required Phala env: ${required}"
               exit 1
@@ -332,6 +402,7 @@ jobs:
           EXPECTED_GIT_SHA: ${{ github.sha }}
           EXPECTED_IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
           EXPECTED_AGENT_IMAGE_DIGEST: ${{ needs.build.outputs.agent_digest }}
+          EXPECTED_DISCORD_IMAGE_DIGEST: ${{ needs.discord-image.outputs.digest }}
         run: |
           set -euo pipefail
           export EXPECTED_GIT_SHA="$(echo "$EXPECTED_GIT_SHA" | cut -c1-7)"
@@ -384,6 +455,7 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
           AGENT_IMAGE_DIGEST: ${{ needs.build.outputs.agent_digest }}
+          DISCORD_IMAGE_DIGEST: ${{ needs.discord-image.outputs.digest }}
           WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash scripts/archive-tee-evidence.sh
 

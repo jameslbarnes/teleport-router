@@ -87,6 +87,43 @@ services:
       - router
     restart: unless-stopped
 
+  discord-bot:
+    image: docker.io/generalsemantics/teleport-router-discord:${GIT_SHA}@${DISCORD_IMAGE_DIGEST}
+    user: "10000:10000"
+    init: true
+    read_only: true
+    cpus: 0.5
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      # Distinct identities from Router/Shape, and never James's personal key.
+      - DISCORD_BOT_TOKEN
+      - DISCORD_MODEL_API_KEY
+      - DISCORD_PUBLIC_ROUTER_KEY
+      - DISCORD_PRIVATE_ROUTER_KEY
+      - DISCORD_INITIAL_LINKS_B64
+    volumes:
+      - discord-data:/data
+    # Outbound Discord gateway only: no ports, Docker socket or dstack socket.
+    healthcheck:
+      test: ["CMD", "/opt/hermes/.venv/bin/python", "-I", "/opt/router-discord/health.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+    stop_grace_period: 60s
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"
+    restart: unless-stopped
+
   dstack-ingress:
     image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
     # Stale hermes.teleport.computer certbot state in this volume makes every
@@ -142,5 +179,6 @@ services:
 volumes:
   router-data:
   shape-matrix-bridge-data:
+  discord-data:
   cert-data-cf:
   hermes-cert-data-cf:

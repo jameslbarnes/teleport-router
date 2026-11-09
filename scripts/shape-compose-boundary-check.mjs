@@ -31,6 +31,7 @@ function composeConfig(file) {
     GIT_SHA: process.env.GIT_SHA || 'ci',
     IMAGE_DIGEST: process.env.IMAGE_DIGEST || 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     AGENT_IMAGE_DIGEST: process.env.AGENT_IMAGE_DIGEST || 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    DISCORD_IMAGE_DIGEST: process.env.DISCORD_IMAGE_DIGEST || 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
   };
   const result = spawnSync('docker', ['compose', '-f', file, 'config', '--format', 'json'], {
     cwd: repoRoot,
