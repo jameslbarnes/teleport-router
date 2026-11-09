@@ -1,0 +1,13 @@
+{
+  "guild_id": "1568051145551650858",
+  "channel_id": "1568051571751788644",
+  "mode": "shadow",
+  "shadow_compose": true,
+  "classifier_model": "claude-haiku-5-5",
+  "compose_model": "claude-opus-5-5",
+  "router_base_url": "https://router.teleport.computer",
+  "channel_note": "",
+  "compose_mcp_servers": [],
+  "test_webhook_ids": [],
+  "retention_days": 30
+}

@@ -5,6 +5,7 @@ set -euo pipefail
 : "${EXPECTED_GIT_SHA:?EXPECTED_GIT_SHA is required}"
 : "${EXPECTED_IMAGE_DIGEST:?EXPECTED_IMAGE_DIGEST is required}"
 : "${EXPECTED_AGENT_IMAGE_DIGEST:?EXPECTED_AGENT_IMAGE_DIGEST is required}"
+: "${EXPECTED_DISCORD_IMAGE_DIGEST:?EXPECTED_DISCORD_IMAGE_DIGEST is required}"
 
 TEE_HOST="${TEE_HOST:-${PHALA_APP_ID}-8090.dstack-pha-prod9.phala.network}"
 ROUTER_HEALTH_URL="${ROUTER_HEALTH_URL:-https://router.teleport.computer/health}"
@@ -20,7 +21,8 @@ router_health_file="$(mktemp)"
 hermes_health_file="$(mktemp)"
 bridge_log_file="$(mktemp)"
 bridge_err_file="$(mktemp)"
-trap 'rm -f "$metadata_file" "$containers_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file" "$bridge_err_file"' EXIT
+discord_state_file="$(mktemp)"
+trap 'rm -f "$metadata_file" "$containers_file" "$status_file" "$router_health_file" "$hermes_health_file" "$bridge_log_file" "$bridge_err_file" "$discord_state_file"' EXIT
 
 # The TEE's own report on port 8090 is the first choice. Phala closed public 8090
 # on CVMs still running unpatched OS images after the October 2026 guest-agent
@@ -71,13 +73,15 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   containers_ok=0
   bridge_ok=1
   health_ok=0
+  discord_ok=0
   metadata_source=""
 
   if fetch_metadata; then
     echo "TEE metadata source: ${metadata_source}"
     if grep -Fq "GIT_SHA=${EXPECTED_GIT_SHA}" "$metadata_file" &&
       grep -Fq "${EXPECTED_IMAGE_DIGEST}" "$metadata_file" &&
-      grep -Fq "${EXPECTED_AGENT_IMAGE_DIGEST}" "$metadata_file"; then
+      grep -Fq "${EXPECTED_AGENT_IMAGE_DIGEST}" "$metadata_file" &&
+      grep -Fq "${EXPECTED_DISCORD_IMAGE_DIGEST}" "$metadata_file"; then
       metadata_ok=1
       echo "TEE metadata contains expected git SHA and image digests"
     else
@@ -163,7 +167,15 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     echo "Public health endpoints are not healthy yet"
   fi
 
-  if [ "$metadata_ok" -eq 1 ] && [ "$containers_ok" -eq 1 ] && [ "$bridge_ok" -eq 1 ] && [ "$health_ok" -eq 1 ]; then
+  # The local probe requires a live PID, fresh gateway heartbeat and an authenticated
+  # Discord connection. A merely running container does not pass this check.
+  if phala api "/cvms/${PHALA_APP_ID}/composition" \
+    -q '{containers: [.containers[]? | {names,image,state,status}]}' >"$discord_state_file" 2>/dev/null &&
+    node scripts/verify-discord-container.mjs "$discord_state_file" "$EXPECTED_DISCORD_IMAGE_DIGEST"; then
+    discord_ok=1
+  fi
+
+  if [ "$metadata_ok" -eq 1 ] && [ "$containers_ok" -eq 1 ] && [ "$bridge_ok" -eq 1 ] && [ "$health_ok" -eq 1 ] && [ "$discord_ok" -eq 1 ]; then
     echo "Deployment verified (TEE metadata from ${metadata_source})"
     exit 0
   fi

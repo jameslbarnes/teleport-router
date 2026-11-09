@@ -1,0 +1,12 @@
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+const [file, digest] = process.argv.slice(2);
+assert.match(digest, /^sha256:[a-f0-9]{64}$/);
+const composition = JSON.parse(readFileSync(file, 'utf8'));
+const containers = composition.containers?.filter(c => c.names?.some(n => /^\/?dstack-discord-bot-1$/.test(n)));
+assert.equal(containers?.length, 1, 'Exactly one Discord container must be present');
+const bot = containers[0];
+assert(bot.image?.endsWith(`@${digest}`), 'Discord image must match the tested digest');
+assert.equal(bot.state, 'running', 'Discord container must be running');
+assert(/\(healthy\)/.test(bot.status || ''), 'Discord gateway has not passed its connected/fresh heartbeat probe');
+console.log('Discord container matches the attested image and has a fresh connected gateway heartbeat.');
