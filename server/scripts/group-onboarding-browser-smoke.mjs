@@ -130,6 +130,7 @@ try {
   await openPage.goto(base + '/group-setup?group=open-club');
   await openPage.locator('#discord-explanation').filter({ hasText: 'public group' }).waitFor();
   await openPage.locator('#skip-discord').click();
+  await openPage.locator('#rules-next').filter({ hasText: 'Keep automatic public posting and continue' }).waitFor();
   assert.equal(await openPage.locator('#rules-next').textContent(), 'Keep automatic public posting and continue');
   await publicContext.close();
 
