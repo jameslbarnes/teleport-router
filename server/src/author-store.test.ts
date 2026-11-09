@@ -179,7 +179,7 @@ describe('Encryption migration of an already-linked author',()=>{
   });
   it('retains a waiting post across recovery while encryption setup is pending, and fails direct imports/summaries cleanly',async()=>{
     const f=await legacyFixture();const staged=new StagedStorage(60000,f.layer.storage);
-    const imported={pseudonym:'alice#123',content:'pending import',title:'Import',sourceUrl:'https://example.test/chat',platform:'claude',summary:'Summary',timestamp:1000,keywords:[]};
+    const imported={pseudonym:'alice#123',content:'pending import',title:'Import',sourceUrl:'https://example.test/chat',platform:'claude' as const,summary:'Summary',timestamp:1000,keywords:[]};
     let restarted:StagedStorage|undefined;
     try {
       const pending=await staged.addEntry(post('alice','waiting through upgrade'));
