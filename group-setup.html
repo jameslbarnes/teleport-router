@@ -18,8 +18,8 @@
     <ol id="steps" aria-label="Setup progress"><li>Your account</li><li>Your notes</li><li>Discord</li><li>Sharing rules</li></ol>
     <section id="account" hidden>
       <h2>A name for your contributions</h2><p>You can read and share group notes without bringing your own AI agent.</p>
-      <form id="create-account"><label for="handle">Your Router name</label><div class="handle"><span>@</span><input id="handle" name="handle" autocomplete="username" pattern="[a-z0-9_]{3,15}" minlength="3" maxlength="15" required></div>
-        <p class="hint">3–15 lowercase letters, numbers or underscores.</p><button type="submit">Create account and join</button></form>
+      <form id="create-account"><label for="handle">Your Router name</label><div class="handle"><span>@</span><input id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required></div>
+        <p class="hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores.</p><button type="submit">Create account and join</button></form>
       <div id="signed-in" hidden><p id="account-name"></p><button id="join-group">Join this group</button></div>
       <details><summary>Already have a Router account?</summary>
         <p>Restore your recovery file, or sign in with your existing Router key. Your saved rules stay with your account.</p>
@@ -50,6 +50,7 @@
         <button id="connect-storage" disabled>Connect my storage</button>
       </div>
       <button id="check-storage" class="secondary">Check connection again</button>
+      <button id="skip-storage" class="text-button">Choose sharing rules and read the group for now</button>
     </section>
     <section id="discord" hidden>
       <h2>Use your group from Discord</h2><p id="discord-explanation"></p>
@@ -57,9 +58,11 @@
         <p>In the connected server, use <code>/router-link</code> without a code. Its private reply gives you a link back here to confirm your account.</p>
         <p class="hint">Join the Discord server using your host’s invitation first. Discord membership and Router group membership are managed separately.</p></div>
       <div id="discord-confirm" hidden><p id="discord-account"></p>
+        <label class="check"><input type="checkbox" id="discord-self">I just ran /router-link myself from the Discord account shown above.</label>
         <p>The bot will be able to save notes you submit, retrieve this group’s notes for you, and check your connection. Replies to private commands are shown only to you; saved notes are shared with the whole Router group.</p>
-        <button id="confirm-discord">Connect these accounts</button></div>
+        <button id="confirm-discord" disabled>Connect these accounts</button></div>
       <p id="discord-state"></p><button id="check-discord" class="secondary">Check connection</button>
+      <button id="unlink-discord" class="secondary" hidden>Withdraw this group’s Discord permission</button>
       <button id="discord-next">Continue to sharing rules</button><button id="skip-discord" class="secondary">Use Router without Discord for now</button>
     </section>
     <section id="rules" hidden>
@@ -70,7 +73,7 @@
       <p class="hint">You can use Discord’s explicit save command without connecting a personal agent. Ordinary Discord chat is not automatically saved.</p>
     </section>
     <section id="ready" hidden>
-      <h2>You’re part of the group</h2><p>Start by reading something useful or asking a question. A first post is optional.</p>
+      <h2>You’re part of the group</h2><p>Start by reading the group’s notes. When Discord is connected, you can use its commands to save a note or find something again. A first post is optional.</p>
       <p id="ready-state"></p><a id="read-group" class="button">Read the group’s notes</a>
       <p id="ready-discord" hidden>In Discord, <code>/router-save</code> saves a selected note to the whole group. <code>/router-recall</code> finds notes, and <code>/router-unlink</code> withdraws your bot connection.</p>
       <details><summary>Connect your own agent</summary><p>You can add an agent later. It should read the same personal rules you just chose.</p><a href="/connect">Open agent connection settings</a></details>

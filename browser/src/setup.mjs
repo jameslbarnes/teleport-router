@@ -30,7 +30,7 @@ async function act(operation) {
   if (busy) return; busy = true;
   const enabled = [...document.querySelectorAll('button:not(:disabled)')]; enabled.forEach(b => b.disabled = true);
   try { await operation(); } catch (error) { message(error.message || 'This step could not finish. Please retry.', true); $('retry').hidden = false; }
-  finally { busy = false; enabled.forEach(b => b.disabled = false); $('connect-storage').disabled = !$('backup-kept').checked; }
+  finally { busy = false; enabled.forEach(b => b.disabled = false); $('connect-storage').disabled = !$('backup-kept').checked; $('confirm-discord').disabled = !$('discord-self').checked; }
 }
 const backupName = () => 'router_recovery:' + identity.handle;
 const receiptName = () => 'router_storage_grant:' + identity.handle;
@@ -107,12 +107,21 @@ async function showDiscord() {
   discord = await request('/api/discord/link/status', { groupId });
   $('discord-start').hidden = !discord.configured || !!discord.linked || !!pairing;
   $('discord-confirm').hidden = true; $('discord-next').hidden = !discord.linked; $('skip-discord').hidden = !!discord.linked;
+  $('unlink-discord').hidden = !discord.grantId;
   $('discord-explanation').textContent = discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'Your host has not connected this group to Discord yet. You can finish your Router setup now and link Discord later.';
   if (discord.configured) $('open-discord').href = discord.channelUrl;
-  $('discord-state').textContent = discord.linked ? 'Your Discord account is connected. The permission expires ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : '';
+  $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. The permission expires ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
   if (pairing) {
-    const pair = await request('/api/discord/pair/info', { pairing, groupId });
-    $('discord-account').textContent = 'Connect Discord ' + (pair.displayName || 'account') + ' (' + pair.discordUserId + ') to @' + identity.handle + ' in #' + groupId + '?';
+    let pair;
+    try { pair = await request('/api/discord/pair/info', { pairing, groupId }); }
+    catch (error) {
+      if (error.status === 410 || error.status === 403) {
+        pairing = undefined; sessionStorage.removeItem('router_setup_pair');
+        $('discord-start').hidden = !discord.configured || !!discord.linked;
+      }
+      throw error;
+    }
+    $('discord-account').textContent = 'Connect Discord ' + (pair.username ? '@' + pair.username : 'account ' + pair.discordUserId) + ' to Router @' + identity.handle + ' in #' + groupId + '? Only continue if this is your Discord account; someone else’s link would give them access under your Router name.';
     $('discord-confirm').hidden = pair.status !== 'waiting';
     if (pair.status === 'approved') { $('discord-state').textContent = 'Confirmed. Return to Discord; the bot is finishing the connection.'; $('discord-next').hidden = true; }
     if (pair.status === 'connected') { $('discord-state').textContent = 'Discord has confirmed the connection.'; $('discord-next').hidden = false; sessionStorage.removeItem('router_setup_pair'); pairing = undefined; }
@@ -123,7 +132,11 @@ async function showRules() {
   screen(3); rules = await request('/api/posting-rules');
   $('choose-rules').href = '/posting-rules?group=' + encodeURIComponent(groupId) + '&onboarding=1';
   $('rules-next').hidden = !rules.rules;
-  $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public — anyone on the internet' : 'choose each time') + '. Keep it or edit it below.' : 'Suggested for a private group: useful notes here automatically, with your approval before public publication. Review the exact wording before saving.';
+  $('rules-next').textContent = rules.rules?.mode === 'automatic' && rules.rules?.audience === 'public'
+    ? 'Keep automatic public posting and continue' : 'Keep these saved rules and continue';
+  $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public — anyone on the internet' : 'choose each time') + '. Keep it or edit it below.' : context.group.private
+    ? 'Suggested for a private group: useful notes here automatically, with your approval before public publication. Review the exact wording before saving.'
+    : 'This group is public. Suggested rules: see and approve each draft before it is published. Review the exact wording before saving.';
   message('Your saved rules apply to every connected agent.');
 }
 async function finish() {
@@ -131,8 +144,12 @@ async function finish() {
   const fresh = await request('/api/group-onboarding?group=' + encodeURIComponent(groupId));
   rules = await request('/api/posting-rules');
   if (!fresh.member || !rules.rules) throw Error('Confirm your membership and save your sharing rules before continuing.');
+  try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch { storage = undefined; }
+  try { discord = await request('/api/discord/link/status', { groupId }); } catch { discord = undefined; }
   screen(4); $('read-group').href = fresh.group_url;
-  $('ready-state').textContent = 'Your personal sharing rules are saved. You can change them at any time.';
+  $('ready-state').textContent = 'Your personal sharing rules are saved. You can change them at any time.' +
+    (!storage?.linked || !storage?.available ? ' Storage setup is still pending; return here before using Discord’s private commands.' : '') +
+    (!discord?.linked ? ' Discord is not connected yet.' : '');
   $('ready-discord').hidden = !discord?.linked;
   message('Setup saved. Nothing has been posted.');
 }
@@ -156,7 +173,9 @@ $('restore-account').addEventListener('submit', event => { event.preventDefault(
 $('prepare-backup').addEventListener('submit', event => { event.preventDefault(); act(async () => {
   if ($('backup-password').value !== $('backup-repeat').value) throw Error('The two passwords do not match.');
   const imported = $('tinycloud-key-file').files[0]; if (imported?.size > 200) throw Error('Choose the small TinyCloud key file.');
-  const privateKey = imported ? (await imported.text()).trim() : Wallet.createRandom().privateKey;
+  let privateKey = imported ? (await imported.text()).trim() : Wallet.createRandom().privateKey;
+  if (/^[a-fA-F0-9]{64}$/.test(privateKey)) privateKey = '0x' + privateKey;
+  if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) throw Error('Use the TinyCloud key file containing one 64-character hexadecimal key, with or without 0x.');
   new Wallet(privateKey);
   backup = { format: 'router-account', version: 1, origin: location.origin, handle: identity.handle, routerKey: key, tinycloudKey: privateKey, createdAt: new Date().toISOString() };
   envelope = await encryptBackup(backup, $('backup-password').value);
@@ -178,12 +197,27 @@ $('connect-storage').onclick = () => act(async () => {
   backup = undefined; await checkStorage();
 });
 $('check-storage').onclick = () => act(checkStorage); $('storage-next').onclick = () => act(showDiscord);
+$('skip-storage').onclick = () => act(showRules);
 $('check-discord').onclick = () => act(showDiscord);
+$('discord-self').onchange = () => { $('confirm-discord').disabled = !$('discord-self').checked; };
 $('confirm-discord').onclick = () => act(async () => {
+  if (!$('discord-self').checked) throw Error('Confirm only the Discord account you just used yourself.');
   await request('/api/discord/pair/confirm', { pairing, groupId, confirmed: true }); await showDiscord();
+});
+$('unlink-discord').onclick = () => act(async () => {
+  if (!discord?.grantId) return;
+  await request('/api/discord/grants/revoke', { grantId: discord.grantId });
+  pairing = undefined; sessionStorage.removeItem('router_setup_pair'); await showDiscord();
 });
 $('discord-next').onclick = $('skip-discord').onclick = () => act(showRules);
 $('rules-next').onclick = () => act(finish);
 $('back').onclick = () => act(() => step === 4 ? showRules() : step === 3 ? showDiscord() : checkStorage());
 $('retry').onclick = () => act(() => step === 0 ? load() : step === 1 ? checkStorage() : step === 2 ? showDiscord() : showRules());
-act(async () => { await load(); if (params.get('rules') === 'saved' && context?.member && storage?.available) await showRules(); });
+act(async () => {
+  if (params.get('rules') === 'saved' && key) {
+    identity = await lookup(key); context = await groupContext(); groupId = context.group.id;
+    $('group-name').textContent = context.group.name; $('audience').textContent = 'Who can read notes: ' + context.group.audience;
+    if (context.member) { try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch {} await showRules(); return; }
+  }
+  await load();
+});

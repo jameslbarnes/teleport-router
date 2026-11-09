@@ -60,7 +60,7 @@ def register(ctx):
                     started = await router.begin_pair(interaction)
                     # This is an ephemeral capability link. It never enters the conversational model.
                     await interaction.followup.send(
-                        f"[Connect your Router account]({started['url']})\nOpen this private link and confirm the account you want to connect. It expires in ten minutes.",
+                        f"[Connect your Router account]({started['url']})\nOpen this in the browser where you set up Router, then confirm your accounts. Keep this link to yourself; it expires in ten minutes.",
                         ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
                     async def finish_pair():
                         try:

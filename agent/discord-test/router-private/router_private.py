@@ -123,6 +123,7 @@ class PrivateRouter:
         if not group:
             raise PrivateError("Your host needs to select this server's Router group before browser linking is available.")
         result = await self.request("pair/start", {**actor, "groupId": group,
+            "username": str(getattr(interaction.user, "name", ""))[:100],
             "displayName": str(getattr(interaction.user, "display_name", "Discord member"))[:100]})
         token = result.get("pairing", "")
         expected = self.settings["base_url"].rstrip("/") + "/group-setup?group=" + group + "#discord-pair=" + token

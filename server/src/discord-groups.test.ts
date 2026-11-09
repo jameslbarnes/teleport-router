@@ -60,6 +60,8 @@ describe('Scoped private Discord group access',()=>{
     await expect(f.call('alice','pair/poll',{...f.context,...body})).rejects.toMatchObject({status:403});
     await expect(f.call('router_bot','pair/poll',{...f.context,...body,channelId:'100000000000000020'})).rejects.toMatchObject({status:403});
     const grant = await f.call('router_bot','pair/poll',{...f.context,...body});
+    expect(await f.call('alice','link/status',{groupId:'test-group'})).toMatchObject({linked:false,pending:true});
+    await expect(f.save(grant.grant,'Before delivery acknowledgement')).rejects.toMatchObject({status:403});
     expect((await f.call('router_bot','pair/poll',{...f.context,...body})).grant).toBe(grant.grant);
     expect((await f.call('alice','pair/confirm',{...body,confirmed:true})).grant).toBeUndefined();
     await f.call('router_bot','pair/ack',{...f.context,...body});
@@ -90,6 +92,15 @@ describe('Scoped private Discord group access',()=>{
     await expect(f.call('alice','pair/confirm',{...body,confirmed:true})).rejects.toMatchObject({status:409});
     await f.call('alice','bind',{groupId:'test-group',botHandle:'router_bot',guildId:f.context.guildId,channelId:'100000000000000020'});
     await expect(f.call('bob','pair/info',body)).rejects.toMatchObject({status:403});
+  });
+  it('lets an author withdraw the last Discord permission and correct a mistaken account connection',async()=>{
+    const f=await fixture(), linked=await f.link();
+    const status=await f.call('alice','link/status',{groupId:'test-group'});
+    await f.call('alice','grants/revoke',{grantId:status.grantId});
+    await expect(f.save(linked.grant)).rejects.toMatchObject({status:403});
+    expect((await f.call('alice','link/status',{groupId:'test-group'})).linked).toBe(false);
+    expect((await f.link('alice','100000000000000099')).handle).toBe('alice');
+    expect((await f.link('bob',f.context.discordUserId)).handle).toBe('bob');
   });
   it('lets linked members use the same private group from different channels of one server',async()=>{
     const f=await fixture('guild');
