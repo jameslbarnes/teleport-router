@@ -4,6 +4,7 @@ import {authorStorage, recordCodec} from './author-store.js';
 import {discordGroups} from './discord-groups.js';
 import {derivePseudonym, hashSecretKey} from './identity.js';
 import type {GroupStore} from './group-store.js';
+import {testWallet,versionedMemoryStore} from './author-test-fixtures.js';
 
 async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const base = new MemoryStorage();
@@ -14,14 +15,14 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const layer = authorStorage(base, async b => {
     const check = () => {if (revoked.has(b.space)) throw new Error('revoked');};
     const records = data.get(b.space)!;
-    return {async get(k) {check(); return records.get(k) ?? null;}, async put(k,v) {check(); records.set(k,v);},
-      async list(p) {check(); return [...records.keys()].filter(k => k.startsWith(p));}, async delete(k) {check(); records.delete(k);}} as GroupStore;
-  }, recordCodec(Buffer.alloc(32,4)), {now: () => clock, leaseMs: 60000});
+    return versionedMemoryStore(records,check);
+  }, recordCodec(Buffer.alloc(32,4),Buffer.alloc(32,5)), {now: () => clock, leaseMs: 60000});
   for (const [handle,key] of Object.entries(keys)) {
     const user = await base.createUser({handle, secretKeyHash: hashSecretKey(key), legacyPseudonym: derivePseudonym(key)});
     if (handle !== 'router_bot') {
       data.set(handle, new Map());
-      await layer.link(user, {ownerDid:`did:test:${handle}`, space:handle, prefix:'router/', delegation:'synthetic', pseudonym:derivePseudonym(key), linkedAt:clock});
+      await layer.link(user, {ownerDid:`did:pkh:eip155:1:${testWallet(handle).address}`,ownerPublicKey:testWallet(handle).signingKey.publicKey,
+        space:handle, prefix:'router/', delegation:'synthetic', pseudonym:derivePseudonym(key), linkedAt:clock});
     }
   }
   await base.createChannel({id:'test-group', name:'Private test', visibility:'private', joinRule:'invite', createdBy:'alice', createdAt:clock,
@@ -134,7 +135,7 @@ describe('Scoped private Discord group access',()=>{
     expect(saved.entry.url).toBe(`https://router.example/e/${saved.entry.id}`);
     expect(await f.base.getEntry(saved.entry.id)).toBeNull();
     expect(f.data.get('alice')!.has(`posts/${saved.entry.id}`)).toBe(true);
-    expect(f.data.get('bob')!.size).toBe(0);
+    expect([...f.data.get('bob')!.keys()].filter(k=>k.startsWith('posts/'))).toEqual([]);
     expect((await f.layer.storage.getEntry(saved.entry.id))?.to).toEqual(['#test-group']);
     const search=await f.operate(linked.grant,{action:'search',query:'synthetic'});
     expect(search.entries.map((e:JournalEntry)=>e.id)).toEqual([saved.entry.id]);
@@ -146,7 +147,7 @@ describe('Scoped private Discord group access',()=>{
     const [first,second]=await Promise.all([f.save(grant),f.save(grant)]);
     expect(first.entry.id).toBe(second.entry.id);
     expect(second.duplicate).toBe(true);
-    expect(f.data.get('alice')!.size).toBe(1);
+    expect([...f.data.get('alice')!.keys()].filter(k=>k.startsWith('posts/'))).toEqual([`posts/${first.entry.id}`]);
     await expect(f.save(grant,'Changed')).rejects.toMatchObject({status:409});
   });
   it('rejects a wrong Discord sender, server, channel, bot or forged grant',async()=>{

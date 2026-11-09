@@ -6,7 +6,8 @@ import {resolve} from 'node:path';
 import {parseArgs} from 'node:util';
 import {Wallet} from 'ethers';
 import {TinyCloudNode,serializeDelegation,deserializeDelegation} from '@tinycloud/node-sdk';
-import {linkOwner,request} from './tinycloud-link-lib.mjs';
+import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
+import {recoverAuthorKey} from '../dist/author-records.js';
 
 const {values}=parseArgs({options:{'tinycloud-key-file':{type:'string'},'router-key-file':{type:'string'},base:{type:'string',default:'https://router.teleport.computer'},
   'space-prefix':{type:'string',default:'router'},receipt:{type:'string'},revoke:{type:'boolean',default:false},renew:{type:'boolean',default:false}}});
@@ -50,12 +51,19 @@ if(values.revoke) {
   const savedReceipt={base:base.origin,ownerDid:owner.did,routerDid:router.did,cid:grant.cid,previousCids,
     space:grant.spaceId,expiry:grant.expiry,delegation:serializeDelegation(grant)};
   await writeFile(receiptPath,JSON.stringify(savedReceipt,null,2)+'\n',{mode:0o600});
-  const status=await linkOwner({base,secretKey,signMessage:message=>new Wallet(privateKey).signMessage(message),grant,onProgress:message=>console.log(message)});
+  const status=await linkOwner({base,secretKey,signMessage:message=>new Wallet(privateKey).signMessage(message),
+    confirmRecovery:prepared=>confirmOwnerRecovery(privateKey,prepared),grant,onProgress:message=>console.log(message)});
+  // Verify the actual persisted recovery blob with the owner key before reporting success.
+  const recovery=await owner.kv.get('router/recovery-v1',{source:'network'});
+  if(!recovery.ok)throw new Error('Migration completed but owner recovery readback failed. Keep both existing keys and retry.');
+  const raw=typeof recovery.data.data==='string'?recovery.data.data:JSON.stringify(recovery.data.data);
+  recoverAuthorKey(privateKey,raw,{ownerDid:owner.did,space:grant.spaceId,prefix:grant.path}).fill(0);
   const remaining=[];
   for(const cid of previousCids) {const result=await owner.revokeDelegation(cid);if(!result.ok)remaining.push(cid);}
   savedReceipt.previousCids=remaining;
   await writeFile(receiptPath,JSON.stringify(savedReceipt,null,2)+'\n',{mode:0o600});
   if(remaining.length)console.log('The new grant is active; earlier grants still need revocation. Rerun to retry.');
-  console.log(JSON.stringify({linked:status.linked,available:status.available,space:status.space,grantExpires:grant.expiry,result:status.job.result}));
+  console.log(JSON.stringify({linked:status.linked,available:status.available,space:status.space,encryption:status.encryption,grantExpires:grant.expiry,result:status.job.result}));
+  if(status.encryption?.version===2)console.log('Your existing TinyCloud key can recover these encrypted records independently: scripts/decrypt-my-router-data.mjs. Keep the recovery-v1 record with your data.');
 }
 setTimeout(()=>process.exit(0),500).unref();

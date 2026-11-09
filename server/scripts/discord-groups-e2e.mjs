@@ -4,7 +4,7 @@ import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
 import {Wallet} from 'ethers';
 import {TinyCloudNode} from '@tinycloud/node-sdk';
-import {linkOwner,request} from './tinycloud-link-lib.mjs';
+import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 
 const port=21000+Math.floor(Math.random()*1000),base=`http://127.0.0.1:${port}`;
 const host='https://tee.node.tinycloud.xyz';
@@ -43,7 +43,7 @@ try {
     owners.push(owner);await owner.signIn();
     const grant=await owner.createDelegation({delegateDID:router.did,path:router.folder,actions:router.actions,expiryMs:365*86400000,includePublicSpace:false});
     grants.push(grant);account.owner=owner;
-    await linkOwner({base,secretKey:key,signMessage:m=>wallet.signMessage(m),grant});
+    await linkOwner({base,secretKey:key,signMessage:m=>wallet.signMessage(m),confirmRecovery:p=>confirmOwnerRecovery(ownerKey,p),grant});
     console.log('PASS synthetic '+name+' storage linked');
   }
   const [alice,bob,carol,privateBot,publicBot]=accounts,group='discord-'+suffix;

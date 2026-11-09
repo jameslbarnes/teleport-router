@@ -11,11 +11,19 @@
  * it kept. It keeps nothing: every view reads through the grant.
  */
 import type { Channel, JournalEntry, Storage } from './storage.js';
+import { createHash } from 'node:crypto';
+
+export interface ConditionalPut { ifMatch?: string; ifNoneMatch?: '*' }
+export interface VersionedValue { value: string; etag: string }
+export class GroupStoreConflictError extends Error {
+  constructor() { super('TinyCloud record changed during migration; retry after refreshing.'); }
+}
 
 /** One group's slice of its owner's store. Keys are relative to the group's prefix. */
 export interface GroupStore {
-  put(key: string, value: string): Promise<void>;
+  put(key: string, value: string, condition?: ConditionalPut): Promise<void>;
   get(key: string): Promise<string | null>;
+  getVersioned?(key: string): Promise<VersionedValue | null>;
   list(path: string): Promise<string[]>;
   delete(key: string): Promise<void>;
 }
@@ -52,9 +60,14 @@ export class MemoryGroupStore {
 
   private scoped(prefix: string): GroupStore {
     const check = () => { if (this.revoked) throw new GroupStoreRevokedError(); };
+    const etag = (value: string) => '"' + createHash('sha256').update(value).digest('hex') + '"';
     return {
-      put: async (key, value) => { check(); this.data.set(prefix + key, value); },
+      put: async (key, value, condition) => { check(); const old = this.data.get(prefix + key);
+        if ((condition?.ifNoneMatch === '*' && old !== undefined) || (condition?.ifMatch && (old === undefined || etag(old) !== condition.ifMatch)))
+          throw new GroupStoreConflictError();
+        this.data.set(prefix + key, value); },
       get: async (key) => { check(); return this.data.get(prefix + key) ?? null; },
+      getVersioned: async (key) => { check(); const value = this.data.get(prefix + key); return value === undefined ? null : { value, etag: etag(value) }; },
       list: async (path) => { check(); return [...this.data.keys()].filter(k => k.startsWith(prefix + path)).map(k => k.slice(prefix.length)); },
       delete: async (key) => { check(); this.data.delete(prefix + key); },
     };
@@ -70,8 +83,8 @@ export class MemoryGroupStore {
 type SdkResult<T> = { ok: true; data: T } | { ok: false; error?: { code?: string; message?: string } };
 export interface DelegatedKv {
   kv: {
-    put(key: string, value: unknown): Promise<SdkResult<unknown>>;
-    get(key: string): Promise<SdkResult<unknown>>;
+    put(key: string, value: unknown, options?: ConditionalPut): Promise<SdkResult<unknown>>;
+    get(key: string, options?: { source: 'network' }): Promise<SdkResult<unknown>>;
     list(options: { path: string }): Promise<SdkResult<{ keys?: string[] } | unknown>>;
     delete(key: string): Promise<SdkResult<unknown>>;
   };
@@ -86,22 +99,33 @@ function unwrap<T>(result: SdkResult<T>, what: string): T {
   if (result.ok) return result.data;
   const { code, message } = result.error ?? {};
   if (isRevokedGrant(message, code)) throw new GroupStoreRevokedError();
+  if (/precondition|if.?match|412|KV_CONFLICT/i.test(`${code} ${message}`)) throw new GroupStoreConflictError();
   throw new Error(`TinyCloud ${what} failed: ${code ?? 'error'} ${message ?? ''}`.trim());
 }
 
 /** Adapt delegated TinyCloud access (one group's grant) to a GroupStore. */
 export function groupStoreFromAccess(access: DelegatedKv): GroupStore {
+  async function read(key: string) {
+    const result = await access.kv.get(key, { source: 'network' });
+    if (!result.ok && /not.?found|404/i.test(`${result.error?.code} ${result.error?.message}`)) return null;
+    const data = unwrap(result, 'get') as { data?: unknown; headers?: { etag?: string } } | unknown;
+    const value = data && typeof data === 'object' && 'data' in data ? (data as { data?: unknown }).data : data;
+    if (value === null || value === undefined) return null;
+    return { value: typeof value === 'string' ? value : JSON.stringify(value),
+      etag: data && typeof data === 'object' && 'headers' in data ? (data as { headers?: { etag?: string } }).headers?.etag : undefined };
+  }
   return {
-    async put(key, value) {
-      unwrap(await access.kv.put(key, value), 'put');
+    async put(key, value, condition) {
+      unwrap(await access.kv.put(key, value, condition), 'put');
     },
     async get(key) {
-      const result = await access.kv.get(key);
-      if (!result.ok && /not.?found|404/i.test(`${result.error?.code} ${result.error?.message}`)) return null;
-      const data = unwrap(result, 'get') as { data?: unknown } | unknown;
-      const value = data && typeof data === 'object' && 'data' in data ? (data as { data?: unknown }).data : data;
-      if (value === null || value === undefined) return null;
-      return typeof value === 'string' ? value : JSON.stringify(value);
+      return (await read(key))?.value ?? null;
+    },
+    async getVersioned(key) {
+      const value = await read(key);
+      if (!value) return null;
+      if (!value.etag || !/^"[^"\r\n]+"$/.test(value.etag)) throw new Error('TinyCloud strong ETag required for safe migration');
+      return { value: value.value, etag: value.etag };
     },
     async list(path) {
       const data = unwrap(await access.kv.list({ path }), 'list') as { keys?: unknown };

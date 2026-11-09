@@ -1,4 +1,10 @@
 import { serializeDelegation } from '@tinycloud/node-sdk';
+import {recoverAuthorKey,ownerRecoveryProof} from '../dist/author-records.js';
+
+export function confirmOwnerRecovery(privateKey,prepared) {
+  const key=recoverAuthorKey(privateKey,prepared.recovery,prepared.context);
+  try{return ownerRecoveryProof(key,prepared.context,prepared.message,prepared.recovery);}finally{key.fill(0);}
+}
 
 export async function request(base,path,body) {
   const response=await fetch(new URL(path,base),{method:body?'POST':'GET',
@@ -9,12 +15,17 @@ export async function request(base,path,body) {
   return json;
 }
 
-/** Caller keeps both keys local. Only the scoped grant and one-time signature go to Router. */
-export async function linkOwner({base,secretKey,signMessage,grant,onProgress=()=>{}}) {
+/** Caller keeps both keys local. Prove recovery works before any record is migrated. */
+export async function linkOwner({base,secretKey,signMessage,confirmRecovery,grant,onProgress=()=>{}}) {
+  if(typeof confirmRecovery!=='function')throw new Error('A client that can decrypt the owner recovery key is required before linking.');
   const delegation=serializeDelegation(grant);
   const challenge=await request(base,'/api/tinycloud/challenge',{secret_key:secretKey,delegation});
   const signature=await signMessage(challenge.message);
-  await request(base,'/api/tinycloud/link',{secret_key:secretKey,delegation,signature});
+  const prepared=await request(base,'/api/tinycloud/recovery',{secret_key:secretKey,delegation,signature});
+  if(prepared.message!==challenge.message||prepared.context.space!==grant.spaceId||prepared.context.prefix!==grant.path)
+    throw new Error('Recovery confirmation does not match this link request.');
+  const recovery_proof=await confirmRecovery(prepared);
+  await request(base,'/api/tinycloud/link',{secret_key:secretKey,delegation,signature,recovery_proof});
   let last='';
   for(;;) {
     const status=await request(base,'/api/tinycloud/status',{secret_key:secretKey});

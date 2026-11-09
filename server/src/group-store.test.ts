@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MemoryStorage, generateEntryId, type Channel, type JournalEntry, type Storage } from './storage.js';
 import { GroupStoreRevokedError, MemoryGroupStore, groupPrefix, groupStoreFromAccess, withGroupStore, type DelegatedKv } from './group-store.js';
 
@@ -116,6 +116,21 @@ describe('TinyCloud adapter (SDK results to a group store)', () => {
 
   it('returns null for a missing key', async () => {
     expect(await groupStoreFromAccess(fakeAccess()).get('posts/none')).toBeNull();
+  });
+
+  it('requires a strong network ETag and forwards preconditions without falling back',async()=>{
+    const get=vi.fn(async()=>ok({data:'ciphertext',headers:{etag:'"version-1"'}}));
+    const put=vi.fn(async()=>fail('KV_PRECONDITION_FAILED','412 precondition failed'));
+    const store=groupStoreFromAccess(fakeAccess('',{get,put}));
+    expect(await store.getVersioned!('posts/a')).toEqual({value:'ciphertext',etag:'"version-1"'});
+    expect(get).toHaveBeenCalledWith('posts/a',{source:'network'});
+    await expect(store.put('posts/a','new',{ifMatch:'"version-1"'})).rejects.toThrow('changed');
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalledWith('posts/a','new',{ifMatch:'"version-1"'});
+    for(const etag of [undefined,'W/"weak"','unquoted']) {
+      const unsafe=groupStoreFromAccess(fakeAccess('',{get:async()=>ok({data:'x',headers:{etag}})}));
+      await expect(unsafe.getVersioned!('posts/a')).rejects.toThrow('strong ETag');
+    }
   });
 
   it('accepts list keys relative to the space root', async () => {
