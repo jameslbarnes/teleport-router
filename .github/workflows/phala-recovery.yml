@@ -26,17 +26,18 @@ jobs:
         shell: bash
         run: |
           set +e
-          timeout 40s phala api "/cvms/${PHALA_APP_ID}" -q '{id,status,in_progress,base_image,teepod,vcpu,memory,disk_size,app_url}'
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}" -q '{id,app_id,status,in_progress,base_image,resource,instance_type,compose_hash,node_info: (.node_info | {id,node_id,name}),kms_info: (.kms_info | {id,type})}'
           timeout 40s phala api "/cvms/${PHALA_APP_ID}/network" -q '{is_online,is_public,error,latest_handshake,public_urls}'
       - name: Resource health
         shell: bash
         run: |
           timeout 40s phala api "/cvms/${PHALA_APP_ID}/stats" -q '{is_online,is_public,error,status,in_progress,boot_progress,boot_error,sysinfo: (.sysinfo | {uptime,total_memory,available_memory,used_memory,free_memory,loadavg_one,loadavg_five,disks})}' || true
-      - name: Numeric capacity fields only
+      - name: Read-only resize options
         shell: bash
         run: |
-          timeout 40s phala api "/cvms/${PHALA_APP_ID}/stats" -q '{keys: keys, capacity: [paths(numbers) as $p | {path: ($p | map(tostring) | join(".")), value: getpath($p)}]}'
-          timeout 40s phala api "/cvms/${PHALA_APP_ID}" -q '{keys: keys, capacity: [paths(numbers) as $p | {path: ($p | map(tostring) | join(".")), value: getpath($p)}]}'
+          timeout 40s phala api "/instance-types/cpu" -q '{instance_types, name, family}' || true
+          timeout 40s phala api "/teepods/available" -q '{tier,capacity,nodes: [.nodes[]? | select(.id == 18 or .id == 9) | {id,name,region,available_resources,capacity,instance_types}]}' || true
+          phala cvms resize --help
       - name: Container health without environment or commands
         shell: bash
         run: |
