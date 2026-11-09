@@ -215,6 +215,8 @@ describe('Encryption migration of an already-linked author',()=>{
     vi.spyOn(f.base,'updateUser').mockRejectedValueOnce(new Error('database unavailable'));
     await expect(f.layer.link(f.users[0],f.b)).rejects.toThrow('database unavailable');
     expect((await f.base.getUser('alice'))?.tinycloud?.minRecordVersion).toBeUndefined();
+    expect(await f.layer.refresh('alice')).toBe(false);
+    await expect(f.layer.storage.addEntry(post('alice'))).rejects.toThrow('metadata is pending');
     await f.layer.link(f.users[0],f.b);
     expect(await f.layer.status('alice')).toMatchObject({encryption:{version:2}});
   });
@@ -225,6 +227,8 @@ describe('Encryption migration of an already-linked author',()=>{
     await expect(f.layer.link(f.users[0],f.b)).rejects.toThrow('acknowledgement');
     expect((await f.base.getUser('alice'))?.tinycloud?.minRecordVersion).toBe(2);
     f.map.set('posts/old-a',old);
+    expect(await f.layer.refresh('alice')).toBe(false);
+    expect(await f.layer.storage.getEntriesByHandle('alice')).toEqual([]);
     await expect(f.layer.link(f.users[0],f.b)).rejects.toThrow();
   });
 });

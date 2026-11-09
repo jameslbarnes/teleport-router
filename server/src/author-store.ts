@@ -26,7 +26,7 @@ type RecordValue = JournalEntry | Conversation | Summary;
 type NewRecord = Omit<JournalEntry, 'id'> | Omit<Conversation, 'id'> | Omit<Summary, 'id'>;
 type Kind = 'posts' | 'conversations' | 'summaries';
 type BindingUser = User & { tinycloud: AuthorBinding };
-type AuthorState = { user: BindingUser; expires: number; available: boolean; retryAt?: number; checking?: Promise<void> };
+type AuthorState = { user: BindingUser; expires: number; available: boolean; activationPending?: boolean; retryAt?: number; checking?: Promise<void> };
 const order = (a: {timestamp: number; id: string}, b: {timestamp: number; id: string}) => b.timestamp - a.timestamp || b.id.localeCompare(a.id);
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 
@@ -100,6 +100,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     state.expires = now() + leaseMs;
   }
   async function check(state: AuthorState, reload = false) {
+    if (state.activationPending) return; // uncertain metadata commit: only a verified re-link can resume
     if (!reload && state.available && state.expires > now()) return;
     if (!reload && !state.available && (state.retryAt || 0) > now()) return;
     if (state.checking) return state.checking;
@@ -180,6 +181,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       const state = handle ? authors.get(handle) : undefined;
       let saved;
       if (state) {
+        if (state.activationPending) throw new Error('TinyCloud migration metadata is pending; retry linking before publishing.');
         if (state.user.tinycloud.minRecordVersion !== 2) throw new Error('Re-link TinyCloud with your owner key to enable encrypted writes. Your waiting post is retained.');
         if (!state.available) await loadAuthor(state);
         const store = await resolveStore(state.user.tinycloud);
@@ -262,13 +264,15 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         throw new Error('This TinyCloud identity is already linked to another Router account.');
       const previous = authors.get(user.handle);
       const durableBinding = all.find(u=>u.handle===user.handle)?.tinycloud;
-      if (durableBinding && durableBinding.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
+      const knownBinding = durableBinding || previous?.user.tinycloud;
+      if (knownBinding && knownBinding.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
         throw new Error('Changing an existing TinyCloud identity requires an explicit migration.');
-      if (durableBinding && (durableBinding.space !== binding.space || durableBinding.prefix !== binding.prefix))
+      if (knownBinding && (knownBinding.space !== binding.space || knownBinding.prefix !== binding.prefix))
         throw new Error('Changing an existing TinyCloud space requires an explicit migration.');
       if (!binding.ownerPublicKey) throw new Error('A fresh owner signature is required for encrypted storage and recovery.');
-      binding = { ...binding, ownerDid: durableBinding?.ownerDid || binding.ownerDid,
-        ownerPublicKey: ownerPublicKey(binding, binding.ownerPublicKey), minRecordVersion: durableBinding?.minRecordVersion };
+      binding = { ...binding, ownerDid: knownBinding?.ownerDid || binding.ownerDid,
+        ownerPublicKey: ownerPublicKey(binding, binding.ownerPublicKey),
+        minRecordVersion: durableBinding?.minRecordVersion || previous?.user.tinycloud.minRecordVersion };
       const linked = { ...user, tinycloud: binding } as BindingUser;
       const store = await resolveStore(binding);
       await store.list('posts/'); // prove the actual grant works, not only its unsigned metadata
@@ -325,9 +329,17 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         progress(`Verified ${++copied}/${records.length} records`);
       });
       binding.minRecordVersion = 2;
-      const state={user:linked,expires:now()+leaseMs,available:true};
+      const state: AuthorState={user:linked,expires:now()+leaseMs,available:true};
       const verified = await readAuthor(state);
-      if (!await base.updateUser(user.handle,{tinycloud:binding})) throw new Error('Could not commit encrypted storage state');
+      try {
+        if (!await base.updateUser(user.handle,{tinycloud:binding})) throw new Error('Could not commit encrypted storage state');
+      } catch (err) {
+        // The database may have committed despite a lost acknowledgement. Do not
+        // reload using a stale v1 floor, or fall back to plaintext legacy writes.
+        state.activationPending = true; state.available = false; state.expires = 0;
+        authors.set(user.handle,state); evict(linked);
+        throw err;
+      }
       authors.set(user.handle,state);
       handlesByPseudonym.set(binding.pseudonym,user.handle);
       evict(linked);
@@ -350,5 +362,5 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     status: async (handle:string) => { await init(); const s=authors.get(handle);
       if(s&&!locks.has(handle))await check(s);
       return s ? {linked:true,available:s.available&&s.expires>now(),space:s.user.tinycloud.space,ownerDid:s.user.tinycloud.ownerDid,
-        encryption:{version:s.user.tinycloud.minRecordVersion || 1,setupRequired:s.user.tinycloud.minRecordVersion !== 2}} : {linked:false}; } };
+        encryption:{version:s.user.tinycloud.minRecordVersion || 1,setupRequired:s.user.tinycloud.minRecordVersion !== 2 || !!s.activationPending}} : {linked:false}; } };
 }
