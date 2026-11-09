@@ -159,7 +159,7 @@ class PublisherTests(unittest.TestCase):
         class Opener:
             def open(self, req, timeout):
                 calls.append(req)
-                result = original if req.method == "GET" else {**message(data), "content": original["content"]}
+                result = original if req.get_method() == "GET" else {**message(data), "content": original["content"]}
                 return io.BytesIO(json.dumps(result).encode())
         result = publisher.publish(data, "synthetic", Opener())
         self.assertTrue(result["changed"])

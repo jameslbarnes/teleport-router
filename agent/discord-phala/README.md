@@ -60,7 +60,8 @@ sync; do not have the task follow a changing development worktree.
    deployment may interrupt Router and the cohosted Matrix bridge. Plan for the
    same brief outage seen in previous deployments. No new CVM is provisioned.
 2. Check current Phala disk/memory headroom and the Tulip operations board. The
-   Nov 9 01:18 UTC diagnostic showed 995 MB available of 1.94 GB total memory.
+   Nov 9 01:42 UTC diagnostic showed 991 MB available of 1.94 GB total memory,
+   one vCPU, and 18.26 GB free on the reported 20.26 GB filesystem.
    CI measures offline Linux startup under the 512 MiB cap; this is not a live
    workload measurement or evidence of a real Discord reply.
 3. Copy only the existing bot/model/public/private service credentials into the

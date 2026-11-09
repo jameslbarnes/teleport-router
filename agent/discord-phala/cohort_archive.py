@@ -24,11 +24,12 @@ def short_name(project):
 
 
 def export_archive(root: Path):
-    names = {"programme-team": "ARIA programme team"}
+    names = {}
     roster = json.loads((root / "roster/roster.json").read_text(encoding="utf-8"))
     for person in roster["people"]:
         if person.get("project_id") and person.get("project"):
             names.setdefault(person["project_id"], person["project"])
+    names.setdefault("programme-team", "ARIA programme team")
     library = json.loads((root / "library/library.json").read_text(encoding="utf-8"))["records"]
     issues = {}
     for path in sorted((root / "digests/posted").glob("*.json")):
