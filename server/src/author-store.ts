@@ -2,11 +2,12 @@
  * The in-memory index never falls back to legacy copies for a linked author.
  * A grant check gives a short read lease; failed/expired checks evict that author.
  */
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import { tokenize, encodePageCursor, generateEntryId, type Storage, type User,
   type JournalEntry, type Conversation, type Summary, type DailySummary } from './storage.js';
 import type { GroupStore } from './group-store.js';
 import { isPublicNotebookEntry } from './public-views.js';
+import { recordCodec, canonical, RECOVERY_KEY, ownerPublicKey } from './author-records.js';
+export { recordCodec } from './author-records.js';
 
 export interface AuthorBinding {
   ownerDid: string;
@@ -15,6 +16,10 @@ export interface AuthorBinding {
   delegation: string;
   pseudonym: string;
   linkedAt: number;
+  /** Recovered from a verified owner link signature. Never the private key. */
+  ownerPublicKey?: string;
+  /** Durable downgrade barrier, committed only after migration readback. */
+  minRecordVersion?: 2;
 }
 export type AuthorStoreResolver = (binding: AuthorBinding) => Promise<GroupStore>;
 type RecordValue = JournalEntry | Conversation | Summary;
@@ -24,28 +29,6 @@ type BindingUser = User & { tinycloud: AuthorBinding };
 type AuthorState = { user: BindingUser; expires: number; available: boolean; retryAt?: number; checking?: Promise<void> };
 const order = (a: {timestamp: number; id: string}, b: {timestamp: number; id: string}) => b.timestamp - a.timestamp || b.id.localeCompare(a.id);
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
-const canonical = (v: unknown): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
-  ? Object.fromEntries(Object.entries(value).filter(([, x]) => x !== undefined).sort(([a], [b]) => a.localeCompare(b))) : value);
-
-/** Store integrity is separate from ownership. An author cannot edit JSON to impersonate
- * another author, change group addressing, or manufacture a previously moderated record. */
-export function recordCodec(key: Uint8Array) {
-  const mac = (owner: string, kind: Kind, value: RecordValue) => createHmac('sha256', key)
-    .update(`router-record-v1\0${owner}\0${kind}\0${canonical(value)}`).digest('hex');
-  return {
-    encode(owner: string, kind: Kind, value: RecordValue) { return canonical({ version: 1, value, mac: mac(owner, kind, value) }); },
-    decode(raw: string, owner: string, kind: Kind, id: string): RecordValue {
-      const record = JSON.parse(raw);
-      const value = record?.value;
-      if (record.version !== 1 || !value || value.id !== id || !validId(id)
-        || !Number.isFinite(value.timestamp) || typeof value.content !== 'string'
-        || !/^[a-f0-9]{64}$/.test(record.mac || '')) throw new Error('Invalid author record');
-      const expected = Buffer.from(mac(owner, kind, value), 'hex');
-      if (!timingSafeEqual(expected, Buffer.from(record.mac, 'hex'))) throw new Error('Author record integrity check failed');
-      return value;
-    },
-  };
-}
 
 async function parallel<T>(items: T[], fn: (item: T) => Promise<void>, concurrency = 8) {
   let next = 0;
@@ -93,7 +76,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         if (key !== `${kind}/${id}` || !validId(id)) throw new Error('Invalid author record path');
         const raw = await store.get(key);
         if (raw === null) return;
-        const value = codec.decode(raw, binding.ownerDid, kind, id);
+        const value = codec.decode(raw, binding, kind, id, binding.minRecordVersion || 1);
         if (!belongs(value, state.user) || ('handle' in value && value.handle && value.handle !== state.user.handle))
           throw new Error('Author identity mismatch');
         const existing = index(kind).get(id);
@@ -104,6 +87,12 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     return loaded;
   }
   async function loadAuthor(state: AuthorState) {
+    const binding = state.user.tinycloud;
+    if (binding.minRecordVersion === 2) {
+      const recovery = await (await resolveStore(binding)).get(RECOVERY_KEY);
+      if (!recovery || !binding.ownerPublicKey) throw new Error('Owner recovery is missing');
+      codec.verifyRecovery(recovery, binding, binding.ownerPublicKey);
+    }
     const loaded = await readAuthor(state);
     evict(state.user);
     for (const { kind, value } of loaded) index(kind).set(value.id, value);
@@ -191,10 +180,11 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       const state = handle ? authors.get(handle) : undefined;
       let saved;
       if (state) {
+        if (state.user.tinycloud.minRecordVersion !== 2) throw new Error('Re-link TinyCloud with your owner key to enable encrypted writes. Your waiting post is retained.');
         if (!state.available) await loadAuthor(state);
         const store = await resolveStore(state.user.tinycloud);
         saved = { ...value, id: (value as RecordValue).id || generateEntryId(), keywords: tokenize(value.content) } as RecordValue;
-        await store.put(`${kind}/${saved.id}`, codec.encode(state.user.tinycloud.ownerDid, kind, saved));
+        await store.put(`${kind}/${saved.id}`, codec.encode(state.user.tinycloud, kind, saved));
         state.available = true;
         state.expires = now() + leaseMs;
       } else saved = await (kind === 'posts' ? base.addEntry(value as JournalEntry)
@@ -260,8 +250,9 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     const value = Reflect.get(target,prop,receiver); return typeof value === 'function' ? value.bind(target) : value;
   }});
 
-  /** Copy, read back, activate, then remove verified legacy records. Serialized per author.
-   * Safe to retry: the destination is overwritten only if different, IDs are preserved. */
+  /** Encrypt, read back, commit the durable v2 floor, then clean up legacy copies.
+   * Existing TinyCloud records are authoritative. Never restore them from a stale
+   * cache/Firestore copy, and never replace an owner edit/deletion without its ETag. */
   async function link(user: User, binding: AuthorBinding, progress: (message: string) => void = () => {}) {
     await init();
     handlesByPseudonym.set(binding.pseudonym,user.handle);
@@ -270,15 +261,46 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       if (all.some(u=>u.handle!==user.handle&&u.tinycloud?.ownerDid.toLowerCase()===binding.ownerDid.toLowerCase()))
         throw new Error('This TinyCloud identity is already linked to another Router account.');
       const previous = authors.get(user.handle);
-      if (previous && previous.user.tinycloud.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
+      const durableBinding = all.find(u=>u.handle===user.handle)?.tinycloud;
+      if (durableBinding && durableBinding.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
         throw new Error('Changing an existing TinyCloud identity requires an explicit migration.');
-      if (previous && (previous.user.tinycloud.space !== binding.space || previous.user.tinycloud.prefix !== binding.prefix))
+      if (durableBinding && (durableBinding.space !== binding.space || durableBinding.prefix !== binding.prefix))
         throw new Error('Changing an existing TinyCloud space requires an explicit migration.');
+      if (!binding.ownerPublicKey) throw new Error('A fresh owner signature is required for encrypted storage and recovery.');
+      binding = { ...binding, ownerDid: durableBinding?.ownerDid || binding.ownerDid,
+        ownerPublicKey: ownerPublicKey(binding, binding.ownerPublicKey), minRecordVersion: durableBinding?.minRecordVersion };
       const linked = { ...user, tinycloud: binding } as BindingUser;
       const store = await resolveStore(binding);
       await store.list('posts/'); // prove the actual grant works, not only its unsigned metadata
+      if (!store.getVersioned) throw new Error('TinyCloud conditional writes are required for encryption migration');
+      let recovery = await store.get(RECOVERY_KEY);
+      if (!recovery) {
+        recovery = codec.createRecovery(binding, binding.ownerPublicKey!);
+        await store.put(RECOVERY_KEY, recovery, {ifNoneMatch:'*'});
+      }
+      codec.verifyRecovery(recovery, binding, binding.ownerPublicKey!);
+      if (await store.get(RECOVERY_KEY) !== recovery) throw new Error('Owner recovery readback failed');
+      let encrypted = 0;
+      // Migrate the current node contents first, with conditional writes. Partial
+      // completion is safe to resume while the durable minimum remains v1.
+      for (const kind of ['posts','conversations','summaries'] as Kind[]) {
+        await parallel(await store.list(`${kind}/`), async key => {
+          const id = key.slice(kind.length + 1);
+          if (key !== `${kind}/${id}` || !validId(id)) throw new Error('Invalid author record path');
+          const current = await store.getVersioned!(key);
+          if (!current) return; // owner deleted it before we read
+          const value = codec.decode(current.value, binding, kind, id, binding.minRecordVersion || 1);
+          if (!belongs(value, linked) || ('handle' in value && value.handle && value.handle !== linked.handle)) throw new Error('Author identity mismatch');
+          if (JSON.parse(current.value).version === 1) {
+            const wire = codec.encode(binding, kind, value);
+            await store.put(key, wire, {ifMatch:current.etag});
+            if (await store.get(key) !== wire) throw new Error('Encrypted record readback failed');
+            progress(`Encrypted and verified ${++encrypted} records`);
+          }
+        });
+      }
       const records: {kind:Kind;value:RecordValue}[]=[];
-      for (const kind of ['posts','conversations','summaries'] as Kind[])
+      if (!previous) for (const kind of ['posts','conversations','summaries'] as Kind[])
         for(const value of index(kind).values()) if(belongs(value,linked)) records.push({kind,value});
       // Include leftover legacy records on a retry, even after a previous activation
       // hid them from the live index. This makes partial cleanup recoverable.
@@ -290,14 +312,22 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       if(extra.getSummaries) for(const v of await extra.getSummaries(100000))addLegacy('summaries',v);
       let copied=0;
       await parallel(records, async ({kind,value})=>{
-        const key=`${kind}/${value.id}`, wire=codec.encode(binding.ownerDid,kind,value);
-        if(await store.get(key)!==wire) await store.put(key,wire);
-        if(await store.get(key)!==wire) throw new Error('TinyCloud readback did not match the original record.');
+        const key=`${kind}/${value.id}`;
+        const current=await store.get(key);
+        if (!current && !previous) {
+          const wire=codec.encode(binding,kind,value);
+          await store.put(key,wire,{ifNoneMatch:'*'});
+          if(await store.get(key)!==wire) throw new Error('TinyCloud readback did not match the original record.');
+          encrypted++;
+        } else if (current && !previous && canonical(codec.decode(current,binding,kind,value.id)) !== canonical(value)) {
+          throw new Error('TinyCloud destination differs from the original record.');
+        }
         progress(`Verified ${++copied}/${records.length} records`);
       });
+      binding.minRecordVersion = 2;
       const state={user:linked,expires:now()+leaseMs,available:true};
       const verified = await readAuthor(state);
-      await base.updateUser(user.handle,{tinycloud:binding});
+      if (!await base.updateUser(user.handle,{tinycloud:binding})) throw new Error('Could not commit encrypted storage state');
       authors.set(user.handle,state);
       handlesByPseudonym.set(binding.pseudonym,user.handle);
       evict(linked);
@@ -313,11 +343,12 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
           try { await extra.deleteDailySummary(s.date); } catch { failed.push(`daily/${s.date}`); }
         }
       }
-      return {copied,legacyCleanupPending:failed.length};
+      return {copied,encrypted,legacyCleanupPending:failed.length};
     });
   }
   return { storage, ready, link, refresh: async (handle:string) => { await init(); const state=authors.get(handle); if(state)await check(state,true); return state?.available??false; },
     status: async (handle:string) => { await init(); const s=authors.get(handle);
       if(s&&!locks.has(handle))await check(s);
-      return s ? {linked:true,available:s.available&&s.expires>now(),space:s.user.tinycloud.space,ownerDid:s.user.tinycloud.ownerDid} : {linked:false}; } };
+      return s ? {linked:true,available:s.available&&s.expires>now(),space:s.user.tinycloud.space,ownerDid:s.user.tinycloud.ownerDid,
+        encryption:{version:s.user.tinycloud.minRecordVersion || 1,setupRequired:s.user.tinycloud.minRecordVersion !== 2}} : {linked:false}; } };
 }

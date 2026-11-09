@@ -1060,7 +1060,7 @@ const authorCloud = authorIdentity ? (await import('./tinycloud-group-store.js')
 }) : null;
 const baseStorage: Storage = useFirestore ? new FirestoreStorage() : new MemoryStorage();
 const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
-  binding => authorCloud.accessFor(binding.delegation), recordCodec(authorIdentity.recordKey),
+  binding => authorCloud.accessFor(binding.delegation), recordCodec(authorIdentity.recordKey, authorIdentity.encryptionKey),
   {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
 const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
@@ -6960,25 +6960,26 @@ const server = createServer(async (req, res) => {
         if (url.pathname === '/api/tinycloud/challenge') {
           for(const [handle,c] of authorChallenges) if(c.expires<Date.now()) authorChallenges.delete(handle);
           const expires=Date.now()+10*60*1000;
-          const message=`Link TinyCloud to Teleport Router\nServer: ${BASE_URL}\nRouter identity: ${authorIdentity.did}\nRouter account: ${user.handle}\nOwner: ${ownerDid}\nGrant SHA-256: ${grantHash}\nNonce: ${randomUUID()}\nExpires: ${new Date(expires).toISOString()}`;
+          const message=`Link TinyCloud to Teleport Router\nEncrypt published records in my space and enable recovery with my TinyCloud key.\nServer: ${BASE_URL}\nRouter identity: ${authorIdentity.did}\nRouter account: ${user.handle}\nOwner: ${ownerDid}\nGrant SHA-256: ${grantHash}\nNonce: ${randomUUID()}\nExpires: ${new Date(expires).toISOString()}`;
           authorChallenges.set(user.handle,{message,expires,grantHash});
           res.writeHead(200); res.end(JSON.stringify({message,expires})); return;
         }
         const challenge=authorChallenges.get(user.handle);
         if(!challenge||challenge.expires<Date.now()||challenge.grantHash!==grantHash) throw new Error('Request a fresh linking challenge.');
-        const {verifyMessage}=await import('ethers');
+        const {verifyMessage,SigningKey,hashMessage}=await import('ethers');
         if(typeof parsed.signature!=='string'||verifyMessage(challenge.message,parsed.signature).toLowerCase()!==match[1].toLowerCase())
           throw new Error('The TinyCloud owner signature does not match this grant.');
         if(authorJobs.get(user.handle)?.status==='running') { res.writeHead(409); res.end(JSON.stringify({error:'Your migration is already running.'})); return; }
         authorChallenges.delete(user.handle);
         const job={status:'running' as 'running'|'complete'|'failed',progress:'Waiting to verify and move published records.'};
         authorJobs.set(user.handle,job);
-        const binding={ownerDid,space:grant.spaceId,prefix:grant.path,delegation:wire,pseudonym:derivePseudonym(parsed.secret_key),linkedAt:Date.now()};
+        const binding={ownerDid,space:grant.spaceId,prefix:grant.path,delegation:wire,pseudonym:derivePseudonym(parsed.secret_key),linkedAt:Date.now(),
+          ownerPublicKey:SigningKey.recoverPublicKey(hashMessage(challenge.message),parsed.signature)};
         // Serialize account links to enforce one TinyCloud identity per Router account.
         authorLinkQueue=authorLinkQueue.catch(()=>{}).then(async()=>{
           try {
             const result=await authorLayer.link(user,binding,message=>{job.progress=message;});
-            Object.assign(job,{status:'complete',result,progress:'Migration verified; new posts use your TinyCloud space.'});
+            Object.assign(job,{status:'complete',result,progress:'Encrypted migration verified; your TinyCloud key can recover your records independently.'});
           } catch {
             Object.assign(job,{status:'failed',error:'Migration did not complete. Existing verified data is retained; retry or inspect the storage connection.'});
           }
@@ -6994,7 +6995,7 @@ const server = createServer(async (req, res) => {
       if (authorIdentity && authorCloud) {
         res.writeHead(200,{'Cache-Control':'no-store'});
         res.end(JSON.stringify({did:authorIdentity.did,host:authorCloud.host,folder:'router/',actions:GROUP_GRANT_ACTIONS,
-          mode:'authors',keySource:authorIdentity.source,revocationWindowSeconds:60})); return;
+          mode:'authors',keySource:authorIdentity.source,revocationWindowSeconds:60,recordEncryption:'aes-256-gcm-v2',ownerRecovery:'secp256k1-v1'})); return;
       }
       if (!groups?.tinycloud) {
         res.writeHead(404);

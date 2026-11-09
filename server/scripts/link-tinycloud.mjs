@@ -56,6 +56,7 @@ if(values.revoke) {
   savedReceipt.previousCids=remaining;
   await writeFile(receiptPath,JSON.stringify(savedReceipt,null,2)+'\n',{mode:0o600});
   if(remaining.length)console.log('The new grant is active; earlier grants still need revocation. Rerun to retry.');
-  console.log(JSON.stringify({linked:status.linked,available:status.available,space:status.space,grantExpires:grant.expiry,result:status.job.result}));
+  console.log(JSON.stringify({linked:status.linked,available:status.available,space:status.space,encryption:status.encryption,grantExpires:grant.expiry,result:status.job.result}));
+  if(status.encryption?.version===2)console.log('Your existing TinyCloud key can recover these encrypted records independently: scripts/decrypt-my-router-data.mjs. Keep the recovery-v1 record with your data.');
 }
 setTimeout(()=>process.exit(0),500).unref();
