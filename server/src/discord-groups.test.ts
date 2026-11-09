@@ -42,6 +42,55 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
 }
 
 describe('Scoped private Discord group access',()=>{
+  it('pairs a real Discord context with an author-confirmed account without exposing the grant to the browser', async()=>{
+    const f = await fixture('guild');
+    const start = await f.call('router_bot','pair/start',{...f.context,groupId:'test-group',displayName:'Alice'});
+    expect(start.url).toMatch(/^https:\/\/router.example\/group-setup\?group=test-group#discord-pair=RD-PAIR-/);
+    const body = {groupId:'test-group',pairing:start.pairing};
+    await expect(f.call('alice','pair/start',{...f.context,groupId:'test-group'})).rejects.toMatchObject({status:403});
+    await expect(f.call('outsider','pair/info',body)).rejects.toMatchObject({status:403});
+    const info = await f.call('alice','pair/info',body);
+    expect(info).toMatchObject({status:'waiting',displayName:'Alice',discordUserId:f.context.discordUserId});
+    expect((await f.call('router_bot','pair/poll',{...f.context,...body})).status).toBe('waiting');
+    await expect(f.call('router_bot','pair/ack',{...f.context,...body})).rejects.toMatchObject({status:409});
+    await expect(f.call('alice','pair/confirm',body)).rejects.toMatchObject({status:400});
+    const confirmed = await f.call('alice','pair/confirm',{...body,confirmed:true});
+    expect(confirmed.status).toBe('approved'); expect(confirmed.grant).toBeUndefined();
+    await expect(f.call('bob','pair/confirm',{...body,confirmed:true})).rejects.toMatchObject({status:403});
+    await expect(f.call('alice','pair/poll',{...f.context,...body})).rejects.toMatchObject({status:403});
+    await expect(f.call('router_bot','pair/poll',{...f.context,...body,channelId:'100000000000000020'})).rejects.toMatchObject({status:403});
+    const grant = await f.call('router_bot','pair/poll',{...f.context,...body});
+    expect((await f.call('router_bot','pair/poll',{...f.context,...body})).grant).toBe(grant.grant);
+    expect((await f.call('alice','pair/confirm',{...body,confirmed:true})).grant).toBeUndefined();
+    await f.call('router_bot','pair/ack',{...f.context,...body});
+    expect(await f.call('router_bot','pair/poll',{...f.context,...body})).toEqual({status:'connected'});
+    expect((await f.call('alice','link/status',{groupId:'test-group'})).linked).toBe(true);
+    expect((await f.save(grant.grant,'Browser-linked note')).entry.handle).toBe('alice');
+    await f.base.removeSubscriber('test-group','alice');
+    await expect(f.call('alice','link/status',{groupId:'test-group'})).rejects.toMatchObject({status:403});
+  });
+  it('expires pairing links and rechecks changed group access before delivering a grant',async()=>{
+    const f=await fixture();
+    const start=()=>f.call('router_bot','pair/start',{...f.context,groupId:'test-group'});
+    const first=await start(), second=await start();
+    await expect(f.call('alice','pair/info',{groupId:'test-group',pairing:first.pairing})).rejects.toMatchObject({status:410});
+    const body={groupId:'test-group',pairing:second.pairing};
+    await expect(f.call('alice','pair/confirm',{...body,groupId:'another-group',confirmed:true})).rejects.toMatchObject({status:403});
+    await f.call('alice','pair/confirm',{...body,confirmed:true});
+    await f.base.removeSubscriber('test-group','alice');
+    await expect(f.call('router_bot','pair/poll',{...body,...f.context})).rejects.toMatchObject({status:403});
+    f.advance(600001);
+    await expect(f.call('router_bot','pair/poll',{...body,...f.context})).rejects.toMatchObject({status:410});
+  });
+  it('rejects pairing after a binding change or unavailable author storage',async()=>{
+    const f=await fixture();
+    const first=await f.call('router_bot','pair/start',{...f.context,groupId:'test-group'});
+    const body={groupId:'test-group',pairing:first.pairing};
+    f.revoked.add('alice'); f.advance();
+    await expect(f.call('alice','pair/confirm',{...body,confirmed:true})).rejects.toMatchObject({status:409});
+    await f.call('alice','bind',{groupId:'test-group',botHandle:'router_bot',guildId:f.context.guildId,channelId:'100000000000000020'});
+    await expect(f.call('bob','pair/info',body)).rejects.toMatchObject({status:403});
+  });
   it('lets linked members use the same private group from different channels of one server',async()=>{
     const f=await fixture('guild');
     const otherChannel='100000000000000020';

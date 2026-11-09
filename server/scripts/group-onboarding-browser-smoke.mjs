@@ -42,6 +42,10 @@ try {
   const newContext = async (options = {}) => {
     const context = await browser.newContext(options);
     await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
+    // This local walkthrough tests page state, account creation and saved rules. Real
+    // TinyCloud linking is exercised separately; these two unavailable local services are explicit fixtures.
+    await context.route('**/api/tinycloud/status', route => route.fulfill({ json: { linked: true, available: true, encryption: { version: 2 } } }));
+    await context.route('**/api/discord/link/status', route => route.fulfill({ json: { configured: false, linked: false } }));
     return context;
   };
   const context = await newContext({ viewport: { width: 1160, height: 1000 } });
@@ -58,15 +62,15 @@ try {
     await page.locator('#status').filter({ hasText: `Saved · revision ${revision}` }).waitFor();
   };
   await page.goto(inviteUrl);
-  await page.locator('#invite-channel-name').filter({ hasText: 'Reading club' }).waitFor();
-  assert.equal(await page.locator('#join-form').isVisible(), true);
+  await page.locator('#group-name').filter({ hasText: 'Reading club' }).waitFor();
+  assert.equal(await page.locator('#create-account').isVisible(), true);
   await page.locator('#handle').fill('local_reader');
-  await page.locator('#submit-btn:enabled').waitFor();
-  await page.locator('#submit-btn').click();
-  await page.locator('#success-state h2').filter({ hasText: "You're in #reading-club" }).waitFor();
-  await page.locator('#step-connect-next-btn').click();
-  assert.match(await page.locator('#posting-rules-link').getAttribute('href'), /group=reading-club/);
-  await page.locator('#posting-rules-link').click();
+  await page.locator('#create-account button').click();
+  await page.locator('#storage-ready').waitFor();
+  if (evidence) await page.screenshot({ path: resolve(evidence, 'setup-desktop.png'), fullPage: true });
+  await page.locator('#storage-next').click();
+  await page.locator('#skip-discord').click();
+  await page.locator('#choose-rules').click();
   await page.locator('#group-start').waitFor();
   assert.equal((await rules()).revision, 0);
   assert.match(await page.locator('#group-audience').textContent(), /including people who join later/);
@@ -92,7 +96,8 @@ try {
   assert.equal((await rules()).revision, 2);
   page.on('dialog', dialog => dialog.accept());
   await page.goto(inviteUrl);
-  await page.waitForURL('**/posting-rules?group=reading-club');
+  await page.locator('#skip-discord').click();
+  await page.locator('#choose-rules').click();
   await page.locator('#group-start').waitFor();
   assert.equal((await rules()).revision, 2);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -122,22 +127,58 @@ try {
   const second = await newContext({ viewport: { width: 390, height: 844 } });
   const failure = await second.newPage();
   await failure.goto(inviteUrl);
-  await failure.locator('#invite-channel-name').waitFor();
+  await failure.locator('#group-name').filter({ hasText: 'Reading club' }).waitFor();
   await failure.route('**/api/channels/reading-club/join', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"synthetic unavailable"}' }));
   await failure.locator('#handle').fill('local_retry');
-  await failure.locator('#submit-btn:enabled').waitFor();
-  await failure.locator('#submit-btn').click();
-  await failure.locator('#join-error').waitFor();
-  assert.equal(await failure.locator('#join-form').isVisible(), false);
-  assert.equal(await failure.locator('#retry-join').isVisible(), true);
+  await failure.locator('#create-account button').click();
+  await failure.locator('#status.error').waitFor();
+  assert.equal(await failure.locator('#create-account').isVisible(), false);
+  assert.equal(await failure.locator('#join-group').isVisible(), true);
   assert.equal(await failure.evaluate(() => !!localStorage.getItem('router_key')), true);
   await failure.unroute('**/api/channels/reading-club/join');
-  await failure.locator('#retry-join').click();
-  await failure.waitForURL('**/posting-rules?group=reading-club');
-  await failure.locator('#group-start').waitFor();
+  await failure.locator('#join-group').click();
+  await failure.locator('#storage-ready').waitFor();
   await second.close();
+
+  // Owner recovery file is created and encrypted in the real browser, then unlocked
+  // after a reload. No owner private key is sent to the local Router endpoints.
+  const recoveryContext = await newContext({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
+  await recoveryContext.route('**/api/tinycloud/status', route => route.fulfill({ json: { linked: false } }));
+  const recoveryPage = await recoveryContext.newPage();
+  const requests = []; recoveryPage.on('request', r => { if (r.postData()) requests.push(r.postData()); });
+  recoveryPage.on('pageerror', error => errors.push(error.message));
+  await recoveryPage.goto(inviteUrl);
+  await recoveryPage.locator('#handle').fill('local_recovery');
+  await recoveryPage.locator('#create-account button').click();
+  await recoveryPage.locator('#storage-new').waitFor();
+  await recoveryPage.locator('#backup-password').fill('synthetic browser recovery password');
+  await recoveryPage.locator('#backup-repeat').fill('synthetic browser recovery password');
+  const downloaded = recoveryPage.waitForEvent('download');
+  await recoveryPage.locator('#prepare-backup button').click();
+  const stream = await (await downloaded).createReadStream(), chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const envelope = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  assert.equal(envelope.format, 'router-encrypted-backup');
+  const { decryptBackup } = await import('../../browser/src/recovery.mjs');
+  const recovered = await decryptBackup(envelope, 'synthetic browser recovery password');
+  assert.equal(recovered.handle, 'local_recovery');
+  assert.equal(requests.some(body => body.includes(recovered.tinycloudKey)), false);
+  assert.equal(await recoveryPage.evaluate(privateKey => JSON.stringify(localStorage).includes(privateKey), recovered.tinycloudKey), false);
+  assert.equal(await recoveryPage.locator('#connect-storage').isDisabled(), true);
+  if (evidence) await recoveryPage.screenshot({ path: resolve(evidence, 'recovery-phone.png'), fullPage: true });
+  assert.equal(await recoveryPage.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await recoveryPage.reload();
+  await recoveryPage.locator('#storage-unlock').waitFor();
+  await recoveryPage.locator('#unlock-password').fill('incorrect browser recovery password');
+  await recoveryPage.locator('#unlock-backup button').click();
+  await recoveryPage.locator('#status.error').waitFor();
+  assert.equal(await recoveryPage.locator('#storage-connect').isVisible(), false);
+  await recoveryPage.locator('#unlock-password').fill('synthetic browser recovery password');
+  await recoveryPage.locator('#unlock-backup button').click();
+  await recoveryPage.locator('#storage-connect').waitFor();
+  await recoveryContext.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: fresh join; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. No page errors.');
+  console.log('PASS: fresh join; encrypted browser backup/reload; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
 } finally {
   await browser?.close();
   child.kill();

@@ -4,6 +4,13 @@
   const form = $('rules-form');
   const key = localStorage.getItem('router_key');
   const groupId = new URLSearchParams(location.search).get('group');
+  if (groupId && new URLSearchParams(location.search).get('onboarding') === '1') {
+    const resume = document.createElement('a');
+    resume.href = '/group-setup?group=' + encodeURIComponent(groupId) + '&rules=saved';
+    resume.textContent = 'Continue group setup';
+    resume.className = 'button';
+    $('after-save').prepend(resume);
+  }
   let groupContext;
   const textFields = ['purpose', 'share', 'avoid', 'style', 'instructions'];
   let revision = 0;

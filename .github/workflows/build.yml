@@ -184,6 +184,10 @@ jobs:
       - name: Check group onboarding in a browser
         working-directory: server
         run: |
+          npm run build
+          npm --prefix ../browser ci
+          npm --prefix ../browser run build
+          npm --prefix ../browser test
           npm install --prefix "$RUNNER_TEMP/router-browser" --ignore-scripts --no-audit --no-fund playwright@1.59.1
           node "$RUNNER_TEMP/router-browser/node_modules/playwright/cli.js" install --with-deps chromium
           PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/group-onboarding-browser-smoke.mjs

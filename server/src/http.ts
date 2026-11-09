@@ -9023,7 +9023,9 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
       // Map routes to HTML files.
       // The published Router CLI opens /setup/cli?port=...&nonce=... and
       // waits for the browser flow to POST the generated key back to localhost.
-      if (filePath === '/setup/cli') {
+      if (filePath === '/group-setup' || (filePath === '/join' && url.searchParams.has('channelinvite'))) {
+        filePath = '/group-setup.html';
+      } else if (filePath === '/setup/cli') {
         filePath = '/join.html';
       } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/tutorial', '/cohort', '/posting-rules'].includes(filePath)) {
         filePath = `${filePath}.html`;
@@ -9050,6 +9052,10 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
 
       try {
         const content = await readFile(fullPath);
+        if (filePath === '/group-setup.html') {
+          res.setHeader('Referrer-Policy', 'no-referrer');
+          res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+        }
         res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
         res.end(content);
         return;
