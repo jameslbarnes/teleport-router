@@ -32,6 +32,11 @@ jobs:
         shell: bash
         run: |
           timeout 40s phala api "/cvms/${PHALA_APP_ID}/stats" -q '{is_online,is_public,error,status,in_progress,boot_progress,boot_error,sysinfo: (.sysinfo | {uptime,total_memory,available_memory,used_memory,free_memory,loadavg_one,loadavg_five,disks})}' || true
+      - name: Numeric capacity fields only
+        shell: bash
+        run: |
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}/stats" -q '{keys: keys, capacity: [paths(numbers) as $p | {path: ($p | map(tostring) | join(".")), value: getpath($p)}]}'
+          timeout 40s phala api "/cvms/${PHALA_APP_ID}" -q '{keys: keys, capacity: [paths(numbers) as $p | {path: ($p | map(tostring) | join(".")), value: getpath($p)}]}'
       - name: Container health without environment or commands
         shell: bash
         run: |
