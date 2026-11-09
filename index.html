@@ -2828,7 +2828,7 @@
                     throw new Error(data.error || 'Failed to create invite link');
                 }
 
-                const inviteUrl = `${window.location.origin}/?view=channel&id=${encodeURIComponent(channelId)}&invite=${encodeURIComponent(data.token)}`;
+                const inviteUrl = `${window.location.origin}/join?channelinvite=${encodeURIComponent(data.token)}`;
 
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     await navigator.clipboard.writeText(inviteUrl);

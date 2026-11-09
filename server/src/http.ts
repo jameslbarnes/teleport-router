@@ -31,6 +31,7 @@ import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE, POSTING_CADENCE_INSTRUCTIONS, POSTING_STYLE_INSTRUCTIONS } from './posting-rules.js';
+import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt, SHARING_NOTICE_INSTRUCTIONS } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
@@ -390,6 +391,10 @@ export const SYSTEM_SKILLS: Skill[] = [
         handle: {
           type: 'string',
           description: 'Filter to entries by this author (e.g. "james" without @). If provided without query, returns their recent entries.',
+        },
+        group_id: {
+          type: 'string',
+          description: 'Read only this Router group (for example "book-club"). You must be a current member. Searches the latest 500 group notes, or returns recent notes without a query. Excludes other groups, public notebook results and Matrix messages.',
         },
         limit: {
           type: 'number',
@@ -1935,16 +1940,35 @@ function createMCPServer(secretKey: string) {
       handleFilter,
       limit,
       since,
+      groupId,
     }: {
       query?: string;
       handleFilter?: string;
       limit: number;
       since?: number;
+      groupId?: string;
     }): Promise<Array<{ id: string; text: string; timestamp: number; followed: boolean }>> => {
       let entryResults: JournalEntry[] = [];
       let conversationResults: Conversation[] = [];
 
-      if (handleFilter && !query) {
+      if (groupId !== undefined) {
+        const viewer = await storage.getUserByKeyHash(keyHash);
+        const channel = isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+        if (!viewer || !channel?.subscribers.some(s => s.handle === viewer.handle)) {
+          throw new PostingRulesError('You must be a current member to read this group. No other audiences were searched.', 403);
+        }
+        const terms = query ? tokenize(query) : [];
+        entryResults = (await storage.getChannelEntries(groupId, 500))
+          .filter(e => !storage.isPending(e.id))
+          .filter(e => !handleFilter || e.handle === handleFilter)
+          .filter(e => !since || e.timestamp >= since)
+          .filter(e => !query || (terms.length ? terms.some(term => tokenize(e.content).includes(term)) : e.content.toLowerCase().includes(query.toLowerCase())));
+        // Re-read membership after storage access, which can await a remote author store.
+        const current = await storage.getChannel(groupId);
+        if (!current?.subscribers.some(s => s.handle === viewer.handle)) {
+          throw new PostingRulesError('Your group membership changed. No notes were returned.', 403);
+        }
+      } else if (handleFilter && !query) {
         // Handle only: get recent entries by this author
         entryResults = await storage.getEntriesByHandle(handleFilter, limit * 2, since);
         // Also try by pseudonym in case they haven't migrated
@@ -2002,7 +2026,7 @@ function createMCPServer(secretKey: string) {
         ...entryResults.map(e => ({
           id: e.id,
           timestamp: e.timestamp,
-          text: `[${new Date(e.timestamp).toISOString().split('T')[0]}] ${e.handle ? '@' + e.handle : e.pseudonym}: ${e.content}`,
+          text: `[${new Date(e.timestamp).toISOString().split('T')[0]}] ${e.handle ? '@' + e.handle : e.pseudonym}${groupId ? ` (group #${groupId})` : ''}: ${e.content}`,
           followed: !!(e.handle && followedHandles.has(e.handle)),
         })),
         ...conversationResults.map(c => ({
@@ -2473,26 +2497,34 @@ function createMCPServer(secretKey: string) {
     // Handle search tool
     if (name === 'router_search') {
       const query = (args as { query?: string })?.query?.trim();
+      const groupArg = (args as { group_id?: unknown })?.group_id;
+      if (groupArg !== undefined && (typeof groupArg !== 'string' || !isValidChannelId(groupArg.replace(/^#/, '')))) {
+        return { content: [{ type: 'text' as const, text: 'Choose a valid group_id. No other audiences were searched.' }], isError: true };
+      }
+      const groupId = typeof groupArg === 'string' ? groupArg.replace(/^#/, '') : undefined;
       const handleFilter = (args as { handle?: string })?.handle?.replace(/^@/, '').toLowerCase();
-      const limit = (args as { limit?: number })?.limit || 10;
+      const requestedLimit = (args as { limit?: number })?.limit;
+      const limit = typeof requestedLimit === 'number' && Number.isFinite(requestedLimit) ? Math.max(1, Math.min(50, Math.floor(requestedLimit))) : 10;
       const sinceRaw = (args as { since?: string })?.since?.trim();
       const since = parseToolSince(sinceRaw);
       const roomId = (args as { room_id?: string })?.room_id?.trim();
-      const includeMatrix = (args as { include_matrix?: boolean })?.include_matrix !== false;
+      const includeMatrix = !groupId && (args as { include_matrix?: boolean })?.include_matrix !== false;
 
-      if (!query && !handleFilter && !since && !roomId) {
+      if (!query && !handleFilter && !since && !roomId && !groupId) {
         return {
           content: [{ type: 'text' as const, text: 'Provide a search query, a handle to filter by, a since parameter, or a Matrix room_id.' }],
           isError: true,
         };
       }
 
-      const results = await executeRouterSearch({
-        query,
-        handleFilter,
-        limit,
-        since,
-      });
+      let results: Awaited<ReturnType<typeof executeRouterSearch>>;
+      try { results = await executeRouterSearch({ query, handleFilter, limit, since, groupId }); }
+      catch (err) {
+        if (err instanceof PostingRulesError || err instanceof GroupStoreRevokedError) {
+          return { content: [{ type: 'text' as const, text: err.message }], isError: true };
+        }
+        throw err;
+      }
 
       let matrixMessages: MatrixHistoryMessage[] = [];
       let matrixAccessLabel = 'Matrix results visible to your linked account';
@@ -2516,7 +2548,7 @@ function createMCPServer(secretKey: string) {
         }
       }
 
-      const shouldShowNotebookResults = !!query || !!handleFilter || !!since || results.length > 0;
+      const shouldShowNotebookResults = !!groupId || !!query || !!handleFilter || !!since || results.length > 0;
       const notebookText = shouldShowNotebookResults
         ? formatRouterSearchText({ query, handleFilter, results })
         : '';
@@ -2531,7 +2563,7 @@ function createMCPServer(secretKey: string) {
       return {
         content: [{
           type: 'text' as const,
-          text: responseParts.join('\n\n') || 'No results found.',
+          text: (groupId ? `Audience: #${groupId} only. Reading the latest 500 group notes.\n\n` : '') + (responseParts.join('\n\n') || 'No results found.'),
         }],
       };
     }
@@ -3351,7 +3383,7 @@ function createMCPServer(secretKey: string) {
           }
 
           return {
-            content: [{ type: 'text' as const, text: `Created channel #${channel.id} (${channel.joinRule || 'open'}). You are the admin.\n\nNow let's set it up. Interview the user about what skills this channel should have. Skills define what kind of content gets posted — e.g. "cool_people" for tracking interesting contacts, "cool_papers" for documenting papers, etc.\n\nFor each skill, figure out:\n- A short name (lowercase, hyphens ok)\n- A description (what triggers this skill)\n- Instructions (how to format/structure the entry)\n\nThen use router_channels action: "add_skill" to create each one.` }],
+            content: [{ type: 'text' as const, text: `Created group #${channel.id} (${channel.joinRule || 'open'}). You are the admin. ${channel.joinRule === 'invite' ? 'Only members can read its notes.' : 'This group is public: anyone can read its notes on the web without joining.'}\n\nStart with what this group wants to explore together. Help the person choose their own posting rules at ${BASE_URL}/posting-rules?group=${encodeURIComponent(channel.id)}; joining a group does not change them. ${channel.joinRule === 'invite' ? 'Useful group notes can be automatic, while public sharing waits for their approval or explicit request.' : 'Offer drafts first, with approval or an explicit request before each public group post.'} Preserve existing choices. Begin with a useful question or reference they choose. Add group skills later if a recurring need emerges.` }],
           };
         } catch (err: any) {
           return {
@@ -3442,7 +3474,7 @@ function createMCPServer(secretKey: string) {
         server.sendToolListChanged().catch(() => {});
 
         return {
-          content: [{ type: 'text' as const, text: `Joined #${channelId}. You now have access to ${channel.skills.length} channel skill(s) as channel_${channelId}_* tools.` }],
+          content: [{ type: 'text' as const, text: `Joined #${channelId}. Choose what to share at ${BASE_URL}/posting-rules?group=${encodeURIComponent(channelId)}. Your existing rules are unchanged. Read this group's notes with router_search group_id: "${channelId}". You also have ${channel.skills.length} group skill(s) as channel_${channelId}_* tools.` }],
         };
       }
 
@@ -3499,7 +3531,7 @@ function createMCPServer(secretKey: string) {
 
         await storage.createInvite(invite);
 
-        const inviteUrl = `${BASE_URL}/?view=channel&id=${encodeURIComponent(channelId)}&invite=${encodeURIComponent(token)}`;
+        const inviteUrl = `${BASE_URL}/join?channelinvite=${encodeURIComponent(token)}`;
         return {
           content: [{ type: 'text' as const, text: `Invite created for #${channelId}.\n\nJoin link: ${inviteUrl}\nToken: ${token}\n\nUsers can click the link to join. They can also join manually with: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"` }],
         };
@@ -8418,6 +8450,28 @@ const server = createServer(async (req, res) => {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // Invitations and joined groups keep their own context throughout setup.
+    // No private posts, member roster or account credentials enter this prompt.
+    if (req.method === 'GET' && (url.pathname === '/api/group-onboarding'
+        || (url.pathname === '/api/tutorial' && (url.searchParams.has('group') || url.searchParams.has('channelinvite'))))) {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const key = req.headers.authorization?.replace(/^Bearer /i, '') || url.searchParams.get('key');
+        const user = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
+        const inviteToken = url.searchParams.get('channelinvite');
+        if (!user && !inviteToken) throw new GroupOnboardingError('Sign in to open your group setup.', 401);
+        const { channel, member } = await resolveOnboardingGroup(storage, {
+          groupId: url.searchParams.get('group'), inviteToken, handle: user?.handle,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify(groupOnboardingView(channel, member, BASE_URL, inviteToken)));
+      } catch (err) {
+        res.writeHead(err instanceof GroupOnboardingError ? err.status : 500);
+        res.end(JSON.stringify({ error: err instanceof GroupOnboardingError ? err.message : 'Group setup could not load. Please retry.' }));
+      }
+      return;
+    }
+
     // GET /api/tutorial - Generate personalized tutorial prompt
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'GET' && url.pathname === '/api/tutorial') {
