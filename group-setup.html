@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Join your group · Router</title>
+  <link rel="stylesheet" href="/group-setup.css">
+  <script type="module" src="/onboarding-assets/setup.js"></script>
+</head>
+<body>
+  <main>
+    <a class="brand" href="/">Router</a>
+    <header><p class="eyebrow">A place to think together</p><h1 id="group-name">Join your group</h1>
+      <p id="description">Keep useful ideas and questions with the people you’re working with.</p>
+      <p id="audience" class="audience"></p>
+    </header>
+    <p id="status" role="status" aria-live="polite">Loading your invitation…</p>
+    <ol id="steps" aria-label="Setup progress"><li>Your account</li><li>Your notes</li><li>Discord</li><li>Sharing rules</li></ol>
+    <section id="account" hidden>
+      <h2>A name for your contributions</h2><p>You can read and share group notes without bringing your own AI agent.</p>
+      <form id="create-account"><label for="handle">Choose a unique Router name</label><div class="handle"><span>@</span><input id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required></div>
+        <p class="hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores.</p><button type="submit">Create account and join</button></form>
+      <div id="signed-in" hidden><p id="account-name"></p><button id="join-group">Join this group</button></div>
+      <details><summary>Already have a Router account?</summary>
+        <p>Restore your recovery file, or sign in with your existing Router key. Your saved rules stay with your account.</p>
+        <form id="restore-account"><label for="restore-file">Recovery file</label><input type="file" id="restore-file" accept=".json,application/json" required>
+          <label for="restore-password">Recovery password</label><input type="password" id="restore-password" autocomplete="current-password" required><button type="submit">Restore account</button></form>
+        <form id="existing-account"><label for="existing-key">Existing Router key</label><input type="password" id="existing-key" autocomplete="off" required><button type="submit">Sign in</button></form>
+      </details>
+    </section>
+    <section id="storage" hidden>
+      <h2>Your notes, with a recovery key you keep</h2>
+      <p>TinyCloud provides personal storage for your notes; you don’t need an account there already. Your browser creates your storage key. TinyCloud keeps encrypted records, and Router opens notes for you and the people you share with.</p>
+      <div id="storage-ready" hidden><p id="storage-state"></p><button id="storage-next">Continue to Discord</button></div>
+      <div id="storage-new" hidden>
+        <p>Choose a password below, then download your recovery file. Keep both so you can restore your Router account and storage key on another device.</p>
+        <form id="prepare-backup"><label for="backup-password">Choose a recovery password</label><input type="password" id="backup-password" autocomplete="new-password" minlength="12" required>
+          <label for="backup-repeat">Repeat the password</label><input type="password" id="backup-repeat" autocomplete="new-password" minlength="12" required>
+          <details><summary>Use an existing TinyCloud key</summary><p>Optional. This file is read on your device and is never uploaded.</p><input type="file" id="tinycloud-key-file" accept=".key,.txt,text/plain"></details>
+          <button type="submit">Create and download recovery file</button>
+        </form>
+      </div>
+      <div id="storage-unlock" hidden><p>Your encrypted recovery file is saved in this browser. Unlock it to finish connecting your storage.</p>
+        <form id="unlock-backup"><label for="unlock-password">Recovery password</label><input type="password" id="unlock-password" autocomplete="current-password" required><button type="submit">Unlock recovery file</button></form>
+      </div>
+      <div id="storage-connect" hidden>
+        <button id="download-backup" class="secondary">Download recovery file again</button>
+        <label class="check"><input type="checkbox" id="backup-kept">I have saved the recovery file and its password somewhere I can find them again.</label>
+        <p class="hint">Router cannot reset this password. The file and password together give access to your account and notes.</p>
+        <p>Connect storage and allow Router to read, save and delete records in its folder for one year. Existing published Router records will move there after verification. Your key stays on this device.</p>
+        <button id="connect-storage" disabled>Set up my note storage</button>
+      </div>
+      <button id="check-storage" class="secondary">Check connection again</button>
+      <button id="skip-storage" class="text-button">Choose sharing rules and read the group for now</button>
+    </section>
+    <section id="discord" hidden>
+      <h2>Use your group from Discord</h2><p id="discord-explanation"></p>
+      <div id="discord-start" hidden><a id="open-discord" class="button" target="_blank" rel="noopener noreferrer">Open Discord</a>
+        <p>In the connected server, use <code>/router-link</code> without a code. Its private reply gives you a link back here to confirm your account.</p>
+        <p class="hint">Join the Discord server using your host’s invitation first. Discord membership and Router group membership are managed separately.</p></div>
+      <div id="discord-confirm" hidden><p id="discord-account"></p>
+        <label class="check"><input type="checkbox" id="discord-self">I just ran /router-link myself from the Discord account shown above.</label>
+        <p>The bot will be able to save notes you submit, retrieve this group’s notes for you, and check your connection. Replies to private commands are shown only to you; saved notes are shared with the whole Router group.</p>
+        <button id="confirm-discord" disabled>Connect these accounts</button></div>
+      <p id="discord-state"></p><button id="check-discord" class="secondary">Check connection</button>
+      <button id="unlink-discord" class="secondary" hidden>Withdraw this group’s Discord permission</button>
+      <button id="discord-next">Continue to sharing rules</button><button id="skip-discord" class="secondary">Use Router without Discord for now</button>
+    </section>
+    <section id="rules" hidden>
+      <h2>Choose what your agent can share</h2>
+      <p>These are your personal rules, used wherever you connect an agent to Router. Joining this group does not change them.</p>
+      <p id="rules-state"></p><a id="choose-rules" class="button">Choose my sharing rules</a>
+      <button id="rules-next" class="secondary" hidden>Keep these saved rules and continue</button>
+      <p class="hint">You can use Discord’s explicit save command without connecting a personal agent. Ordinary Discord chat is not automatically saved.</p>
+    </section>
+    <section id="ready" hidden>
+      <h2>You’re part of the group</h2><p>Start by reading the group’s notes. When Discord is connected, you can use its commands to save a note or find something again. A first post is optional.</p>
+      <p id="ready-state"></p><a id="read-group" class="button">Read the group’s notes</a>
+      <p id="ready-discord" hidden>In Discord, <code>/router-save</code> saves a selected note to the whole group. <code>/router-recall</code> finds notes, and <code>/router-unlink</code> withdraws your bot connection.</p>
+      <details><summary>Connect your own agent</summary><p>You can add an agent later. It should read the same personal rules you just chose.</p><a href="/connect">Open agent connection settings</a></details>
+    </section>
+    <footer><button id="back" class="text-button" hidden>Back</button><button id="retry" class="text-button" hidden>Try again</button></footer>
+  </main>
+</body></html>

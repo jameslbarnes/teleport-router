@@ -3,7 +3,16 @@
 This moves the existing Router Test gateway from Tulip to a sixth container in
 Router's existing CVM. It preserves the Hermes release, Opus/Haiku models, live
 participation rules, channel allowlist, six private commands and three
-participation controls. The pending ARIA guild-wide activation is separate.
+participation controls. Native private commands now target `router-working-group`
+throughout Router Test. Ordinary conversation keeps its existing channel allowlist
+and does not gain private-group memory. ARIA remains a separate group.
+
+The group admin must bind `router-working-group` to guild `1568051145551650858`,
+scope `guild`, with the separate `router_dgroup` service identity before members
+can complete `/router-link`. The image's `private.json` pins this destination;
+old `discord-router-test` grants cannot save to the new group. Members relink
+deliberately. Binding and deployment require approval; no personal posting rules
+are changed by either action.
 
 The image extends Hermes v0.23.0 at a fixed digest and verifies its source commit
 `2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`. Configuration, prompt and plugins are

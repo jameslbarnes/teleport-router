@@ -12,6 +12,7 @@ def register(ctx):
     settings = json.loads((Path(__file__).parent / "settings.json").read_text(encoding="utf-8"))
     state_dir = Path(os.environ["HERMES_HOME"]) / "plugin-data" / "router-private"
     router = PrivateRouter(settings, state_dir, os.environ.get("ROUTER_PRIVATE_SECRET_KEY", ""))
+    pair_tasks = {}
 
     async def summarize(question, entries):
         result = await asyncio.wait_for(ctx.llm.acomplete(
@@ -47,9 +48,42 @@ def register(ctx):
                 await interaction.followup.send(message[start:start + 1800], ephemeral=True,
                     allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
 
-        @app_commands.command(name="router-link", description="Link your account using a one-time Router code")
-        @app_commands.describe(code="One-time RD-LINK code; never paste your Router or TinyCloud key")
-        async def link(interaction, code: str):
+        @app_commands.command(name="router-link", description="Connect your Router account in the browser")
+        @app_commands.describe(code="Optional legacy linking code; leave blank for browser setup. Never enter a secret key.")
+        async def link(interaction, code: str = ""):
+            if not code:
+                async def browser_operation():
+                    actor = router.actor(interaction)
+                    old = pair_tasks.pop(actor["discordUserId"], None)
+                    if old:
+                        old.cancel()
+                    started = await router.begin_pair(interaction)
+                    # This is an ephemeral capability link. It never enters the conversational model.
+                    await interaction.followup.send(
+                        f"[Connect your Router account]({started['url']})\nOpen this in the browser where you set up Router, then confirm your accounts. Keep this link to yourself; it expires in ten minutes.",
+                        ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                    async def finish_pair():
+                        try:
+                            result = await router.wait_pair(interaction, started["pairing"])
+                            message = f"Connected @{result['handle']} to #{result['groupId']}. Use /router-save for a selected note or /router-recall to read group notes."
+                        except asyncio.CancelledError:
+                            return
+                        except PrivateError as exc:
+                            message = str(exc)
+                        except Exception:
+                            message = "The connection could not finish. Use /router-status to check, or /router-link to retry."
+                        try:
+                            await interaction.followup.send(message, ephemeral=True,
+                                allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                        except Exception:
+                            logging.getLogger(__name__).warning("Discord connection reply unavailable; no request details logged.")
+                        finally:
+                            if pair_tasks.get(actor["discordUserId"]) is asyncio.current_task():
+                                pair_tasks.pop(actor["discordUserId"], None)
+                    pair_tasks[actor["discordUserId"]] = asyncio.create_task(finish_pair())
+                    return "Your existing sharing rules stay unchanged until you choose new ones in Router."
+                await run(interaction, browser_operation)
+                return
             async def operation():
                 result = await router.link(interaction, code)
                 return f"Linked @{result['handle']} to #{result['groupId']}. Use /router-save to save a selected note to your own TinyCloud storage."

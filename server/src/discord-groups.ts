@@ -19,6 +19,8 @@ export interface DiscordGroupGrant extends DiscordGroupBinding {
   createdAt: number;
   expiresAt: number;
   revokedAt?: number;
+  deliveryPending?: boolean;
+  discordUsername?: string;
 }
 export class DiscordGroupError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -36,6 +38,10 @@ type AuthorStatus = (handle: string) => Promise<{linked: boolean; available?: bo
 export function discordGroups(storage: Storage, published: Storage, authorStatus: AuthorStatus,
   { baseUrl, now = Date.now }: {baseUrl: string; now?: () => number}) {
   const pending = new Map<string, {handle: string; groupId: string; discordUserId: string; binding: DiscordGroupBinding; expiresAt: number}>();
+  type Pair = { groupId: string; discordUserId: string; channelId: string; displayName: string; username: string;
+    binding: DiscordGroupBinding; expiresAt: number; owner?: string; grantId?: string; connected?: boolean;
+    result?: { grant: string; handle: string; groupId: string; expiresAt: number } };
+  const pairs = new Map<string, Pair>();
   const locks = new Map<string, Promise<unknown>>();
   async function exclusive<T>(key: string, action: () => Promise<T>): Promise<T> {
     const prior = locks.get(key) || Promise.resolve();
@@ -75,14 +81,14 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
   const view = (entry: JournalEntry) => ({id: entry.id, handle: entry.handle, pseudonym: entry.pseudonym,
     content: entry.content, timestamp: entry.timestamp, url: `${baseUrl}/e/${encodeURIComponent(entry.id)}`});
 
-  async function authorize(bot: User, body: Body) {
+  async function authorize(bot: User, body: Body, allowPending = false) {
     const token = typeof body.grant === 'string' ? body.grant : '';
     const match = token.match(/^rdg1\.([a-z0-9_]{3,15})\.([a-f0-9]{24})\.([A-Za-z0-9_-]{43})$/);
     if (!match) return fail(403, 'Link this Discord account to the private Router group first.');
     const owner = await storage.getUser(match[1]);
     const grant = owner?.discordGrants?.find(g => g.id === match[2]);
     if (!owner || !grant || grant.revokedAt || grant.expiresAt <= now() || !sameHash(grant.tokenHash, digest(token))
-      || grant.botHandle !== bot.handle) return fail(403, 'This Discord permission is no longer active.');
+      || grant.botHandle !== bot.handle || (grant.deliveryPending && !allowPending)) return fail(403, 'This Discord permission is no longer active.');
     checkContext(body, grant, grant.discordUserId);
     const group = await groupFor(grant.groupId);
     if (!group.discord || !sameBinding(grant, group.discord) || !member(group, owner.handle) || !member(group, bot.handle))
@@ -92,9 +98,105 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     return {owner, grant, group};
   }
 
+  /** Shared by the original one-use codes and browser pairing. Caller holds the links lock. */
+  async function issueGrant(owner: User, group: Channel, binding: DiscordGroupBinding, discordUserId: string, pairing?: Pair) {
+    if (!group.discord || !sameBinding(binding, group.discord) || !member(group, owner.handle) || !member(group, binding.botHandle))
+      return fail(403, 'Private group access unavailable.');
+    const status = await authorStatus(owner.handle);
+    if (!status.linked || !status.available) return fail(409, 'Your TinyCloud storage is unavailable.');
+    const all = await storage.getAllUsers();
+    if (all.some(u => u.handle !== owner.handle && u.linkedAccounts?.some(a => a.platform === 'discord'
+        && a.platformUserId === discordUserId && a.verified === true)))
+      return fail(409, 'This Discord account is already linked to another Router identity.');
+    if (owner.linkedAccounts?.some(a => a.platform === 'discord' && a.verified === true && a.platformUserId !== discordUserId))
+      return fail(409, 'This Router identity is already linked to another Discord account.');
+    const id = randomBytes(12).toString('hex');
+    const token = `rdg1.${owner.handle}.${id}.${randomBytes(32).toString('base64url')}`;
+    const grant: DiscordGroupGrant = {...binding, id, groupId: group.id, discordUserId,
+      ...(pairing ? {deliveryPending: true, discordUsername: pairing.username} : {}),
+      tokenHash: digest(token), createdAt: now(), expiresAt: now() + 30 * 86400_000};
+    const grants = (owner.discordGrants || []).filter(g => g.expiresAt > now() && !g.revokedAt
+      && !(g.groupId === group.id && g.botHandle === binding.botHandle));
+    if (grants.length >= 25) return fail(409, 'Too many active Discord group permissions.');
+    const linkedAccounts = (owner.linkedAccounts || []).filter(a => !(a.platform === 'discord' && a.platformUserId === discordUserId));
+    linkedAccounts.push({platform: 'discord', platformUserId: discordUserId, verified: true, linkedAt: now()});
+    await storage.updateUser(owner.handle, {linkedAccounts, discordGrants: [...grants, grant]});
+    return {grant: token, handle: owner.handle, groupId: group.id, expiresAt: grant.expiresAt};
+  }
+  async function revokeGrant(owner: User, grantId: string) {
+    const discordGrants = owner.discordGrants!.map(g => g.id === grantId ? {...g, revokedAt: now()} : g);
+    const linkedAccounts = (owner.linkedAccounts || []).filter(a => a.platform !== 'discord' ||
+      discordGrants.some(g => g.discordUserId === a.platformUserId && !g.revokedAt && g.expiresAt > now()));
+    await storage.updateUser(owner.handle, {discordGrants, linkedAccounts});
+  }
+
   async function serve(path: string, authorization: string | undefined, body: Body): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail(400, 'JSON object required.');
     const user = await caller(authorization);
+    if (path === '/api/discord/link/status') {
+      const group = await groupFor(body.groupId);
+      if (!member(group, user.handle)) return fail(403, 'Join this private group first.');
+      const binding = group.discord;
+      if (!binding || !member(group, binding.botHandle)) return {configured: false, linked: false};
+      const grant = user.discordGrants?.find(g => g.groupId === group.id && !g.revokedAt && g.expiresAt > now() && sameBinding(g, binding)
+        && user.linkedAccounts?.some(a => a.platform === 'discord' && a.verified && a.platformUserId === g.discordUserId));
+      return {configured: true, linked: !!grant && !grant.deliveryPending, pending: !!grant?.deliveryPending,
+        groupId: group.id, expiresAt: grant?.expiresAt, grantId: grant?.id, discordUserId: grant?.discordUserId, username: grant?.discordUsername,
+        channelUrl: `https://discord.com/channels/${binding.guildId}${binding.channelId ? '/' + binding.channelId : ''}`};
+    }
+    if (path === '/api/discord/pair/start') {
+      const group = await groupFor(body.groupId), binding = group.discord;
+      if (!binding || binding.botHandle !== user.handle || !member(group, user.handle)) return fail(403, 'The configured group bot must start this connection.');
+      checkContext(body, binding);
+      for (const [id, p] of pairs) if (p.expiresAt <= now() || (p.binding.botHandle === user.handle && p.discordUserId === body.discordUserId)) pairs.delete(id);
+      if (pairs.size >= 1000) return fail(429, 'Please retry linking later.');
+      const pairing = `RD-PAIR-${randomBytes(24).toString('base64url')}`, expiresAt = now() + 10 * 60_000;
+      pairs.set(digest(pairing), {groupId: group.id, discordUserId: body.discordUserId as string, channelId: body.channelId as string,
+        username: typeof body.username === 'string' ? body.username.slice(0, 100).replace(/[\u0000-\u001f]/g, '') : '',
+        displayName: typeof body.displayName === 'string' ? body.displayName.slice(0, 100).replace(/[\u0000-\u001f]/g, '') : '', binding: {...binding}, expiresAt});
+      return {pairing, expiresAt, groupId: group.id, url: `${baseUrl}/group-setup?group=${encodeURIComponent(group.id)}#discord-pair=${pairing}`};
+    }
+    if (['/api/discord/pair/info', '/api/discord/pair/confirm', '/api/discord/pair/poll', '/api/discord/pair/ack'].includes(path)) {
+      return exclusive('links', async () => {
+        if (typeof body.pairing !== 'string' || !/^RD-PAIR-[A-Za-z0-9_-]{32}$/.test(body.pairing)) return fail(400, 'Open a fresh connection link from /router-link in Discord.');
+        const pair = pairs.get(digest(body.pairing));
+        if (!pair || pair.expiresAt <= now()) return fail(410, 'This connection link expired. Use /router-link in Discord again.');
+        if (body.groupId !== pair.groupId) return fail(403, 'This connection belongs to another group.');
+        const group = await groupFor(pair.groupId);
+        if (!group.discord || !sameBinding(pair.binding, group.discord) || !member(group, pair.binding.botHandle)) return fail(403, 'The Discord connection changed. Start again.');
+        if (path.endsWith('/poll') || path.endsWith('/ack')) {
+          if (user.handle !== pair.binding.botHandle) return fail(403, 'Only the configured bot can finish this connection.');
+          checkContext(body, pair.binding, pair.discordUserId);
+          if (body.channelId !== pair.channelId) return fail(403, 'Return to the channel where you started linking.');
+          const authorized = pair.result ? await authorize(user, {...body, grant: pair.result.grant}, true) : undefined;
+          if (path.endsWith('/ack')) {
+            if (!pair.result && !pair.connected) return fail(409, 'Confirm the connection in Router first.');
+            if (authorized) await storage.updateUser(authorized.owner.handle, {discordGrants: authorized.owner.discordGrants!.map(g =>
+              g.id === authorized.grant.id ? {...g, deliveryPending: false} : g)});
+            pair.connected = true; pair.result = undefined;
+          }
+          return pair.result ? {status: 'approved', ...pair.result} : {status: pair.connected ? 'connected' : 'waiting'};
+        }
+        if (!member(group, user.handle) || (pair.owner && pair.owner !== user.handle)) return fail(403, 'This connection is unavailable to this Router account.');
+        if (pair.owner) {
+          const owner = await storage.getUser(pair.owner);
+          if (!owner?.discordGrants?.some(g => g.id === pair.grantId && !g.revokedAt && g.expiresAt > now() && sameBinding(g, pair.binding)))
+            return fail(410, 'This connection was withdrawn or replaced. Use /router-link again.');
+        }
+        if (path.endsWith('/confirm')) {
+          if (body.confirmed !== true) return fail(400, 'Confirm which accounts you want to connect.');
+          if (!pair.owner) {
+            const owner = (await storage.getUser(user.handle))!;
+            pair.result = await issueGrant(owner, group, pair.binding, pair.discordUserId, pair);
+            pair.owner = user.handle;
+            pair.grantId = pair.result.grant.split('.')[2];
+          }
+        }
+        // The author sees the account and state, never the bot's scoped grant.
+        return {status: pair.connected ? 'connected' : pair.owner ? 'approved' : 'waiting', groupId: pair.groupId,
+          discordUserId: pair.discordUserId, username: pair.username, displayName: pair.displayName, expiresAt: pair.expiresAt};
+      });
+    }
     if (path === '/api/discord/bind') {
       return exclusive('links', async () => {
         const group = await groupFor(body.groupId);
@@ -143,26 +245,9 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
         const owner = await storage.getUser(challenge.handle);
         if (!owner || !group.discord || !sameBinding(challenge.binding, group.discord)
           || !member(group, owner.handle) || !member(group, user.handle)) return fail(403, 'Private group access unavailable.');
-        const status = await authorStatus(owner.handle);
-        if (!status.linked || !status.available) return fail(409, 'Your TinyCloud storage is unavailable.');
-        const all = await storage.getAllUsers();
-        if (all.some(u => u.handle !== owner.handle && u.linkedAccounts?.some(a => a.platform === 'discord'
-          && a.platformUserId === challenge.discordUserId && a.verified === true)))
-          return fail(409, 'This Discord account is already linked to another Router identity.');
-        if (owner.linkedAccounts?.some(a => a.platform === 'discord' && a.verified === true && a.platformUserId !== challenge.discordUserId))
-          return fail(409, 'This Router identity is already linked to another Discord account.');
-        const id = randomBytes(12).toString('hex');
-        const token = `rdg1.${owner.handle}.${id}.${randomBytes(32).toString('base64url')}`;
-        const grant: DiscordGroupGrant = {...challenge.binding, id, groupId: group.id, discordUserId: challenge.discordUserId,
-          tokenHash: digest(token), createdAt: now(), expiresAt: now() + 30 * 86400_000};
-        const grants = (owner.discordGrants || []).filter(g => g.expiresAt > now() && !g.revokedAt
-          && !(g.groupId === group.id && g.botHandle === user.handle));
-        if (grants.length >= 25) return fail(409, 'Too many active Discord group permissions.');
-        const linkedAccounts = (owner.linkedAccounts || []).filter(a => !(a.platform === 'discord' && a.platformUserId === grant.discordUserId));
-        linkedAccounts.push({platform: 'discord', platformUserId: grant.discordUserId, verified: true, linkedAt: now()});
-        await storage.updateUser(owner.handle, {linkedAccounts, discordGrants: [...grants, grant]});
+        const result = await issueGrant(owner, group, challenge.binding, challenge.discordUserId);
         pending.delete(key);
-        return {grant: token, handle: owner.handle, groupId: group.id, expiresAt: grant.expiresAt};
+        return result;
       });
     }
     if (path === '/api/discord/grants/revoke') {
@@ -170,7 +255,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
         const owner = (await storage.getUser(user.handle))!;
         if (typeof body.grantId !== 'string' || !owner.discordGrants?.some(g => g.id === body.grantId))
           return fail(404, 'Permission not found.');
-        await storage.updateUser(user.handle, {discordGrants: owner.discordGrants.map(g => g.id === body.grantId ? {...g, revokedAt: now()} : g)});
+        await revokeGrant(owner, body.grantId);
         return {revoked: true};
       });
     }
@@ -181,7 +266,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     if (body.action === 'unlink') {
       return exclusive('links', async () => {
         const current = (await storage.getUser(owner.handle))!;
-        await storage.updateUser(owner.handle, {discordGrants: current.discordGrants!.map(g => g.id === grant.id ? {...g, revokedAt: now()} : g)});
+        await revokeGrant(current, grant.id);
         return {revoked: true};
       });
     }

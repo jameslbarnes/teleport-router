@@ -14,6 +14,13 @@ COPY server/tsconfig.json ./
 RUN npm run build
 
 # Build Astro frontend (index route migration)
+FROM node:22-alpine AS setup-builder
+WORKDIR /app/browser
+COPY browser/package*.json ./
+RUN npm ci
+COPY browser/ ./
+RUN npm run build
+
 FROM node:22-alpine AS web-builder
 
 WORKDIR /app/web
@@ -39,6 +46,8 @@ COPY --from=builder /app/server/dist ./dist
 # Copy legacy static files (except index, now built by Astro)
 COPY prompt.html setup.html profile.html entry.html dashboard.html join.html settings.html connect.html release.html RELEASE_NOTES.md /app/
 COPY posting-rules.html posting-rules.js sharing-notice.js /app/
+COPY group-setup.html group-setup.css /app/
+COPY --from=setup-builder /app/onboarding-assets/ /app/onboarding-assets/
 
 # Copy Astro-built index + static assets
 COPY --from=web-builder /app/web/dist/index.html /app/index.html

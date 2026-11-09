@@ -117,6 +117,42 @@ class PrivateRouter:
             self._store(links)
         return {key: result[key] for key in ("handle", "groupId", "expiresAt")}
 
+    async def begin_pair(self, interaction):
+        actor = self.actor(interaction)
+        group = self.settings.get("group_id")
+        if not group:
+            raise PrivateError("Your host needs to select this server's Router group before browser linking is available.")
+        result = await self.request("pair/start", {**actor, "groupId": group,
+            "username": str(getattr(interaction.user, "name", ""))[:100],
+            "displayName": str(getattr(interaction.user, "display_name", "Discord member"))[:100]})
+        token = result.get("pairing", "")
+        expected = self.settings["base_url"].rstrip("/") + "/group-setup?group=" + group + "#discord-pair=" + token
+        if not re.fullmatch(r"RD-PAIR-[A-Za-z0-9_-]{32}", token) or result.get("url") != expected:
+            raise PrivateError("Router did not return a valid account connection link.")
+        return result
+
+    async def wait_pair(self, interaction, pairing, timeout=560, poll_seconds=4):
+        actor = self.actor(interaction)
+        payload = {**actor, "groupId": self.settings.get("group_id"), "pairing": pairing}
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            result = await self.request("pair/poll", payload)
+            if result.get("status") == "approved":
+                if not isinstance(result.get("grant"), str) or not result["grant"].startswith("rdg1."):
+                    raise PrivateError("Router did not return a valid private group permission.")
+                self.check_group(result)
+                # Acknowledge only after durable storage. A failed write leaves the exchange retriable.
+                async with self.lock:
+                    links = self._load()
+                    links[actor["discordUserId"]] = {field: result[field] for field in ("grant", "handle", "groupId", "expiresAt")}
+                    self._store(links)
+                await self.request("pair/ack", payload)
+                return {field: result[field] for field in ("handle", "groupId", "expiresAt")}
+            if result.get("status") != "waiting":
+                raise PrivateError("This connection has already finished. Use /router-status to check it.")
+            await asyncio.sleep(min(poll_seconds, max(0, deadline - asyncio.get_running_loop().time())))
+        raise PrivateError("The connection link expired. Use /router-link again when you are ready.")
+
     async def operate(self, interaction, action, **fields):
         actor = self.actor(interaction)
         async with self.lock:

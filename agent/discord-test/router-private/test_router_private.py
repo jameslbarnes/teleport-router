@@ -37,6 +37,45 @@ class PrivateCommandsTest(unittest.IsolatedAsyncioTestCase):
     async def link(self):
         return await self.router.link(self.actor, "RD-LINK-" + "x" * 32)
 
+    async def test_browser_pairing_stores_before_ack_and_uses_actual_discord_context(self):
+        self.settings["group_id"] = "private-test"
+        token = "RD-PAIR-" + "x" * 32
+        calls = []
+        async def request(path, payload):
+            calls.append((path, payload))
+            self.assertEqual(payload["discordUserId"], str(self.actor.user.id))
+            if path == "pair/start":
+                return {"pairing": token, "url": "https://router.example/group-setup?group=private-test#discord-pair=" + token}
+            if path == "pair/poll":
+                return {"status": "approved", "grant": "rdg1.synthetic", "handle": "alice", "groupId": "private-test", "expiresAt": 999999}
+            if path == "pair/ack":
+                self.assertEqual(self.router._load()[str(self.actor.user.id)]["grant"], "rdg1.synthetic")
+                return {"status": "connected"}
+            self.fail(path)
+        self.router.request = request
+        started = await self.router.begin_pair(self.actor)
+        result = await self.router.wait_pair(self.actor, started["pairing"], timeout=1, poll_seconds=0)
+        self.assertEqual(result["handle"], "alice")
+        self.assertNotIn("grant", result)
+        self.assertEqual([p for p, _ in calls], ["pair/start", "pair/poll", "pair/ack"])
+
+    async def test_browser_pairing_rejects_redirected_links_and_does_not_ack_failed_storage(self):
+        self.settings["group_id"] = "private-test"
+        async def redirected(path, payload):
+            return {"pairing": "RD-PAIR-" + "x" * 32, "url": "https://unrelated.example/"}
+        self.router.request = redirected
+        with self.assertRaises(module.PrivateError):
+            await self.router.begin_pair(self.actor)
+        calls = []
+        async def approved(path, payload):
+            calls.append(path)
+            return {"status": "approved", "grant": "rdg1.synthetic", "handle": "alice", "groupId": "private-test", "expiresAt": 999999}
+        self.router.request = approved
+        self.router._store = lambda data: (_ for _ in ()).throw(OSError("synthetic write failure"))
+        with self.assertRaises(OSError):
+            await self.router.wait_pair(self.actor, "RD-PAIR-" + "x" * 32, timeout=1, poll_seconds=0)
+        self.assertEqual(calls, ["pair/poll"])
+
     async def test_wrong_channel_dm_and_bot_never_call_router(self):
         for change in ({"channel_id": 100000000000000099}, {"guild_id": None}, {"user": SimpleNamespace(id=100000000000000003, bot=True)}):
             actor = SimpleNamespace(**{**vars(self.actor), **change})

@@ -1,0 +1,16 @@
+{
+  "name": "router-group-setup",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test src/*.test.mjs"
+  },
+  "dependencies": {
+    "@tinycloud/web-sdk": "3.9.1",
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

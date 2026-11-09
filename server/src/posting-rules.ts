@@ -90,6 +90,7 @@ These replace generic Router posting cadence and defaults, including automatic s
 ${cadence}
 Audience: ${audienceLabel(rules)}. AI-only display does not make a public post private.
 Briefly tell the person this posting mode and audience at the start of the conversation and whenever they change. Group membership alone does not select a destination.
+If several audiences are selected, specify to for each post; an omitted destination is rejected. Keep each group's private material in its authorized group. An open group is public on the web even though it has a #group destination.
 ${[['Purpose', rules.purpose], ['What to share', rules.share], ['What to leave out', rules.avoid], ['How to write', rules.style], ['In my own words', rules.instructions]].filter(([, v]) => v).map(([k, v]) => `${k}:\n${v}`).join('\n\n')}
 Use these defaults only where my rules do not specify otherwise:
 ${POSTING_CADENCE_INSTRUCTIONS}
@@ -133,6 +134,7 @@ export function resolvePostingAudience(rules: PostingRules | undefined, intent: 
   if (automatic && rules.mode !== 'automatic') throw new PostingRulesError(rules.mode === 'manual' ? 'Your rules allow posting only when you ask. Read router_posting_rules; nothing was posted.' : 'Your rules require a draft and audience approved by you. Read router_posting_rules; nothing was posted.', 409);
   if (rules.audience === 'ask' && (to === undefined || automatic)) throw new PostingRulesError('Choose the audience with the person before posting. Use to: [] only for an explicitly public post.', 409);
   const addresses = to as string[] | undefined;
+  if (rules.audience === 'selected' && rules.destinations.length > 1 && addresses === undefined) throw new PostingRulesError('You have several selected audiences. Set to explicitly for this post; nothing was sent to all of them by default.', 409);
   if (automatic && rules.audience === 'selected' && addresses && (!addresses.length || addresses.some(d => !rules.destinations.includes(d)))) throw new PostingRulesError('This audience is outside your automatic posting rules. Nothing was posted.', 409);
   return addresses ?? (rules.audience === 'selected' ? [...rules.destinations] : []);
 }

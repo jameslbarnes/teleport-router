@@ -54,4 +54,15 @@ describe('Personal posting rules', () => {
     expect(resolvePostingAudience(undefined, undefined, undefined)).toBeUndefined();
     expect(resolvePostingAudience(undefined, undefined, ['@reader'])).toEqual(['@reader']);
   });
+
+  it('requires an explicit destination when several audiences are selected', () => {
+    const rules = nextPostingRules(undefined, { ...draft, mode: 'automatic', audience: 'selected', destinations: ['#friends', '#research'] }, 0);
+    for (const intent of [undefined, 'automatic', 'user-requested', 'user-approved']) {
+      expect(() => resolvePostingAudience(rules, intent, undefined)).toThrow('several selected audiences');
+    }
+    expect(resolvePostingAudience(rules, 'automatic', ['#friends'])).toEqual(['#friends']);
+    expect(resolvePostingAudience(rules, 'automatic', ['#friends', '#research'])).toEqual(['#friends', '#research']);
+    expect(() => resolvePostingAudience(rules, 'automatic', [])).toThrow('outside');
+    expect(resolvePostingAudience(rules, 'user-approved', [])).toEqual([]);
+  });
 });

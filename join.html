@@ -477,13 +477,20 @@
 
             <!-- Channel invite: Claude-guided onboarding (hidden by default) -->
             <div id="invite-onboard" style="display:none;">
+                <p>Join the group below, then choose what your agent may share. You can also work through setup with your agent.</p>
                 <div class="onboard-wrapper" style="display:flex;flex-direction:column;gap:0.5rem;">
                     <button class="submit-btn" onclick="startInviteOnboarding('desktop')">Open in Claude Desktop</button>
-                    <button class="submit-btn" onclick="startInviteOnboarding('code')" style="background:var(--surface);color:var(--fg);border:1px solid var(--border);" id="invite-code-btn">Copy prompt for Claude Code</button>
+                    <button class="submit-btn" onclick="startInviteOnboarding('code')" style="background:var(--surface);color:var(--fg);border:1px solid var(--border);" id="invite-code-btn">Copy setup prompt for my agent</button>
                 </div>
                 <div style="text-align:center;margin-top:1rem;">
                     <button onclick="showManualForm()" style="background:none;border:none;color:var(--fg-muted);font-family:'IBM Plex Mono',monospace;font-size:0.75rem;cursor:pointer;text-decoration:underline;">Set up manually</button>
                 </div>
+            </div>
+
+            <div id="join-error" role="alert" hidden>
+                <p id="join-error-text"></p>
+                <button type="button" class="copy-btn" id="retry-join" onclick="retryGroupJoin()">Try joining again</button>
+                <p><a href="/settings">Open my account settings</a></p>
             </div>
 
             <form id="join-form" onsubmit="handleSubmit(event)">
@@ -606,7 +613,7 @@
 
             <!-- Step 2: Tutorial (generic) -->
             <div class="onboard-step" id="step-tutorial" style="display:none;">
-                <p><a href="/posting-rules" class="copy-btn" style="display:block;text-decoration:none;text-align:center;">Choose what my agent shares</a></p>
+                <p><a href="/posting-rules" id="posting-rules-link" class="copy-btn" style="display:block;text-decoration:none;text-align:center;">Choose what my agent shares</a></p>
                 <p style="color:var(--fg-muted);">Write your own posting rules, or let your agent help you draft them and try sample posts. You choose when to post and who can read it.</p>
                 <div class="step-label" id="step-tutorial-label">Step 2 — Try it out</div>
                 <p style="color:var(--fg-muted);margin-bottom:1rem;" id="step-tutorial-desc">Open a new Claude conversation with the tutorial pre-loaded.</p>
@@ -634,6 +641,7 @@
         let handleCheckTimeout = null;
         let handleValid = false;
         let pendingChannelInvite = null; // { channelId, token } to join after registration
+        let invitationReady = Promise.resolve(true);
 
         function getCliPort() {
             if (!cliPortParam || !cliNonce) return null;
@@ -696,9 +704,7 @@
 
                 // Update header
                 document.getElementById('header-title').textContent = `You're invited`;
-                document.getElementById('header-subtitle').textContent = isCliSetup()
-                    ? 'Create an account, join the channel, and finish CLI setup.'
-                    : 'Get set up with Claude in one step.';
+                document.getElementById('header-subtitle').textContent = 'Join your group, read its notes, and choose what your agent can share.';
 
                 // Show banner
                 document.getElementById('invite-channel-name').textContent = `#${data.channelId}` + (data.channelName ? ` — ${data.channelName}` : '');
@@ -716,7 +722,7 @@
                     document.getElementById('join-code-box').style.display = 'none';
                 } else {
                     document.getElementById('invite-onboard').style.display = '';
-                    document.getElementById('join-form').style.display = 'none';
+                    document.getElementById('join-form').style.display = '';
                 }
                 return true;
             } catch (e) {
@@ -750,7 +756,7 @@
         function showManualForm() {
             document.getElementById('invite-onboard').style.display = 'none';
             document.getElementById('join-form').style.display = '';
-            document.getElementById('header-subtitle').textContent = 'Create an account to join the channel.';
+            document.getElementById('header-subtitle').textContent = 'Create an account to join your group.';
         }
 
         async function startInviteOnboarding(mode) {
@@ -758,14 +764,15 @@
                 const tutorialUrl = `/api/tutorial?client=${mode}&channelinvite=${encodeURIComponent(channelInviteToken)}`;
                 const res = await fetch(tutorialUrl);
                 const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Setup prompt unavailable.');
                 if (mode === 'desktop') {
                     const encoded = encodeURIComponent(data.prompt).replace(/\(/g, '%28').replace(/\)/g, '%29');
                     window.open(`https://claude.ai/new?q=${encoded}`, '_blank');
                 } else if (mode === 'code') {
                     await navigator.clipboard.writeText(data.prompt);
                     const btn = document.getElementById('invite-code-btn');
-                    btn.textContent = 'Copied! Paste into Claude Code';
-                    setTimeout(() => { btn.textContent = 'Copy prompt for Claude Code'; }, 3000);
+                    btn.textContent = 'Copied! Paste into your agent';
+                    setTimeout(() => { btn.textContent = 'Copy setup prompt for my agent'; }, 3000);
                 }
             } catch (err) {
                 console.error('Failed to start onboarding:', err);
@@ -782,11 +789,30 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ secret_key: secretKey, invite_token: pendingChannelInvite.token })
                 });
-                return res.ok;
+                if (!res.ok) throw new Error('Could not join this group. Your account is kept; check the invitation and try again.');
+                return true;
             } catch (e) {
-                console.error('Failed to join channel:', e);
-                return false;
+                throw new Error('Could not join this group. Your account is kept; check the invitation and try again.');
             }
+        }
+
+        function showJoinError(message) {
+            document.getElementById('join-error-text').textContent = message;
+            document.getElementById('join-error').hidden = false;
+            document.getElementById('retry-join').hidden = !pendingChannelInvite || !localStorage.getItem('router_key');
+            document.getElementById('join-form').style.display = 'none';
+            document.getElementById('invite-onboard').style.display = 'none';
+        }
+
+        async function retryGroupJoin() {
+            const button = document.getElementById('retry-join');
+            button.disabled = true;
+            try {
+                if (await joinPendingChannel(localStorage.getItem('router_key'))) {
+                    window.location.href = `/posting-rules?group=${encodeURIComponent(pendingChannelInvite.channelId)}`;
+                }
+            } catch (err) { showJoinError(err.message); }
+            finally { button.disabled = false; }
         }
 
         // Redirect existing users to settings (or join channel if they have an account)
@@ -798,7 +824,12 @@
             }
 
             // Start resolving invite in parallel with key check
-            const invitePromise = resolveChannelInvite();
+            invitationReady = resolveChannelInvite();
+            const invitationResolved = await invitationReady;
+            if (channelInviteToken && !invitationResolved) {
+                showJoinError('This invitation is unavailable. Ask the person who invited you for a new link.');
+                return;
+            }
 
             const savedKey = localStorage.getItem('router_key');
             if (savedKey) {
@@ -814,7 +845,7 @@
                         let joinedChannel = null;
                         if (channelInviteToken) {
                             // Wait for resolve to finish
-                            await invitePromise;
+                            await invitationReady;
                             if (pendingChannelInvite) {
                                 const joined = await joinPendingChannel(savedKey);
                                 if (joined) joinedChannel = pendingChannelInvite.channelId;
@@ -826,7 +857,7 @@
                             return;
                         }
                         if (joinedChannel) {
-                            window.location.href = `/?view=channel&id=${encodeURIComponent(joinedChannel)}`;
+                            window.location.href = `/posting-rules?group=${encodeURIComponent(joinedChannel)}`;
                             return;
                         }
                         window.location.href = getSafeNextPath() || '/settings';
@@ -834,6 +865,7 @@
                     }
                 } catch (err) {
                     console.error('Failed to check existing key:', err);
+                    if (pendingChannelInvite) showJoinError('Could not finish joining your group. Your account is kept; try again.');
                 }
             }
         });
@@ -903,6 +935,7 @@
         async function handleSubmit(e) {
             e.preventDefault();
             if (!handleValid) return;
+            if (channelInviteToken && !(await invitationReady)) return;
 
             const btn = document.getElementById('submit-btn');
             const handle = document.getElementById('handle').value;
@@ -944,7 +977,9 @@
                 // Join pending channel invite if present
                 let joinedChannel = null;
                 if (pendingChannelInvite) {
-                    const joined = await joinPendingChannel(keyData.secret_key);
+                    let joined;
+                    try { joined = await joinPendingChannel(keyData.secret_key); }
+                    catch (err) { showJoinError(err.message); return; }
                     if (joined) joinedChannel = pendingChannelInvite.channelId;
                 }
 
@@ -991,6 +1026,7 @@
 
             // Show channel join confirmation or generic welcome
             if (joinedChannel) {
+                document.getElementById('posting-rules-link').href = `/posting-rules?group=${encodeURIComponent(joinedChannel)}`;
                 document.querySelector('#success-state h2').textContent = `You're in #${joinedChannel}`;
                 document.getElementById('success-handle').textContent = '@' + handle;
             } else {
@@ -1033,10 +1069,13 @@
 
             // Build "Open tutorial in Claude" link
             try {
-                const tutorialUrl = savedKey
+                const tutorialUrl = joinedChannel
+                    ? `/api/tutorial?group=${encodeURIComponent(joinedChannel)}`
+                    : savedKey
                     ? `/api/tutorial?key=${encodeURIComponent(savedKey)}`
                     : '/api/tutorial';
-                const res = await fetch(tutorialUrl);
+                const res = await fetch(tutorialUrl, joinedChannel ? { headers: { Authorization: `Bearer ${savedKey}` }, cache: 'no-store' } : {});
+                if (!res.ok) throw new Error('Tutorial unavailable');
                 const data = await res.json();
                 const discussUrl = `https://claude.ai/new?q=${encodeURIComponent(data.prompt)}`;
                 document.getElementById('discuss-btn').href = discussUrl;

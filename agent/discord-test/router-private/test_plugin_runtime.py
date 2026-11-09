@@ -60,8 +60,23 @@ class NativeCommandsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.kwargs["ephemeral"])
         self.ctx.llm.acomplete.assert_not_called()
 
-    async def test_wrong_channel_is_ephemeral_and_does_not_defer(self):
-        self.interaction.channel_id=1568051146172403816
+    async def test_browser_link_uses_private_replies_without_a_model_or_secret_key(self):
+        started = {"pairing": "RD-PAIR-" + "x" * 32, "url": "https://router.example/group-setup?group=test#discord-pair=synthetic"}
+        finished = {"handle": "alice", "groupId": "test", "expiresAt": 999999}
+        with patch.object(plugin.PrivateRouter, "begin_pair", AsyncMock(return_value=started)), \
+                patch.object(plugin.PrivateRouter, "wait_pair", AsyncMock(return_value=finished)):
+            command = self.bot.tree.get_command("router-link", guild=self.guild)
+            self.assertFalse(command.to_dict(self.bot.tree)["options"][0]["required"])
+            await command.callback(self.interaction)
+            await asyncio.sleep(0.03)
+        self.assertGreaterEqual(self.interaction.followup.send.call_count, 3)
+        for call in self.interaction.followup.send.call_args_list:
+            self.assertTrue(call.kwargs["ephemeral"])
+        self.assertIn("Connected @alice", self.interaction.followup.send.call_args.args[0])
+        self.ctx.llm.acomplete.assert_not_called()
+
+    async def test_wrong_server_is_ephemeral_and_does_not_defer(self):
+        self.interaction.guild_id=1568051145551650899
         await self.bot.tree.get_command("router-save", guild=self.guild).callback(self.interaction, "synthetic")
         self.assertTrue(self.interaction.response.send_message.call_args.kwargs["ephemeral"])
         self.interaction.response.defer.assert_not_called()
