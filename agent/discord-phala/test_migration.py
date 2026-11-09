@@ -104,6 +104,29 @@ class ArchiveTests(unittest.TestCase):
 
 
 class StartupTests(unittest.TestCase):
+    def test_shipped_private_destination_accepts_topic_channels_but_rejects_old_group_grants(self):
+        root = Path(__file__).parent
+        module_file = root / "plugins/router-private/router_private.py"
+        if not module_file.exists():
+            module_file = root.parent / "discord-test/router-private/router_private.py"
+        spec = importlib.util.spec_from_file_location("shipped_private_destination", module_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        settings = json.loads((root / "private.json").read_text())
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            router = module.PrivateRouter(settings, tmp, "synthetic")
+            for channel in (1568051571751788644, 1568051146172403816):
+                interaction = SimpleNamespace(guild_id=1568051145551650858, channel_id=channel,
+                    user=SimpleNamespace(id=1568048209002111017, bot=False))
+                self.assertEqual(router.actor(interaction)["channelId"], str(channel))
+            router.check_group({"groupId": "router-working-group"})
+            with self.assertRaises(module.PrivateError):
+                router.check_group({"groupId": "discord-router-test"})
+            interaction.guild_id = 1568051145551650899
+            with self.assertRaises(module.PrivateError):
+                router.actor(interaction)
+
     def test_link_seed_preserved_once_and_not_restored_after_unlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, home = Path(tmp) / "code", Path(tmp) / "data/hermes"

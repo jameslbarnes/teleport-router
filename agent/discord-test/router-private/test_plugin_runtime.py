@@ -75,8 +75,8 @@ class NativeCommandsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Connected @alice", self.interaction.followup.send.call_args.args[0])
         self.ctx.llm.acomplete.assert_not_called()
 
-    async def test_wrong_channel_is_ephemeral_and_does_not_defer(self):
-        self.interaction.channel_id=1568051146172403816
+    async def test_wrong_server_is_ephemeral_and_does_not_defer(self):
+        self.interaction.guild_id=1568051145551650899
         await self.bot.tree.get_command("router-save", guild=self.guild).callback(self.interaction, "synthetic")
         self.assertTrue(self.interaction.response.send_message.call_args.kwargs["ephemeral"])
         self.interaction.response.defer.assert_not_called()
