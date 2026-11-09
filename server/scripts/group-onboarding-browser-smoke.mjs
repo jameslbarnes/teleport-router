@@ -121,6 +121,16 @@ try {
   assert.match(await openPage.locator('#group-audience').textContent(), /Public:.*without joining/);
   await openPage.locator('#use-group').click();
   assert.equal(await openPage.locator('input[name=mode]:checked').inputValue(), 'review');
+  await openPage.locator('input[name=mode][value=automatic]').check();
+  await openPage.locator('input[name=audience][value=public]').check();
+  await openPage.locator('#preview').click();
+  await openPage.locator('#confirmed').check();
+  await openPage.locator('#save').click();
+  await openPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
+  await openPage.goto(base + '/group-setup?group=open-club');
+  await openPage.locator('#discord-explanation').filter({ hasText: 'public group' }).waitFor();
+  await openPage.locator('#skip-discord').click();
+  assert.equal(await openPage.locator('#rules-next').textContent(), 'Keep automatic public posting and continue');
   await publicContext.close();
 
   // Retry a failed join without creating another account or falling into public setup.
@@ -176,9 +186,37 @@ try {
   await recoveryPage.locator('#unlock-password').fill('synthetic browser recovery password');
   await recoveryPage.locator('#unlock-backup button').click();
   await recoveryPage.locator('#storage-connect').waitFor();
+  await recoveryPage.locator('#skip-storage').click();
+  await recoveryPage.locator('#choose-rules').click();
+  await recoveryPage.locator('#use-group').click();
+  await recoveryPage.locator('#preview').click();
+  await recoveryPage.locator('#confirmed').check();
+  await recoveryPage.locator('#save').click();
+  await recoveryPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
+  await recoveryPage.getByRole('link', { name: 'Continue group setup' }).click();
+  await recoveryPage.locator('#rules-next').click();
+  await recoveryPage.locator('#ready').waitFor();
+  assert.match(await recoveryPage.locator('#ready-state').textContent(), /Storage setup is still pending/);
+  assert.equal(await recoveryPage.locator('#read-group').getAttribute('href'), base + '/?view=channel&id=reading-club');
   await recoveryContext.close();
+
+  // A Discord link often opens a signed-out browser. The member can restore their
+  // downloaded backup there without needing another invitation or a new account.
+  const restoredContext = await newContext();
+  const restoredPage = await restoredContext.newPage();
+  restoredPage.on('pageerror', error => errors.push(error.message));
+  await restoredPage.goto(base + '/group-setup?group=reading-club');
+  await restoredPage.locator('#restore-account').waitFor();
+  assert.equal(await restoredPage.locator('#create-account').isVisible(), false);
+  await restoredPage.locator('#restore-file').setInputFiles({ name: 'router-recovery.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(envelope)) });
+  await restoredPage.locator('#restore-password').fill('synthetic browser recovery password');
+  await restoredPage.locator('#restore-account button').click();
+  await restoredPage.locator('#discord').waitFor();
+  assert.equal(await restoredPage.evaluate(() => localStorage.getItem('router_key')), recovered.routerKey);
+  assert.equal(await restoredPage.evaluate(privateKey => JSON.stringify(localStorage).includes(privateKey), recovered.tinycloudKey), false);
+  await restoredContext.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: fresh join; encrypted browser backup/reload; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
+  console.log('PASS: fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
 } finally {
   await browser?.close();
   child.kill();

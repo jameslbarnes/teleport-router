@@ -57,7 +57,7 @@ npm run test:watch   # Run tests in watch mode
 ```
 
 ### Frontend Changes
-HTML files are served statically from the project root. No build step needed.
+Most HTML files are served statically from the project root. Guided group setup uses `browser/` sources: run `npm ci` and `npm run build` there to produce `onboarding-assets/`. Docker builds those assets automatically. Build the server before running `npm test` in `browser/`, since recovery tests compare with the server codec.
 
 ### Deployment
 Just push to `master`. GitHub Actions handles:

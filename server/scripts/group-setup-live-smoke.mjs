@@ -26,7 +26,7 @@ const api = async (path, body, key) => {
   if (!r.ok) throw Error(path + ': HTTP ' + r.status);
   return r.json();
 };
-let browser, account, receipt, owner, saved;
+let browser, page, account, receipt, owner, saved;
 try {
   for (let i = 0; i < 120; i++) { try { await api('/health'); break; } catch { if (i === 119) throw Error('Local server did not start'); await new Promise(r => setTimeout(r, 250)); } }
   await api('/api/identity/register', { secret_key: ownerKey, handle: 'browser_host' });
@@ -38,8 +38,13 @@ try {
   const invite = await api(`/api/channels/${groupId}/invite`, { secret_key: ownerKey, max_uses: 1 });
   browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], ...(process.env.BROWSER_CHANNEL ? { channel: process.env.BROWSER_CHANNEL } : {}) });
   const context = await browser.newContext({ acceptDownloads: true });
-  await context.route('**/*', route => [base, new URL(host).origin].includes(new URL(route.request().url()).origin) ? route.continue() : route.abort());
-  const page = await context.newPage(); page.setDefaultTimeout(120000);
+  const blockedOrigins = [];
+  await context.route('**/*', route => {
+    const origin = new URL(route.request().url()).origin;
+    if ([base, new URL(host).origin].includes(origin)) return route.continue();
+    blockedOrigins.push(origin); return route.abort();
+  });
+  page = await context.newPage(); page.setDefaultTimeout(120000);
   const pageErrors = [], posted = [], consoleErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   page.on('console', event => { if (event.type() === 'error') consoleErrors.push(event.text()); });
@@ -70,6 +75,8 @@ try {
   await page.locator('#discord-start').waitFor();
   const pair = await api('/api/discord/pair/start', { ...actor, groupId, displayName: 'Synthetic Discord member', username: 'synthetic_discord' }, botKey);
   await page.goto(pair.url);
+  await page.waitForFunction(() => !document.getElementById('discord-confirm').hidden || document.getElementById('status').classList.contains('error'));
+  if (await page.locator('#status.error').count()) throw Error('Discord confirmation did not open: ' + (await page.locator('#status').textContent()).slice(0, 250));
   await page.locator('#discord-confirm').waitFor();
   assert.equal(new URL(page.url()).hash, '', 'Pair capability removed from the visible URL');
   await page.locator('#discord-self').check();
@@ -104,10 +111,13 @@ try {
   const authorKey = recoverAuthorKey(account.tinycloudKey, raw(recovery.data.data), binding);
   assert.equal(decryptOwnerRecord(authorKey, raw(encrypted.data.data), binding, 'posts', saved).content, 'Synthetic browser onboarding note');
   authorKey.fill(0); assert.deepEqual(pageErrors, []);
+  assert.deepEqual(blockedOrigins, [], 'The browser contacts only this Router and its TinyCloud node');
+  assert.equal(consoleErrors.some(message => /Content Security Policy|Refused to|dynamically imported module/i.test(message)), false, 'No blocked script, network or WASM resources');
   console.log('PASS private save/read and independent owner decryption of the browser-created account');
 } finally {
   if (account) {
     try {
+      if (!receipt && page && !page.isClosed()) receipt = await page.evaluate(handle => JSON.parse(localStorage.getItem('router_storage_grant:' + handle)), account.handle);
       owner ||= new TinyCloudNode({ privateKey: account.tinycloudKey, host, prefix: 'router', autoCreateSpace: false, enablePublicSpace: false });
       await owner.signIn();
       if (saved) await owner.kv.delete('router/posts/' + saved);

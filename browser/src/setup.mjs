@@ -5,12 +5,16 @@ const $ = id => document.getElementById(id), params = new URLSearchParams(locati
 const screens = ['account', 'storage', 'discord', 'rules', 'ready'];
 let groupId = params.get('group'), invite = params.get('channelinvite'), key = localStorage.getItem('router_key');
 let identity, context, storage, discord, rules, backup, envelope, step = 0, busy = false;
-const fragment = new URLSearchParams(location.hash.slice(1));
-let pairing = fragment.get('discord-pair');
-if (pairing && /^RD-PAIR-[A-Za-z0-9_-]{32}$/.test(pairing)) {
+let pairing;
+function capturePairing() {
+  const candidate = new URLSearchParams(location.hash.slice(1)).get('discord-pair');
+  if (!candidate || !/^RD-PAIR-[A-Za-z0-9_-]{32}$/.test(candidate)) return false;
+  pairing = candidate;
   sessionStorage.setItem('router_setup_pair', JSON.stringify({ group: groupId, pairing }));
   history.replaceState(null, '', location.pathname + location.search);
-} else pairing = undefined;
+  return true;
+}
+capturePairing();
 try { const saved = JSON.parse(sessionStorage.getItem('router_setup_pair')); if (!pairing && saved?.group === groupId) pairing = saved.pairing; } catch {}
 const message = (value, error = false) => { $('status').textContent = value; $('status').classList.toggle('error', error); };
 export async function request(path, body, credential = key) {
@@ -104,14 +108,14 @@ async function acceptBackup(data, encrypted) {
 }
 async function showDiscord() {
   screen(2);
-  discord = await request('/api/discord/link/status', { groupId });
+  discord = context.group.private ? await request('/api/discord/link/status', { groupId }) : { configured: false, linked: false };
   $('discord-start').hidden = !discord.configured || !!discord.linked || !!pairing;
   $('discord-confirm').hidden = true; $('discord-next').hidden = !discord.linked; $('skip-discord').hidden = !!discord.linked;
   $('unlink-discord').hidden = !discord.grantId;
-  $('discord-explanation').textContent = discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'Your host has not connected this group to Discord yet. You can finish your Router setup now and link Discord later.';
+  $('discord-explanation').textContent = !context.group.private ? 'This connection is for private groups. Continue to choose how you share with this public group.' : discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'Your host has not connected this group to Discord yet. You can finish your Router setup now and link Discord later.';
   if (discord.configured) $('open-discord').href = discord.channelUrl;
   $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. The permission expires ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
-  if (pairing) {
+  if (pairing && context.group.private) {
     let pair;
     try { pair = await request('/api/discord/pair/info', { pairing, groupId }); }
     catch (error) {
@@ -148,6 +152,7 @@ async function finish() {
   try { discord = await request('/api/discord/link/status', { groupId }); } catch { discord = undefined; }
   screen(4); $('read-group').href = fresh.group_url;
   $('ready-state').textContent = 'Your personal sharing rules are saved. You can change them at any time.' +
+    (!envelope && !storage?.linked ? ' Your account is saved only in this browser. Return to Your notes and download a recovery file before clearing browser data or moving to another device.' : '') +
     (!storage?.linked || !storage?.available ? ' Storage setup is still pending; return here before using Discord’s private commands.' : '') +
     (!discord?.linked ? ' Discord is not connected yet.' : '');
   $('ready-discord').hidden = !discord?.linked;
@@ -213,6 +218,9 @@ $('discord-next').onclick = $('skip-discord').onclick = () => act(showRules);
 $('rules-next').onclick = () => act(finish);
 $('back').onclick = () => act(() => step === 4 ? showRules() : step === 3 ? showDiscord() : checkStorage());
 $('retry').onclick = () => act(() => step === 0 ? load() : step === 1 ? checkStorage() : step === 2 ? showDiscord() : showRules());
+// Discord can reuse the current tab. A fragment-only navigation does not reload
+// the module, so consume that capability just as we do when opening a new tab.
+window.addEventListener('hashchange', () => { if (capturePairing()) act(load); });
 act(async () => {
   if (params.get('rules') === 'saved' && key) {
     identity = await lookup(key); context = await groupContext(); groupId = context.group.id;

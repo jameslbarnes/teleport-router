@@ -18,7 +18,7 @@
     <ol id="steps" aria-label="Setup progress"><li>Your account</li><li>Your notes</li><li>Discord</li><li>Sharing rules</li></ol>
     <section id="account" hidden>
       <h2>A name for your contributions</h2><p>You can read and share group notes without bringing your own AI agent.</p>
-      <form id="create-account"><label for="handle">Your Router name</label><div class="handle"><span>@</span><input id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required></div>
+      <form id="create-account"><label for="handle">Choose a unique Router name</label><div class="handle"><span>@</span><input id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required></div>
         <p class="hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores.</p><button type="submit">Create account and join</button></form>
       <div id="signed-in" hidden><p id="account-name"></p><button id="join-group">Join this group</button></div>
       <details><summary>Already have a Router account?</summary>
@@ -30,9 +30,10 @@
     </section>
     <section id="storage" hidden>
       <h2>Your notes, with a recovery key you keep</h2>
-      <p>Your published notes will be encrypted in your own TinyCloud storage. Router can open them to serve the people you share with. Keep your recovery file and its password so you can recover your account and notes independently.</p>
+      <p>TinyCloud provides personal storage for your notes; you don’t need an account there already. Your browser creates your storage key. TinyCloud keeps encrypted records, and Router opens notes for you and the people you share with.</p>
       <div id="storage-ready" hidden><p id="storage-state"></p><button id="storage-next">Continue to Discord</button></div>
       <div id="storage-new" hidden>
+        <p>Choose a password below, then download your recovery file. Keep both so you can restore your Router account and storage key on another device.</p>
         <form id="prepare-backup"><label for="backup-password">Choose a recovery password</label><input type="password" id="backup-password" autocomplete="new-password" minlength="12" required>
           <label for="backup-repeat">Repeat the password</label><input type="password" id="backup-repeat" autocomplete="new-password" minlength="12" required>
           <details><summary>Use an existing TinyCloud key</summary><p>Optional. This file is read on your device and is never uploaded.</p><input type="file" id="tinycloud-key-file" accept=".key,.txt,text/plain"></details>
@@ -47,7 +48,7 @@
         <label class="check"><input type="checkbox" id="backup-kept">I have saved the recovery file and its password somewhere I can find them again.</label>
         <p class="hint">Router cannot reset this password. The file and password together give access to your account and notes.</p>
         <p>Connect storage and allow Router to read, save and delete records in its folder for one year. Existing published Router records will move there after verification. Your key stays on this device.</p>
-        <button id="connect-storage" disabled>Connect my storage</button>
+        <button id="connect-storage" disabled>Set up my note storage</button>
       </div>
       <button id="check-storage" class="secondary">Check connection again</button>
       <button id="skip-storage" class="text-button">Choose sharing rules and read the group for now</button>
