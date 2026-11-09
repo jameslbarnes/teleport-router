@@ -17,7 +17,7 @@ def docker(*args, check=True):
 try:
     docker("create", "--name", NAME, "--network", "none", "--memory", "512m", "--memory-swap", "512m",
            "--cpus", "0.5", "--pids-limit", "128", "--read-only", "--cap-drop", "ALL",
-           "--security-opt", "no-new-privileges", "--init", "--tmpfs", "/tmp:rw,size=64m,mode=1777",
+           "--security-opt", "no-new-privileges", "--init", "--tmpfs", "/tmp:rw,size=64m,mode=1777", "--volume", "/data",
            "-e", "DISCORD_BOT_TOKEN=synthetic-discord", "-e", "DISCORD_MODEL_API_KEY=synthetic-model",
            "-e", "DISCORD_PUBLIC_ROUTER_KEY=synthetic-public", "-e", "DISCORD_PRIVATE_ROUTER_KEY=synthetic-private",
            "router-discord:ci")

@@ -72,5 +72,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(f"Discord startup failed ({type(exc).__name__}); private details omitted.", file=sys.stderr)
+        print(f"Discord startup failed ({type(exc).__name__}, errno={getattr(exc, 'errno', None)}); private details omitted.", file=sys.stderr)
         raise SystemExit(1) from None
