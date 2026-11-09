@@ -1,117 +1,32 @@
-name: Phala Recovery
-
+name: Encrypted read-only author inventory
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Recovery action to run'
-        required: true
         type: choice
         default: status
-        options:
-          - status
-          - restart
-          - api-cancel-operation
-          - api-force-restart
-          - api-stop
-          - api-start
-
+        options: [status]
+permissions:
+  contents: read
 jobs:
-  phala-recovery:
+  inventory:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+    timeout-minutes: 5
     steps:
-      - name: Install Phala CLI
-        run: npm install -g phala
-
-      - name: Show CVM status
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --omit=dev --ignore-scripts
+        working-directory: server
+      - run: node scripts/encryption-inventory.mjs
+        working-directory: server
         env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}" \
-            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
-
-      - name: Show recent CVM events
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/events" \
-            -q '{items: [.items[:10][] | {event_type,status,timestamp,message}], total, next_cursor}' || true
-
-      - name: Show CVM runtime state
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/state" || true
-
-      - name: Restart CVM
-        if: inputs.action == 'restart'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          timeout 900s phala cvms restart "${PHALA_APP_ID}" --json
-
-      - name: Cancel in-progress CVM operation through API
-        if: inputs.action == 'api-cancel-operation'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/operations/cancel" \
-            -X POST \
-            -i
-
-      - name: Force restart CVM through API
-        if: inputs.action == 'api-force-restart'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/restart" \
-            -X POST \
-            -d '{"force":true}' \
-            -i
-
-      - name: Stop CVM through API
-        if: inputs.action == 'api-stop'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/stop" \
-            -X POST \
-            -i
-
-      - name: Start CVM through API
-        if: inputs.action == 'api-start'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}/start" \
-            -X POST \
-            -i
-
-      - name: Status after recovery action
-        if: inputs.action != 'status'
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
-          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
-        run: |
-          set -euo pipefail
-          phala api "/cvms/${PHALA_APP_ID}" \
-            -q '{id,name,app_id,vm_uuid,instance_id,status,in_progress,progress,updated_at,app_url}'
+          FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-author-inventory
+          path: ${{ runner.temp }}/author-inventory.enc.json
+          retention-days: 2
