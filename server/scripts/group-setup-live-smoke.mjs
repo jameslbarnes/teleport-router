@@ -159,8 +159,11 @@ try {
   await soloPage.locator('#save').click();
   await soloPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
   await soloPage.getByRole('link', { name: 'Continue setup' }).click();
+  await soloPage.locator('#connect').waitFor();
+  assert.match(await soloPage.locator('#plugin-commands').textContent(), /\/plugin install teleport-router@teleport-router/);
+  assert.equal((await soloPage.locator('body').innerText()).includes(solo.routerKey), false, 'The Router key is not printed on the page');
+  await soloPage.locator('#connect-next').click();
   await soloPage.locator('#ready').waitFor();
-  assert.equal(await soloPage.locator('#ready-connect').isVisible(), true);
   assert.doesNotMatch(await soloPage.locator('#ready-state').textContent(), /kept only in this browser|not connected/);
   // The owner can recover the account's record key with nothing but their own key.
   const soloOwner = new TinyCloudNode({ privateKey: solo.tinycloudKey, host, prefix: 'router', autoCreateSpace: false, enablePublicSpace: false });

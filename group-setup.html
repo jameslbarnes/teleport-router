@@ -18,7 +18,7 @@
       <p id="audience" class="r-notice audience" hidden></p>
     </div>
     <p id="status" class="r-status" role="status" aria-live="polite">Loading…</p>
-    <ol id="steps" class="gs-steps" aria-label="Setup progress"><li>Your account</li><li>Storage</li><li id="step-discord">Discord</li><li>Posting rules</li><li>Done</li></ol>
+    <ol id="steps" class="gs-steps" aria-label="Setup progress"><li>Your account</li><li>Storage</li><li id="step-discord">Discord</li><li>Posting rules</li><li id="step-connect" hidden>Your agent</li><li>Done</li></ol>
     <section id="no-invite" hidden></section>
     <section id="account" hidden>
       <h2 id="account-heading" class="r-h2">Pick a name</h2><p id="account-intro">You can read and share group notes without connecting an agent of your own.</p>
@@ -80,9 +80,20 @@
       <button id="rules-next" class="r-btn" hidden>Keep these saved rules and continue</button>
       <p class="r-hint" id="rules-discord-hint">You can use Discord’s save command without connecting an agent of your own. Ordinary Discord chat is not saved automatically.</p>
     </section>
+    <section id="connect" hidden>
+      <h2 class="r-h2">Connect your agent</h2>
+      <p>In Claude Code, install the Router plugin. Run these two commands there, and paste your Router key when it asks.</p>
+      <pre class="r-code"><code id="plugin-commands">/plugin marketplace add jameslbarnes/teleport-router
+/plugin install teleport-router@teleport-router</code></pre>
+      <div class="r-actions"><button id="copy-plugin" class="r-btn">Copy commands</button><button id="copy-key" class="r-btn">Copy my Router key</button></div>
+      <p id="copy-state" class="r-status" role="status" aria-live="polite"></p>
+      <p class="r-hint">Your Router key is your account: anyone who has it can post as you. Claude Code keeps it in your system’s secure storage. The plugin connects Router and tells Claude Code to read your posting rules when each session starts.</p>
+      <p>Using the Claude app, Codex or another agent? The steps are on the <a href="/connect">Connect page</a>.</p>
+      <div class="r-actions"><button id="connect-next" class="r-btn r-btn--primary">I’ve connected my agent</button><button id="connect-later" class="r-btn r-btn--plain">I’ll do this later</button></div>
+    </section>
     <section id="ready" hidden>
       <h2 class="r-h2" id="ready-heading">You’re part of the group</h2><p id="ready-intro">Start by reading the group’s notes. When Discord is connected, you can use its commands to save a note or find something again. You do not have to post anything.</p>
-      <p id="ready-state"></p><a id="ready-connect" class="r-btn r-btn--primary" href="/connect" hidden>Connect your agent</a> <a id="read-group" class="r-btn r-btn--primary">Read the group’s notes</a>
+      <p id="ready-state"></p><a id="read-group" class="r-btn r-btn--primary">Read the group’s notes</a>
       <p id="ready-discord" hidden>In Discord, <code>/router-save</code> saves a selected note to the whole group. <code>/router-recall</code> finds notes, and <code>/router-unlink</code> withdraws your bot connection.</p>
       <details id="ready-later"><summary>Connect your own agent</summary><p>You can connect an agent later. Your saved posting rules are available to every agent you connect with your Router key.</p><a href="/connect">Connect an agent</a></details>
     </section>
