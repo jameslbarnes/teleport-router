@@ -1,5 +1,6 @@
 {
     "mode":  "live",
+    "private_conversation": true,
     "channel_note":  "This is #router-test, a private test channel for the Router bot. Scheduled jobs post Scaling Trust issues here under your name: a weekly newsletter and short daily digests about the public work of the research teams in ARIA\u0027s Scaling Trust programme, with the programme\u0027s reading list. recent_digests lists the posted issues (ids YYYY-MM-DD for a daily, weekly-YYYY-MM-DD for a weekly); digest_sources(issue, query) returns the items and reading-list entries behind one.",
     "compose_mcp_servers":  [
                                 {

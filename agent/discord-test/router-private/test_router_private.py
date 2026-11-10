@@ -37,6 +37,18 @@ class PrivateCommandsTest(unittest.IsolatedAsyncioTestCase):
     async def link(self):
         return await self.router.link(self.actor, "RD-LINK-" + "x" * 32)
 
+    async def test_shared_conversation_uses_scoped_identity_and_has_no_write_action(self):
+        with self.assertRaises(module.PrivateError):
+            await self.router.conversation(self.actor,"check")
+        await self.link()
+        await self.router.conversation(self.actor,"search",query="telescope",audienceVersion="synthetic")
+        path,payload=self.calls[-1]
+        self.assertEqual(path,"conversation/operate")
+        self.assertEqual(payload["discordUserId"],str(self.actor.user.id))
+        self.assertEqual(payload["grant"],"rdg1.synthetic")
+        with self.assertRaises(module.PrivateError):
+            await self.router.conversation(self.actor,"save",content="never")
+
     async def test_browser_pairing_stores_before_ack_and_uses_actual_discord_context(self):
         self.settings["group_id"] = "private-test"
         token = "RD-PAIR-" + "x" * 32

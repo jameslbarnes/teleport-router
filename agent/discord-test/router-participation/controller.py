@@ -13,7 +13,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from .participation import (DAY_S, AdaptiveCooldown, Msg, RateLimiter, analyze_flow, decide, format_context,
+from .participation import (DAY_S, AdaptiveCooldown, Decision, Msg, RateLimiter, analyze_flow, decide, format_context,
                             looks_like_question, speech_acts, word_cap)
 from .store import Store
 
@@ -53,6 +53,16 @@ class Controller:
         self.timers: dict[int, asyncio.Task] = {}
         self.first_pending: dict[int, float] = {}
         self.locks: dict[int, asyncio.Lock] = {}
+        self.turn_factory = None
+        self.access_notices: dict[int, float] = {}
+
+    def mentioned(self, channel_id: int, m: Msg) -> None:
+        """Private channels own mentions as well as ambient replies; Hermes never sees them."""
+        old = self.timers.get(channel_id)
+        if old and not old.done():
+            old.cancel()
+        self.first_pending.pop(channel_id, None)
+        asyncio.ensure_future(self.evaluate(channel_id, "direct mention", m.id))
 
     # Inputs ---------------------------------------------------------------------
     def record(self, channel_id: int, m: Msg) -> None:
@@ -109,10 +119,98 @@ class Controller:
             self.cooldowns[channel_id] = AdaptiveCooldown([a.start for a in speech_acts(own, burst_window_s=60)])
         return self.cooldowns[channel_id]
 
-    async def evaluate(self, channel_id: int, why: str) -> dict | None:
+    async def evaluate(self, channel_id: int, why: str, mentioned_id: int | None = None) -> dict | None:
         lock = self.locks.setdefault(channel_id, asyncio.Lock())
         async with lock:
+            if self.turn_factory:
+                try:
+                    return await asyncio.wait_for(self._evaluate_private(channel_id, why, mentioned_id), timeout=120)
+                except Exception as exc:
+                    log.warning("Private reply stopped (%s); no conversation details logged", type(exc).__name__)
+                    return {"outcome": "failed"}
             return await self._evaluate(channel_id, why)
+
+    async def _evaluate_private(self, channel_id: int, why: str, mentioned_id: int | None) -> dict | None:
+        now, mode = self.now(), self.s["mode"]
+        msgs = self.store.recent(channel_id, limit=self.s["compose_context_messages"])
+        latest = self.store.get_message(mentioned_id) if mentioned_id else (msgs[-1] if msgs else None)
+        if not latest or latest.is_self or mode == "off":
+            return None
+
+        def record(outcome, reason="", d=None):
+            return self.store.log_decision(channel_id, now, latest.id, mode, bool(d and d.speak),
+                d.intent if d else "none", d.confidence if d else 0, d.threshold if d else 0,
+                reason or (d.reason if d else outcome), {"why": why}, outcome)
+
+        async def unavailable():
+            record("access-unavailable")
+            # One explanatory notice per five minutes, or on a direct question. No note text.
+            if mode == "live" and self.poster and (mentioned_id or now - self.access_notices.get(channel_id, 0) > 300):
+                self.access_notices[channel_id] = now
+                try:
+                    await self.poster(channel_id, "I can't use group notes here while access is unavailable. "
+                        "Everyone in this Discord server must join the Router group and connect with /router-link. "
+                        "You can still use /router-recall for a private answer.", latest.id)
+                except Exception:
+                    pass
+            return {"outcome": "access-unavailable"}
+
+        if not mentioned_id and (self.store.paused_until(channel_id) > now or not self.limiter.can_post(now)):
+            record("paused-or-limited")
+            return {"outcome": "paused-or-limited"}
+        if self.store.count_checks(now - DAY_S) >= self.s["max_checks_per_day"] or self.brain is None:
+            record("check-unavailable")
+            return {"outcome": "check-unavailable"}
+        try:
+            turn = await self.turn_factory(channel_id, latest)
+        except Exception:
+            return await unavailable()
+        if mentioned_id:
+            d = Decision(True, "A person directly asked Router", 1.0, "answer", 0, 0)
+        else:
+            context_msgs = msgs[-self.s["context_messages"]:]
+            c, usage = await turn.classify(format_context(context_msgs, now))
+            if c is None:
+                record("check-failed")
+                return {"outcome": "check-failed"}
+            flow = analyze_flow(self.store.recent(channel_id, limit=60, since=now - 3600), now)
+            d = decide(c, flow, self.cooldown(channel_id), now, self.s["dyadic_backoff"])
+            idx = len(context_msgs) - 1 - d.trigger_index
+            if 0 <= idx < len(context_msgs) and not context_msgs[idx].is_self:
+                latest = context_msgs[idx]
+        decision_id = record("drafting" if d.speak else "silent", d=d)
+        if not d.speak or (mode == "shadow" and not self.s["shadow_compose"]):
+            return {"outcome": "silent", "decision": d}
+        if self.store.count_decisions(now - DAY_S, "posted") + self.store.count_decisions(now - DAY_S, "shadow-drafted") >= self.s["max_drafts_per_day"]:
+            self.store.set_outcome(decision_id, "draft-budget")
+            return {"outcome": "draft-budget"}
+        try:
+            # The triggering question is explicit even if newer messages arrived while queued.
+            context = format_context(msgs, now) + f"\nCurrent message to answer: {latest.author}: {latest.text}"
+            text, usage = await turn.compose(context, d, latest, 220 if mentioned_id else word_cap(msgs, now))
+            if not text:
+                self.store.set_outcome(decision_id, "skipped" if usage.get("skipped") else "draft-failed")
+                return {"outcome": "skipped" if usage.get("skipped") else "draft-failed"}
+            if mode == "shadow" or not self.poster:
+                # Stats survive for this process; private drafts do not enter the decision log.
+                self.store.set_outcome(decision_id, "shadow-drafted")
+                return {"outcome": "shadow-drafted"}
+            if not self.store.get_message(latest.id):
+                self.store.set_outcome(decision_id, "superseded")
+                return {"outcome": "superseded"}
+            await turn.before_send()
+        except Exception:
+            self.store.set_outcome(decision_id, "access-or-draft-failed")
+            return await unavailable()
+        try:
+            posted_id = await self.poster(channel_id, text, latest.id)
+        except Exception:
+            self.store.set_outcome(decision_id, "post-failed")
+            return {"outcome": "post-failed"}
+        if not mentioned_id:
+            self.limiter.record(self.now())
+        self.store.set_outcome(decision_id, "posted", posted_id=posted_id)
+        return {"outcome": "posted", "posted_id": posted_id}
 
     async def _evaluate(self, channel_id: int, why: str) -> dict | None:
         now, mode = self.now(), self.s["mode"]

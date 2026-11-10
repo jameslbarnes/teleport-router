@@ -176,6 +176,18 @@ class PrivateRouter:
     async def save(self, interaction, note):
         return await self.operate(interaction, "save", content=note, interactionId=str(interaction.id))
 
+    async def conversation(self, interaction, action, **fields):
+        """Read-only shared replies. Router checks the actual Discord audience, not caller-supplied IDs."""
+        actor = self.actor(interaction)
+        async with self.lock:
+            link = self._load().get(actor["discordUserId"])
+        if not link:
+            raise PrivateError("Link your Router account with /router-link before using group notes here.")
+        self.check_group(link)
+        if action not in ("check", "search", "read", "verify"):
+            raise PrivateError("Conversation access is read-only.")
+        return await self.request("conversation/operate", {**fields, **actor, "action": action, "grant": link["grant"]})
+
     async def recall(self, interaction, query, summarize):
         found = await self.operate(interaction, "search", query=query)
         entries = found.get("entries", [])[:4]

@@ -31,7 +31,8 @@ def load_settings(root: Path) -> dict:
 def register(ctx):
     root = Path(__file__).parent
     settings = load_settings(root)
-    store = Store(Path(os.environ["HERMES_HOME"]) / "plugin-data" / "router-participation" / "participation.db",
+    private_conversation = settings.get("private_conversation") is True
+    store = Store(":memory:" if private_conversation else Path(os.environ["HERMES_HOME"]) / "plugin-data" / "router-participation" / "participation.db",
                   settings.get("retention_days", 30))
     if settings.get("mode", "shadow") != "off" and not os.environ.get("ANTHROPIC_API_KEY"):
         log.warning("router-participation has no model key; it will record messages only")
@@ -56,32 +57,50 @@ def register(ctx):
         channel_id = int(settings["channel_id"])
         guild = discord.Object(id=int(settings["guild_id"]))
         test_webhooks = {int(w) for w in settings.get("test_webhook_ids", [])}
+        if private_conversation:
+            from .group_memory import GroupTurn
+            async def make_turn(key, trigger):
+                router = getattr(adapter, "router_private", None)
+                if router is None or controller.brain is None:
+                    raise RuntimeError("Private Router connection unavailable")
+                return await GroupTurn(controller.brain, router, guild.id, key, trigger).start()
+            controller.turn_factory = make_turn
 
         def watched(channel_or_id, parent_id=None):
             cid = getattr(channel_or_id, "id", channel_or_id)
             parent = getattr(channel_or_id, "parent_id", parent_id)
-            return cid if cid == channel_id or parent == channel_id else None
+            return cid if cid == channel_id or (not private_conversation and parent == channel_id) else None
 
         def to_msg(message) -> Msg:
             ref = message.reference.message_id if message.reference else None
-            return Msg(message.id, message.author.id, message.author.display_name, message.content or "",
+            own = bool(native.user and message.author.id == native.user.id)
+            text = "[Earlier bot reply omitted; read current Router sources.]" if private_conversation and own else message.content or ""
+            return Msg(message.id, message.author.id, message.author.display_name, text,
                        message.created_at.timestamp(), bool(native.user and message.author.id == native.user.id), ref)
 
         async def on_message(message):
             key = watched(message.channel)
             if key is None or message.type not in (discord.MessageType.default, discord.MessageType.reply):
                 return
+            if private_conversation and getattr(getattr(message, "guild", None), "id", None) != guild.id:
+                return
             m = to_msg(message)
             controller.record(key, m)
             if m.is_self:
                 return
-            person = not message.author.bot or (message.webhook_id is not None and message.webhook_id in test_webhooks)
+            person = not message.author.bot or (not private_conversation and message.webhook_id is not None and message.webhook_id in test_webhooks)
             summoned = native.user is not None and native.user in message.mentions  # Hermes answers these
-            if person and not summoned and not m.text.startswith("/"):
-                controller.human_message(key, m)
+            if person and not m.text.startswith("/"):
+                if private_conversation and summoned:
+                    controller.mentioned(key, m)
+                elif not summoned:
+                    controller.human_message(key, m)
 
         async def on_raw_message_edit(payload):
             if watched(payload.channel_id, getattr(payload, "parent_id", None)) and "content" in payload.data:
+                old = store.get_message(payload.message_id)
+                if private_conversation and old and old.is_self:
+                    return
                 store.edit_message(payload.message_id, payload.data["content"])
 
         async def on_raw_message_delete(payload):

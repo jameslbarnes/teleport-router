@@ -19,6 +19,8 @@ services:
       - BASE_URL
       - FIREBASE_SERVICE_ACCOUNT_BASE64
       - ANTHROPIC_API_KEY
+      # Router checks the private conversation audience directly with Discord.
+      - DISCORD_BOT_TOKEN
       - MODERATOR_URL=https://8f20c29f45571bade4b63d0f704faa926af53e7c-3000.dstack-pha-prod5.phala.network
       - MODERATOR_API_KEY
       - SENDGRID_API_KEY
