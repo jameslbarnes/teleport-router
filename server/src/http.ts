@@ -10,7 +10,7 @@
 
 import 'dotenv/config';
 import { createServer } from 'http';
-import { randomUUID, createHash } from 'crypto';
+import { randomUUID, createHash, randomBytes } from 'crypto';
 import { readFile } from 'fs/promises';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, accessSync, statSync, constants } from 'fs';
 import { join, extname, dirname } from 'path';
@@ -1126,6 +1126,30 @@ function isHeldByAutomatedReview(entry: JournalEntry, now = Date.now()): boolean
 // PENDING ENTRY RECOVERY (survive restarts)
 // ═══════════════════════════════════════════════════════════════
 
+/** Earlier releases signed email links with this literal, which is in public source. Kept only to honour old unsubscribe links. */
+const LEGACY_TOKEN_SECRET = 'router-default-secret-change-in-production';
+/** Secret for email links: the configured one, else a random one kept on the data volume, else one per process. */
+function resolveTokenSecret(): string {
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET !== LEGACY_TOKEN_SECRET) return process.env.JWT_SECRET;
+  const file = '/data/token-secret';
+  try {
+    if (existsSync(file)) {
+      const saved = readFileSync(file, 'utf8').trim();
+      if (saved.length >= 32) return saved;
+    }
+    if (existsSync('/data')) {
+      const created = randomBytes(48).toString('base64url');
+      writeFileSync(file, created, { mode: 0o600, flag: 'wx' });
+      return created;
+    }
+  } catch { /* no writable data volume: fall through */ }
+  return randomBytes(48).toString('base64url');
+}
+const TOKEN_SECRET = resolveTokenSecret();
+/** The address a person has proven is theirs. An unverified address must never grant access to notes sent to it. */
+const verifiedEmail = (user: { email?: string; emailVerified?: boolean } | null | undefined): string | undefined =>
+  user?.emailVerified ? user.email : undefined;
+
 function resolveRecoveryPath(): string {
   if (process.env.RECOVERY_FILE) return process.env.RECOVERY_FILE;
   try {
@@ -1218,7 +1242,7 @@ const notificationService: NotificationService = createNotificationService({
   anthropic,
   fromEmail: process.env.SENDGRID_FROM_EMAIL || 'notify@router.teleport.computer',
   baseUrl: BASE_URL,
-  jwtSecret: process.env.JWT_SECRET || 'router-default-secret-change-in-production',
+  jwtSecret: TOKEN_SECRET,
 });
 
 // Start daily digest job (runs hourly, sends at 14:00 UTC)
@@ -1850,7 +1874,7 @@ function createMCPServer(secretKey: string) {
           }
         }
         // Moderation tools: only show to moderators (or if no moderators configured, show to all)
-        if (['router_poll_events', 'router_review_staged', 'router_hold_entry', 'router_release_entry', 'router_trigger_spark', 'router_platform_send_dm', 'router_onboard_identity', 'router_post_daily_digest'].includes(skill.name)) {
+        if (['router_poll_events', 'router_review_staged', 'router_hold_entry', 'router_release_entry', 'router_trigger_spark', 'router_platform_send', 'router_platform_create_room', 'router_platform_send_dm', 'router_onboard_identity', 'router_post_daily_digest'].includes(skill.name)) {
           if (!(storage instanceof StagedStorage)) return false;
           if (MODERATOR_HANDLES.size > 0 && (!handle || !MODERATOR_HANDLES.has(handle))) return false;
         }
@@ -2015,7 +2039,7 @@ function createMCPServer(secretKey: string) {
       // Filter results through access control (BUG FIX: was returning private entries)
       const searchUser = await storage.getUserByKeyHash(keyHash);
       const viewerHandle = searchUser?.handle;
-      const viewerEmail = searchUser?.email;
+      const viewerEmail = verifiedEmail(searchUser);
 
       const filteredEntries: JournalEntry[] = [];
       const channelAccessCache = new Map<string, boolean>();
@@ -2457,7 +2481,7 @@ function createMCPServer(secretKey: string) {
         // Check access control
         const currentUser = await storage.getUserByKeyHash(keyHash);
         const viewerHandle = currentUser?.handle;
-        const viewerEmail = currentUser?.email;
+        const viewerEmail = verifiedEmail(currentUser);
         const isAuthor = isEntryAuthor(entry, pseudonym, viewerHandle);
         const allowed = !isHiddenWhilePending(entryId, isAuthor)
           && await canView(entry, viewerHandle, viewerEmail, isAuthor, storage, new Map<string, boolean>());
@@ -2707,7 +2731,8 @@ function createMCPServer(secretKey: string) {
       if (newBio !== undefined) updates.bio = newBio;
       if (newEmail !== undefined) {
         updates.email = newEmail;
-        // Note: email verification would be handled separately via the /api/send-verification endpoint
+        // A changed address is unproven until its owner clicks the link from /api/send-verification.
+        if (newEmail !== settingsUser.email) (updates as { emailVerified?: boolean }).emailVerified = false;
       }
       if (newEmailPrefs !== undefined) {
         const currentPrefs = settingsUser.emailPrefs || { comments: true, digest: true };
@@ -4626,6 +4651,12 @@ function createMCPServer(secretKey: string) {
     }
 
     if (name === 'router_platform_send') {
+      {
+        const requesterHandle = await getHandle();
+        if (!requesterHandle || !(MODERATOR_HANDLES.size === 0 || MODERATOR_HANDLES.has(requesterHandle))) {
+          return { content: [{ type: 'text' as const, text: 'Only the Router agent can post as the bot.' }], isError: true };
+        }
+      }
       const a = args as { platform: string; room_id: string; text: string; reply_to?: string };
       const platform = getPlatform(a.platform);
       if (!platform) {
@@ -4870,6 +4901,12 @@ function createMCPServer(secretKey: string) {
     }
 
     if (name === 'router_platform_create_room') {
+      {
+        const requesterHandle = await getHandle();
+        if (!requesterHandle || !(MODERATOR_HANDLES.size === 0 || MODERATOR_HANDLES.has(requesterHandle))) {
+          return { content: [{ type: 'text' as const, text: 'Only the Router agent can post as the bot.' }], isError: true };
+        }
+      }
       const a = args as { platform: string; name: string; type?: string; invite_handles?: string[]; topic?: string; encrypted?: boolean };
       const platform = getPlatform(a.platform);
       if (!platform) {
@@ -5209,7 +5246,7 @@ const server = createServer(async (req, res) => {
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         userHandle = user?.handle;
-        userEmail = user?.email;
+        userEmail = verifiedEmail(user);
         isAuthor = isEntryAuthor(entry, userPseudonym, user?.handle);
       }
 
@@ -5261,7 +5298,7 @@ const server = createServer(async (req, res) => {
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         userHandle = user?.handle;
-        userEmail = user?.email;
+        userEmail = verifiedEmail(user);
       }
 
       // A waiting parent is private to its author: don't confirm it exists
@@ -5376,7 +5413,7 @@ const server = createServer(async (req, res) => {
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         authorHandle = user?.handle || null;
-        authorEmail = user?.email;
+        authorEmail = verifiedEmail(user);
         if (followingOnly && user?.following) {
           followedHandleSet = new Set(user.following.map(f => f.handle));
         }
@@ -5685,7 +5722,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Get entries addressed to this user
-      const entries = await storage.getEntriesAddressedTo(user.handle, user.email, limit);
+      const entries = await storage.getEntriesAddressedTo(user.handle, verifiedEmail(user), limit);
 
       // Strip hidden content (user is never the author of entries addressed TO them)
       const strippedEntries = entries.map(e => stripHiddenContent(e, false));
@@ -5826,7 +5863,7 @@ const server = createServer(async (req, res) => {
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         authorHandle = user?.handle || null;
-        authorEmail = user?.email;
+        authorEmail = verifiedEmail(user);
         includePending = authorPseudonym === identifier || authorHandle === identifier;
       }
 
@@ -7975,8 +8012,8 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const jwtSecret = process.env.JWT_SECRET || 'router-default-secret-change-in-production';
-      const decoded = verifyUnsubscribeToken(token, jwtSecret);
+      // Unsubscribing is harmless to honour from links in older emails, so those still work.
+      const decoded = verifyUnsubscribeToken(token, TOKEN_SECRET) || verifyUnsubscribeToken(token, LEGACY_TOKEN_SECRET);
 
       if (!decoded) {
         res.writeHead(400);
@@ -8078,8 +8115,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const jwtSecret = process.env.JWT_SECRET || 'router-default-secret-change-in-production';
-      const decoded = verifyEmailToken(token, jwtSecret);
+      const decoded = verifyEmailToken(token, TOKEN_SECRET);
 
       if (!decoded) {
         res.writeHead(400);
@@ -8510,7 +8546,7 @@ const server = createServer(async (req, res) => {
         const keyHash = hashSecretKey(secretKey);
         const user = await storage.getUserByKeyHash(keyHash);
         authorHandle = user?.handle || null;
-        authorEmail = user?.email;
+        authorEmail = verifiedEmail(user);
       }
 
       // Same visibility checks as the feed: entries addressed to people or groups
@@ -9027,6 +9063,15 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // Admin: Check for unmigrated entries
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'GET' && url.pathname === '/api/admin/unmigrated') {
+      {
+        const adminKey = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+        const adminUser = adminKey && isValidSecretKey(adminKey) ? await storage.getUserByKeyHash(hashSecretKey(adminKey)) : null;
+        if (!adminUser?.handle || !MODERATOR_HANDLES.has(adminUser.handle)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Moderator sign-in required.' }));
+          return;
+        }
+      }
       try {
         // Get all users with legacyPseudonym
         const usersWithLegacy = await storage.getUsersWithLegacyPseudonym();
@@ -9062,6 +9107,15 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // Admin: Migrate all entries for all users
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/api/admin/migrate-all') {
+      {
+        const adminKey = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+        const adminUser = adminKey && isValidSecretKey(adminKey) ? await storage.getUserByKeyHash(hashSecretKey(adminKey)) : null;
+        if (!adminUser?.handle || !MODERATOR_HANDLES.has(adminUser.handle)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Moderator sign-in required.' }));
+          return;
+        }
+      }
       try {
         const usersWithLegacy = await storage.getUsersWithLegacyPseudonym();
 
