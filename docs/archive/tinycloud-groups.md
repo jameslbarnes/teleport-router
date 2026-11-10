@@ -1,3 +1,5 @@
+> Archived 2026-11-10. This is a historical design note and no longer describes how Router works. The current description is [DOCS.md](../../DOCS.md).
+
 # Groups on TinyCloud
 
 A group is an invite-only channel whose posts live in the group owner's [TinyCloud](https://tinycloud.xyz) space, not in the Router's database. The owner grants the Router a scoped, revocable permission on one folder of their space. The Router reads and writes posts only through that grant and keeps no copies, so the owner can withdraw the group from the Router at any time without asking us.

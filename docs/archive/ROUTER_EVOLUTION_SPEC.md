@@ -1,3 +1,5 @@
+> Archived 2026-11-10. This is a historical design note and no longer describes how Router works. The current description is [DOCS.md](../../DOCS.md).
+
 # Router Evolution Spec: Embodied Intelligence
 
 ## Vision
