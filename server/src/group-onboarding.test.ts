@@ -50,3 +50,29 @@ describe('Group setup without changing membership or personal choices', () => {
     expect(open.prompt).not.toContain('Use the existing automatic mode');
   });
 });
+
+describe('Invitation limits and removing a member', () => {
+  it('gives every invitation an end date and a join limit, and rejects values outside the bounds', async () => {
+    const { inviteLimits, INVITE_DEFAULT_HOURS, INVITE_DEFAULT_USES } = await import('./group-onboarding.js');
+    expect(inviteLimits({}, 1000)).toEqual({ expiresAt: 1000 + INVITE_DEFAULT_HOURS * 3600_000, maxUses: INVITE_DEFAULT_USES });
+    expect(inviteLimits({ expires_in_hours: 24, max_uses: 1 }, 0)).toEqual({ expiresAt: 86400_000, maxUses: 1 });
+    for (const bad of [{ max_uses: 0 }, { max_uses: -1 }, { max_uses: 101 }, { max_uses: 1.5 }, { max_uses: '5' }, { expires_in_hours: 0 }, { expires_in_hours: 721 }, { expires_in_hours: Number.NaN }, { expires_in_hours: Infinity }]) {
+      expect(() => inviteLimits(bad as never)).toThrowError(expect.objectContaining({ status: 400 }));
+    }
+  });
+
+  it('lets only an admin remove an ordinary member, never themselves, another admin or the Discord connection', async () => {
+    const { checkMemberRemoval } = await import('./group-onboarding.js');
+    const group: Channel = { ...channel, discord: { guildId: '100000000000000001', scope: 'guild', botHandle: 'group_bot', version: 'v' },
+      subscribers: [{ handle: 'alice', role: 'admin', joinedAt: 1 }, { handle: 'cora', role: 'admin', joinedAt: 1 },
+        { handle: 'bob', role: 'member', joinedAt: 1 }, { handle: 'group_bot', role: 'member', joinedAt: 1 }] };
+    expect(checkMemberRemoval(group, 'alice', '@Bob')).toBe('bob');
+    expect(() => checkMemberRemoval(group, 'bob', 'alice')).toThrowError(expect.objectContaining({ status: 403 }));
+    expect(() => checkMemberRemoval(group, 'outsider', 'bob')).toThrowError(expect.objectContaining({ status: 403 }));
+    expect(() => checkMemberRemoval(group, 'alice', 'alice')).toThrowError(expect.objectContaining({ status: 400 }));
+    expect(() => checkMemberRemoval(group, 'alice', 'cora')).toThrowError(expect.objectContaining({ status: 403 }));
+    expect(() => checkMemberRemoval(group, 'alice', 'nobody')).toThrowError(expect.objectContaining({ status: 404 }));
+    expect(() => checkMemberRemoval(group, 'alice', 'group_bot')).toThrowError(expect.objectContaining({ status: 409 }));
+    expect(() => checkMemberRemoval(group, 'alice', undefined)).toThrowError(expect.objectContaining({ status: 404 }));
+  });
+});

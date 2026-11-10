@@ -31,7 +31,7 @@ import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE, POSTING_CADENCE_INSTRUCTIONS, POSTING_STYLE_INSTRUCTIONS } from './posting-rules.js';
-import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError } from './group-onboarding.js';
+import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt, SHARING_NOTICE_INSTRUCTIONS } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
@@ -691,8 +691,8 @@ export const SYSTEM_SKILLS: Skill[] = [
       properties: {
         action: {
           type: 'string',
-          enum: ['list', 'join', 'leave', 'create', 'info', 'invite', 'invite_user', 'add_skill', 'update_skill', 'remove_skill'],
-          description: 'list: show your channels + public channels. join: subscribe. leave: unsubscribe. create: create a new channel. info: show channel details. invite: generate invite link (admin). invite_user: send invitation to a user (admin). add_skill: add a skill to a channel (admin). update_skill: update a skill (admin). remove_skill: remove a skill (admin).',
+          enum: ['list', 'join', 'leave', 'create', 'info', 'invite', 'invite_user', 'remove_member', 'add_skill', 'update_skill', 'remove_skill'],
+          description: 'list: show your channels + public channels. join: subscribe. leave: unsubscribe. create: create a new channel. info: show channel details. invite: generate invite link (admin); it expires after 7 days or 10 joins unless you set expires_in_hours or max_uses. invite_user: send invitation to a user (admin). remove_member: remove a member from a group (admin); they lose access to its notes at once. add_skill: add a skill to a channel (admin). update_skill: update a skill (admin). remove_skill: remove a skill (admin).',
         },
         channel_id: {
           type: 'string',
@@ -700,7 +700,15 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         handle: {
           type: 'string',
-          description: 'For invite_user: the handle of the user to invite.',
+          description: 'For invite_user: the handle of the user to invite. For remove_member: the handle to remove.',
+        },
+        expires_in_hours: {
+          type: 'number',
+          description: 'For invite: hours until the link stops working (default 168, maximum 720).',
+        },
+        max_uses: {
+          type: 'number',
+          description: 'For invite: how many people can join with the link (default 10, maximum 100).',
         },
         name: {
           type: 'string',
@@ -2563,7 +2571,7 @@ function createMCPServer(secretKey: string) {
       return {
         content: [{
           type: 'text' as const,
-          text: (groupId ? `Audience: #${groupId} only. Reading the latest 500 group notes.\n\n` : '') + (responseParts.join('\n\n') || 'No results found.'),
+          text: (groupId ? `Audience: #${groupId} only. Reading the latest 500 group notes. Keep what you read here inside #${groupId}: do not quote or summarize it in a post to any other audience unless its author asks.\n\n` : '') + (responseParts.join('\n\n') || 'No results found.'),
         }],
       };
     }
@@ -3302,9 +3310,9 @@ function createMCPServer(secretKey: string) {
       const skillName = (args as { skill_name?: string })?.skill_name?.toLowerCase();
       const skillInstructions = (args as { instructions?: string })?.instructions;
 
-      if (!action || !['list', 'join', 'leave', 'create', 'info', 'invite', 'invite_user', 'add_skill', 'update_skill', 'remove_skill'].includes(action)) {
+      if (!action || !['list', 'join', 'leave', 'create', 'info', 'invite', 'invite_user', 'remove_member', 'add_skill', 'update_skill', 'remove_skill'].includes(action)) {
         return {
-          content: [{ type: 'text' as const, text: 'Action must be one of: list, join, leave, create, info, invite, invite_user, add_skill, update_skill, remove_skill.' }],
+          content: [{ type: 'text' as const, text: 'Action must be one of: list, join, leave, create, info, invite, invite_user, remove_member, add_skill, update_skill, remove_skill.' }],
           isError: true,
         };
       }
@@ -3502,6 +3510,21 @@ function createMCPServer(secretKey: string) {
         };
       }
 
+      if (action === 'remove_member') {
+        const channel = channelId ? await storage.getChannel(channelId) : null;
+        if (!channelId || !channel) {
+          return { content: [{ type: 'text' as const, text: 'Choose a group you administer with channel_id.' }], isError: true };
+        }
+        try {
+          const removed = checkMemberRemoval(channel, currentUser.handle, targetHandle);
+          await storage.removeSubscriber(channelId, removed);
+          return { content: [{ type: 'text' as const, text: `Removed @${removed} from #${channelId}. They can no longer read its notes, and their Discord connection to this group has stopped working. Notes they already saved stay in the group; copies they made elsewhere are not affected. Invitation links you shared earlier still work until they expire.` }] };
+        } catch (err) {
+          if (!(err instanceof GroupOnboardingError)) throw err;
+          return { content: [{ type: 'text' as const, text: err.message }], isError: true };
+        }
+      }
+
       if (action === 'invite') {
         const channel = await storage.getChannel(channelId);
         if (!channel) {
@@ -3520,12 +3543,19 @@ function createMCPServer(secretKey: string) {
           };
         }
 
+        let limits: ReturnType<typeof inviteLimits>;
+        try { limits = inviteLimits(args as { expires_in_hours?: unknown; max_uses?: unknown }); }
+        catch (err) {
+          if (!(err instanceof GroupOnboardingError)) throw err;
+          return { content: [{ type: 'text' as const, text: err.message }], isError: true };
+        }
         const token = generateEntryId(); // Reuse ID generator for random tokens
         const invite: ChannelInvite = {
           token,
           channelId,
           createdBy: currentUser.handle,
           createdAt: Date.now(),
+          ...limits,
           uses: 0,
         };
 
@@ -3533,7 +3563,7 @@ function createMCPServer(secretKey: string) {
 
         const inviteUrl = `${BASE_URL}/join?channelinvite=${encodeURIComponent(token)}`;
         return {
-          content: [{ type: 'text' as const, text: `Invite created for #${channelId}.\n\nJoin link: ${inviteUrl}\nToken: ${token}\n\nUsers can click the link to join. They can also join manually with: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"` }],
+          content: [{ type: 'text' as const, text: `Invite created for #${channelId}. Anyone with this link can join until ${new Date(limits.expiresAt).toISOString().slice(0, 10)}, for up to ${limits.maxUses} ${limits.maxUses === 1 ? 'person' : 'people'}. Share it only with the people you mean to invite.\n\nJoin link: ${inviteUrl}\nToken: ${token}\n\nUsers can click the link to join. They can also join manually with: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"` }],
         };
       }
 
@@ -3592,6 +3622,7 @@ function createMCPServer(secretKey: string) {
           channelId,
           createdBy: currentUser.handle,
           createdAt: Date.now(),
+          expiresAt: inviteLimits({}).expiresAt,
           maxUses: 1,
           forHandle: targetHandle,
           uses: 0,
@@ -3599,7 +3630,7 @@ function createMCPServer(secretKey: string) {
         await storage.createInvite(invite);
 
         // Create an addressed entry to the target user with the invitation
-        const inviteUrl = `${BASE_URL}/?view=channel&id=${encodeURIComponent(channelId)}&invite=${encodeURIComponent(token)}`;
+        const inviteUrl = `${BASE_URL}/join?channelinvite=${encodeURIComponent(token)}`;
         const inviteMessage = `You've been invited to join #${channelId} by @${currentUser.handle}.\n\nChannel: ${channel.name}${channel.description ? ' — ' + channel.description : ''}\n\nJoin link: ${inviteUrl}\n\nManual fallback: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"`;
 
         // Use short staging delay (60 seconds) so invitations arrive quickly
@@ -5033,6 +5064,8 @@ function createMCPServer(secretKey: string) {
 // ═══════════════════════════════════════════════════════════════
 
 const corsHeaders = {
+  // Never let a browser guess that a JSON or text response is a page or a script.
+  'X-Content-Type-Options': 'nosniff',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -6771,6 +6804,30 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // POST /api/channels/:id/remove-member - Remove an ordinary member (admin only)
+    if (req.method === 'POST' && url.pathname.match(/^\/api\/channels\/[^/]+\/remove-member$/)) {
+      const channelId = decodeURIComponent(url.pathname.split('/')[3]);
+      let parsed: { handle?: unknown };
+      try { parsed = JSON.parse(await readBody(req, 4096)); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
+      const key = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+      const user = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
+      if (!user?.handle) { res.writeHead(401); res.end(JSON.stringify({ error: 'Sign in to manage this group.' })); return; }
+      const channel = await storage.getChannel(channelId);
+      // Same answer for a missing group and one the caller does not administer.
+      if (!channel || !channel.subscribers.some(s => s.handle === user.handle && s.role === 'admin')) {
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Only group admins can remove members.' })); return;
+      }
+      try {
+        const removed = checkMemberRemoval(channel, user.handle, parsed?.handle);
+        await storage.removeSubscriber(channelId, removed);
+        res.writeHead(200); res.end(JSON.stringify({ ok: true, removed }));
+      } catch (err) {
+        if (!(err instanceof GroupOnboardingError)) throw err;
+        res.writeHead(err.status); res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     // POST /api/channels/:id/invite - Create invite (admin only)
     if (req.method === 'POST' && url.pathname.match(/^\/api\/channels\/[^/]+\/invite$/)) {
       const channelId = decodeURIComponent(url.pathname.split('/')[3]);
@@ -6811,14 +6868,19 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      let limits: ReturnType<typeof inviteLimits>;
+      try { limits = inviteLimits(parsed); }
+      catch (err) {
+        if (!(err instanceof GroupOnboardingError)) throw err;
+        res.writeHead(err.status); res.end(JSON.stringify({ error: err.message })); return;
+      }
       const token = generateEntryId();
       const invite: ChannelInvite = {
         token,
         channelId,
         createdBy: user.handle,
         createdAt: Date.now(),
-        expiresAt: parsed.expires_in_hours ? Date.now() + parsed.expires_in_hours * 60 * 60 * 1000 : undefined,
-        maxUses: parsed.max_uses,
+        ...limits,
         uses: 0,
       };
 
@@ -6926,6 +6988,7 @@ const server = createServer(async (req, res) => {
         channelId,
         createdBy: user.handle,
         createdAt: Date.now(),
+        expiresAt: inviteLimits({}).expiresAt,
         maxUses: 1,
         forHandle: targetHandle,
         uses: 0,
@@ -6934,7 +6997,7 @@ const server = createServer(async (req, res) => {
 
       // Create addressed entry to target user
       const pseudonym = derivePseudonym(parsed.secret_key);
-      const inviteUrl = `${BASE_URL}/?view=channel&id=${encodeURIComponent(channelId)}&invite=${encodeURIComponent(token)}`;
+      const inviteUrl = `${BASE_URL}/join?channelinvite=${encodeURIComponent(token)}`;
       const inviteMessage = `You've been invited to join #${channelId} by @${user.handle}.\n\nChannel: ${channel.name}${channel.description ? ' — ' + channel.description : ''}\n\nJoin link: ${inviteUrl}\n\nManual fallback: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"`;
       const shortStagingDelay = 60 * 1000;
 
@@ -7831,7 +7894,15 @@ const server = createServer(async (req, res) => {
       const updates: Partial<{ displayName: string; bio: string; links: string[]; stagingDelayMs: number; defaultHumanVisible: boolean }> = {};
       if (displayName !== undefined) updates.displayName = displayName;
       if (bio !== undefined) updates.bio = bio;
-      if (links !== undefined) updates.links = links;
+      if (links !== undefined) {
+        // Profile links are shown to other people as clickable links: ordinary web addresses only.
+        if (!Array.isArray(links) || links.length > 10 || links.some(link => typeof link !== 'string' || link.length > 300 || !/^https?:\/\/[^\s"'<>]+$/i.test(link))) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Links must be up to 10 web addresses starting with http:// or https://.' }));
+          return;
+        }
+        updates.links = links;
+      }
       if (stagingDelayMs !== undefined) updates.stagingDelayMs = Number(stagingDelayMs);
       if (defaultHumanVisible !== undefined) updates.defaultHumanVisible = Boolean(defaultHumanVisible);
 
@@ -8046,6 +8117,14 @@ const server = createServer(async (req, res) => {
     // POST /api/trigger-digest - Manually trigger daily digest (for testing)
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/api/trigger-digest') {
+      // Sends email to every subscriber: moderators only.
+      const digestKey = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+      const digestCaller = digestKey && isValidSecretKey(digestKey) ? await storage.getUserByKeyHash(hashSecretKey(digestKey)) : null;
+      if (!digestCaller?.handle || !MODERATOR_HANDLES.has(digestCaller.handle)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Moderator sign-in required.' }));
+        return;
+      }
       console.log('[Digest] Manual trigger requested');
       const result = await notificationService.sendDailyDigests();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -8063,6 +8142,14 @@ const server = createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'handle query parameter required' }));
         return;
       }
+      // Sends email and spends a model call: only for your own account, or a moderator.
+      const digestKey = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+      const digestCaller = digestKey && isValidSecretKey(digestKey) ? await storage.getUserByKeyHash(hashSecretKey(digestKey)) : null;
+      if (!digestCaller?.handle || (digestCaller.handle !== handle && !MODERATOR_HANDLES.has(digestCaller.handle))) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Sign in as this account or as a moderator.' }));
+        return;
+      }
       console.log(`[Digest] Test digest requested for @${handle}`);
       const result = await notificationService.sendTestDigest(handle);
       if (!result) {
@@ -8073,7 +8160,8 @@ const server = createServer(async (req, res) => {
       // Return the HTML so it can be previewed
       const preview = url.searchParams.get('preview') === 'true';
       if (preview) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
+        // The preview contains other people's text. Serve it as an inert document: no scripts, no access to this site.
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src https: data:", 'Cache-Control': 'no-store' });
         res.end(result.html);
       } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -8456,7 +8544,9 @@ const server = createServer(async (req, res) => {
         || (url.pathname === '/api/tutorial' && (url.searchParams.has('group') || url.searchParams.has('channelinvite'))))) {
       res.setHeader('Cache-Control', 'no-store');
       try {
-        const key = req.headers.authorization?.replace(/^Bearer /i, '') || url.searchParams.get('key');
+        // The setup page sends the key in a header. Only the older /api/tutorial links carry it in the URL.
+        const key = req.headers.authorization?.replace(/^Bearer /i, '')
+          || (url.pathname === '/api/tutorial' ? url.searchParams.get('key') : null);
         const user = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
         const inviteToken = url.searchParams.get('channelinvite');
         if (!user && !inviteToken) throw new GroupOnboardingError('Sign in to open your group setup.', 401);

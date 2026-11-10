@@ -114,7 +114,7 @@ async function showDiscord() {
   $('unlink-discord').hidden = !discord.grantId;
   $('discord-explanation').textContent = !context.group.private ? 'This connection is for private groups. Continue to choose how you share with this public group.' : discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'Your host has not connected this group to Discord yet. You can finish your Router setup now and link Discord later.';
   if (discord.configured) $('open-discord').href = discord.channelUrl;
-  $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. The permission expires ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
+  $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. It stays connected while you use it. Without use, it ends on ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
   if (pairing && context.group.private) {
     let pair;
     try { pair = await request('/api/discord/pair/info', { pairing, groupId }); }

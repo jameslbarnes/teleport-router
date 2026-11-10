@@ -6,6 +6,40 @@ export class GroupOnboardingError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }
 
+export const INVITE_DEFAULT_HOURS = 7 * 24, INVITE_MAX_HOURS = 30 * 24;
+export const INVITE_DEFAULT_USES = 10, INVITE_MAX_USES = 100;
+
+/** A forwarded invitation link is the key to a private group, so every link ends: by date and by number of joins. */
+export function inviteLimits(input: { expires_in_hours?: unknown; max_uses?: unknown }, now = Date.now()): { expiresAt: number; maxUses: number } {
+  const bounded = (value: unknown, fallback: number, max: number, label: string) => {
+    if (value === undefined || value === null) return fallback;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > max) {
+      throw new GroupOnboardingError(`${label} must be a whole number from 1 to ${max}.`, 400);
+    }
+    return value;
+  };
+  return {
+    expiresAt: now + bounded(input.expires_in_hours, INVITE_DEFAULT_HOURS, INVITE_MAX_HOURS, 'expires_in_hours') * 3600_000,
+    maxUses: bounded(input.max_uses, INVITE_DEFAULT_USES, INVITE_MAX_USES, 'max_uses'),
+  };
+}
+
+/** Only an admin can remove someone, and only an ordinary member: admins leave on their own. */
+export function checkMemberRemoval(channel: Channel, adminHandle: string, targetHandle: unknown): string {
+  if (!channel.subscribers.some(s => s.handle === adminHandle && s.role === 'admin')) {
+    throw new GroupOnboardingError('Only group admins can remove members.', 403);
+  }
+  const handle = typeof targetHandle === 'string' ? targetHandle.replace(/^@/, '').toLowerCase() : '';
+  const target = channel.subscribers.find(s => s.handle === handle);
+  if (!target) throw new GroupOnboardingError('That person is not a member of this group.', 404);
+  if (handle === adminHandle) throw new GroupOnboardingError('To remove yourself, leave the group.', 400);
+  if (target.role === 'admin') throw new GroupOnboardingError('Admins can only leave on their own.', 403);
+  if (channel.discord?.botHandle === handle) {
+    throw new GroupOnboardingError('This is the group’s Discord connection. Removing it would stop Discord commands for everyone.', 409);
+  }
+  return handle;
+}
+
 /** Joining is separate from choosing where an agent may post. This is only a draft. */
 export function groupPostingDraft(groupId: string, privateGroup = true): PostingRulesDraft {
   return {

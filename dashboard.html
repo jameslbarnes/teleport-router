@@ -392,7 +392,7 @@
                     ? '<span class="user-entries zero">0 entries</span>'
                     : `<span class="user-entries">${entryCount} ${entryCount === 1 ? 'entry' : 'entries'}</span>`;
                 const preview = latestEntry
-                    ? `<span class="user-preview">${latestEntry.aiOnly ? '(ai-only)' : latestEntry.content}${latestEntry.content && latestEntry.content.length >= 120 ? '…' : ''}</span>`
+                    ? `<span class="user-preview">${latestEntry.aiOnly ? '(ai-only)' : String(latestEntry.content ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))}${latestEntry.content && latestEntry.content.length >= 120 ? '…' : ''}</span>`
                     : '';
                 return `
                     <li class="user-item">

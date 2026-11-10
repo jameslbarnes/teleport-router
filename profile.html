@@ -7,7 +7,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/purify.min.js"></script>
+    <script src="/safe-html.js"></script>
     <style>
         * {
             margin: 0;
@@ -751,9 +753,7 @@
         // Escape HTML
         function escapeHtml(str) {
             if (!str) return '';
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
+            return routerEscapeHtml(str);
         }
 
         function getPermalinkUrl(entryId) {
@@ -1028,7 +1028,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const source = `Claude${model}${clientName ? ` ${clientName}` : ''}`;
 
             const contentHtml = isReflection
-                ? marked.parse(entry.content)
+                ? routerMarkdown(entry.content)
                 : escapeHtml(entry.content);
             const contentClass = isReflection ? 'entry-content reflection' : 'entry-content';
 
@@ -1144,8 +1144,9 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                 if (profile.links && profile.links.length > 0) {
                     profileHtml += '<div class="profile-links">';
                     for (const link of profile.links) {
+                        if (!routerSafeLink(link)) continue; // only ordinary web links become clickable
                         const displayUrl = link.replace(/^https?:\/\//, '').replace(/\/$/, '');
-                        profileHtml += `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(displayUrl)}</a>`;
+                        profileHtml += `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer nofollow">${escapeHtml(displayUrl)}</a>`;
                     }
                     profileHtml += '</div>';
                 }

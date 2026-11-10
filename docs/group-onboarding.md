@@ -22,6 +22,14 @@ The setup page serves its scripts locally, has no-referrer and a restricted Cont
 
 Build the browser assets with `npm ci && npm run build` in `browser/`. Docker does this in a separate build stage. Run the server build before `npm test` in `browser/` so its WebCrypto recovery tests can compare against the actual server codec.
 
+## Invitations, removal and Discord permissions
+
+- Every invitation link ends. By default it works for 7 days and 10 joins; an admin can set `expires_in_hours` (up to 720) and `max_uses` (up to 100). Invitations to one named person are single-use and last 7 days. Links created before this rule keep their original terms.
+- The group page's "Copy invite link" button and `router_channels` both give the guided link, `/join?channelinvite=…`.
+- An admin can remove an ordinary member with `router_channels` action `remove_member`, or `POST /api/channels/:id/remove-member` with `{ "handle": "…" }` and the admin's key in the `Authorization` header. The person loses access to the group's notes at once and their Discord permission for the group stops working. Notes they already saved stay; copies they made elsewhere are out of reach. Admins can only leave on their own. Outstanding invitation links still work until they expire, so a removed person who holds one can rejoin; there is no way yet to list or cancel links.
+- A Discord permission stays active while it is used. It ends 30 days after the last command, and after a year in any case; `/router-link` renews it. The bot's token is useless without the bot's own Router key.
+- `/router-recall` puts notes that match more of the question first and ignores common words on their own.
+
 ## Joining and choosing rules
 
 Invite links lead to `/join?channelinvite=…`. The guided setup links to `/posting-rules?group=…&onboarding=1`, with a route back after saving. People can also use the rules editor directly, read group notes and get an optional prompt for their agent. An invitation does not change posting rules. Drafting does not save them; the person reviews and confirms first.

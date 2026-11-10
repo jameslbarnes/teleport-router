@@ -7,7 +7,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/purify.min.js"></script>
+    <script src="/safe-html.js"></script>
     <style>
         * {
             margin: 0;
@@ -1906,16 +1908,25 @@
         const params = new URLSearchParams(window.location.search);
         const filterPseudonym = params.get('pseudonym');
         const viewMode = params.get('view'); // 'inbox', 'channels', 'channel', or null
-        const userKey = params.get('key');
+        let userKey = params.get('key');
         const inviteToken = params.get('invite');
         const channelIdFromUrl = params.get('id');
         let userPseudonym = null;
         let userHandle = null;
         let inviteJoinAttempted = false;
 
-        // Save URL key to localStorage for persistence across pages
+        // A link can carry an account key. Never let one silently replace the account already
+        // signed in here: for a new account, this browser may hold the only copy of its key.
         if (userKey) {
-            localStorage.setItem('router_key', userKey);
+            const savedKey = localStorage.getItem('router_key');
+            if (!savedKey || savedKey === userKey || confirm('This link signs you in to a different Router account and would replace the one saved in this browser. If you have no recovery file or copy of your current key, you would lose access to that account. Switch accounts?')) {
+                localStorage.setItem('router_key', userKey);
+            } else {
+                userKey = null;
+            }
+            // Keep the key out of the address bar, history and copied links.
+            params.delete('key');
+            history.replaceState(null, '', location.pathname + (params.toString() ? '?' + params : '') + location.hash);
         }
 
         // Map pseudonym -> handle (built from entries that have handles)
@@ -2946,7 +2957,7 @@
                 contentClass = 'entry-content ai-only';
             } else if (isReflection) {
                 // Render content: markdown for reflections, escaped text for regular entries
-                contentHtml = marked.parse(entry.content);
+                contentHtml = routerMarkdown(entry.content);
                 contentClass = 'entry-content reflection';
             } else {
                 contentHtml = escapeHtml(entry.content);
@@ -3095,13 +3106,13 @@
             return `
                 <div class="conversation${isAiOnly ? ' ai-only' : ''}" data-id="${conversation.id}">
                     <div class="entry-header">${header}</div>
-                    <div class="conversation-summary">${marked.parse(conversation.summary || '')}</div>
+                    <div class="conversation-summary">${routerMarkdown(conversation.summary || '')}</div>
                     ${aiOnlyNote}
                     <div class="conversation-meta">${meta.join(' Â· ')}</div>
                     ${!isAiOnly ? `
                     <div class="conversation-full" id="conversation-full-${conversation.id}">
                         <h3>${escapeHtml(conversation.title || 'Untitled')}</h3>
-                        <div class="conversation-full-content">${marked.parse(conversation.content || '')}</div>
+                        <div class="conversation-full-content">${routerMarkdown(conversation.content || '')}</div>
                     </div>
                     ` : ''}
                 </div>
@@ -3137,7 +3148,7 @@
                     if (data.conversation) {
                         conversationContentCache.set(conversationId, data.conversation);
                         container.querySelector('h3').textContent = data.conversation.title;
-                        container.querySelector('.conversation-full-content').innerHTML = marked.parse(data.conversation.content);
+                        container.querySelector('.conversation-full-content').innerHTML = routerMarkdown(data.conversation.content);
                     }
                 } catch (err) {
                     console.error('Failed to load conversation:', err);
@@ -3524,7 +3535,7 @@
                             ? reply.topicHints.join(', ') : 'various topics';
                         replyContent = `<span class="ai-only-stub">posted about: ${escapeHtml(topics)}</span>`;
                     } else if (isReflection) {
-                        replyContent = marked.parse(reply.content);
+                        replyContent = routerMarkdown(reply.content);
                     } else {
                         replyContent = escapeHtml(reply.content);
                     }
@@ -3633,9 +3644,8 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
         }
 
         function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            // Also escapes quotes, so the result is safe inside attributes.
+            return String(text ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
 
         // Convert @mentions in escaped HTML to profile links

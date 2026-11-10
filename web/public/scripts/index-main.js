@@ -3,7 +3,7 @@
         const params = new URLSearchParams(window.location.search);
         const filterPseudonym = params.get('pseudonym');
         const viewMode = params.get('view'); // 'inbox', 'channels', 'channel', or null
-        const userKey = params.get('key');
+        let userKey = params.get('key');
         const inviteToken = params.get('invite');
         const channelIdFromUrl = params.get('id');
         let userPseudonym = null;
@@ -28,9 +28,18 @@
             }
         }
 
-        // Save URL key to localStorage for persistence across pages
+        // A link can carry an account key. Never let one silently replace the account already
+        // signed in here: for a new account, this browser may hold the only copy of its key.
         if (userKey) {
-            localStorage.setItem('router_key', userKey);
+            const savedKey = localStorage.getItem('router_key');
+            if (!savedKey || savedKey === userKey || confirm('This link signs you in to a different Router account and would replace the one saved in this browser. If you have no recovery file or copy of your current key, you would lose access to that account. Switch accounts?')) {
+                localStorage.setItem('router_key', userKey);
+            } else {
+                userKey = null;
+            }
+            // Keep the key out of the address bar, history and copied links.
+            params.delete('key');
+            history.replaceState(null, '', location.pathname + (params.toString() ? '?' + params : '') + location.hash);
         }
 
         // Map pseudonym -> handle (built from entries that have handles)
@@ -939,11 +948,12 @@
                     throw new Error(data.error || 'Failed to create invite link');
                 }
 
-                const inviteUrl = `${window.location.origin}/?view=channel&id=${encodeURIComponent(channelId)}&invite=${encodeURIComponent(data.token)}`;
+                // Invitations open the guided setup, which keeps the group and its audience in view.
+                const inviteUrl = `${window.location.origin}/join?channelinvite=${encodeURIComponent(data.token)}`;
 
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     await navigator.clipboard.writeText(inviteUrl);
-                    showJoinStatus(`Invite link copied for #${channelId}.`, 'success', 2500);
+                    showJoinStatus(`Invite link copied for #${channelId}. It works for 7 days and up to 10 people.`, 'success', 5000);
                     if (buttonEl) buttonEl.textContent = 'Copied!';
                 } else {
                     prompt('Copy this invite link:', inviteUrl);
@@ -1057,7 +1067,7 @@
                 contentClass = 'entry-content ai-only';
             } else if (isReflection) {
                 // Render content: markdown for reflections, escaped text for regular entries
-                contentHtml = marked.parse(entry.content);
+                contentHtml = routerMarkdown(entry.content);
                 contentClass = 'entry-content reflection';
             } else {
                 contentHtml = escapeHtml(entry.content);
@@ -1204,13 +1214,13 @@
             return `
                 <div class="conversation${isAiOnly ? ' ai-only' : ''}" data-id="${conversation.id}">
                     <div class="entry-header">${header}</div>
-                    <div class="conversation-summary">${marked.parse(conversation.summary || '')}</div>
+                    <div class="conversation-summary">${routerMarkdown(conversation.summary || '')}</div>
                     ${aiOnlyNote}
                     <div class="conversation-meta">${meta.join(' · ')}</div>
                     ${!isAiOnly ? `
                     <div class="conversation-full" id="conversation-full-${conversation.id}">
                         <h3>${escapeHtml(conversation.title || 'Untitled')}</h3>
-                        <div class="conversation-full-content">${marked.parse(conversation.content || '')}</div>
+                        <div class="conversation-full-content">${routerMarkdown(conversation.content || '')}</div>
                     </div>
                     ` : ''}
                 </div>
@@ -1246,7 +1256,7 @@
                     if (data.conversation) {
                         conversationContentCache.set(conversationId, data.conversation);
                         container.querySelector('h3').textContent = data.conversation.title;
-                        container.querySelector('.conversation-full-content').innerHTML = marked.parse(data.conversation.content);
+                        container.querySelector('.conversation-full-content').innerHTML = routerMarkdown(data.conversation.content);
                     }
                 } catch (err) {
                     console.error('Failed to load conversation:', err);
@@ -1336,7 +1346,7 @@
             container.innerHTML = entries.map(entry => `
                 <div class="entry">
                     <p class="entry-content">${escapeHtml(entry.content)}</p>
-                    <div class="entry-meta">${formatTime(entry.timestamp)}${entry.client ? ` · ${entry.client}` : ''}</div>
+                    <div class="entry-meta">${formatTime(entry.timestamp)}${entry.client ? ` · ${escapeHtml(entry.client)}` : ''}</div>
                 </div>
             `).join('');
         }
@@ -1629,7 +1639,7 @@
                             ? reply.topicHints.join(', ') : 'various topics';
                         replyContent = `<span class="ai-only-stub">posted about: ${escapeHtml(topics)}</span>`;
                     } else if (isReflection) {
-                        replyContent = marked.parse(reply.content);
+                        replyContent = routerMarkdown(reply.content);
                     } else {
                         replyContent = escapeHtml(reply.content);
                     }
@@ -1725,9 +1735,8 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
         }
 
         function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            // Also escapes quotes, so the result is safe inside attributes.
+            return String(text ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
 
         // Convert @mentions in escaped HTML to profile links

@@ -45,7 +45,9 @@ COPY --from=builder /app/server/dist ./dist
 
 # Copy legacy static files (except index, now built by Astro)
 COPY prompt.html setup.html profile.html entry.html dashboard.html join.html settings.html connect.html release.html RELEASE_NOTES.md /app/
-COPY posting-rules.html posting-rules.js sharing-notice.js /app/
+COPY posting-rules.html posting-rules.js sharing-notice.js safe-html.js /app/
+# Pinned local copies of the markdown renderer and HTML sanitizer: pages load no third-party script.
+COPY vendor/ /app/vendor/
 COPY group-setup.html group-setup.css /app/
 COPY --from=setup-builder /app/onboarding-assets/ /app/onboarding-assets/
 
