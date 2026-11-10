@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 436" role="img" aria-label="Router decides who reads; authors hold the storage and the keys" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9a968f"/></marker></defs>
+  <rect width="760" height="436" fill="#ffffff"/>
+  <text x="24" y="30" font-size="15" font-weight="600" fill="#1a1a1a">Router decides who reads; authors hold the storage and the keys</text>
+  <g fill="none" stroke="#9a968f" stroke-width="1.25">
+    <path d="M196 139H232" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path d="M466 126H518" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path d="M290 290V216" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path d="M450 290V216" marker-end="url(#a)"/>
+    <path d="M700 290V202" marker-end="url(#a)"/>
+    <path d="M404 372H356" marker-end="url(#a)"/>
+    <rect x="24" y="64" width="170" height="150" rx="8"/>
+    <rect x="234" y="64" width="230" height="150" rx="8"/>
+    <rect x="504" y="64" width="232" height="150" rx="8"/>
+    <rect x="520" y="104" width="200" height="44" rx="8"/>
+    <rect x="24" y="292" width="330" height="104" rx="8"/>
+    <rect x="406" y="292" width="330" height="104" rx="8"/>
+  </g>
+  <rect x="520" y="156" width="200" height="44" rx="8" fill="#7c5cbf" fill-opacity="0.12" stroke="#7c5cbf" stroke-width="2"/>
+  <g fill="#1a1a1a" font-weight="600">
+    <text x="40" y="88">People and agents</text>
+    <text x="250" y="88">Router, in a Phala enclave</text>
+    <text x="520" y="88">An author's TinyCloud space</text>
+    <text x="532" y="122">router/ folder</text>
+    <text x="532" y="174">insights/ folder</text>
+    <text x="40" y="316">Discord server</text>
+    <text x="422" y="316">Scheduled jobs on the owner's machine</text>
+  </g>
+  <g fill="#6b6b6b" font-size="11.5">
+    <text x="40" y="110">Browser, coding agents,</text>
+    <text x="40" y="126">Discord members</text>
+    <text x="40" y="150">Each person saves one</text>
+    <text x="40" y="166">set of posting rules</text>
+    <text x="250" y="110">Decides who may read what</text>
+    <text x="250" y="126">Keeps the feed index in memory</text>
+    <text x="250" y="142">Encrypts each author's records</text>
+    <text x="250" y="158">Holds a grant on router/ only</text>
+    <text x="250" y="182">The Discord bot runs beside it</text>
+    <text x="532" y="139">published records, encrypted</text>
+    <text x="532" y="191">raw usage reports</text>
+    <text x="40" y="338">bot replies when mentioned</text>
+    <text x="40" y="354">private /router commands</text>
+    <text x="40" y="370">a channel of new public notes</text>
+    <text x="422" y="338">late evening: /insights, then encrypted deposit</text>
+    <text x="422" y="354">then: nightly note agent</text>
+    <text x="422" y="370">next morning: daily digest agent</text>
+    <text x="422" y="386">every minute: public feed to Discord</text>
+    <text x="278" y="258" text-anchor="end">commands, replies</text>
+    <text x="438" y="258" text-anchor="end">notes and digest</text>
+    <text x="688" y="258" text-anchor="end">encrypted locally, not via Router</text>
+    <text x="46" y="420">Opens only with the owner's key. Router has no access to it.</text>
+  </g>
+  <rect x="24" y="410" width="12" height="12" rx="3" fill="#7c5cbf" fill-opacity="0.12" stroke="#7c5cbf" stroke-width="2"/>
+</svg>

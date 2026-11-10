@@ -1583,7 +1583,8 @@ const MIME_TYPES: Record<string, string> = {
   '.json': 'application/json',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
-  '.md': 'text/plain',
+  '.md': 'text/plain; charset=utf-8',
+  '.svg': 'image/svg+xml',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -9117,7 +9118,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         filePath = '/group-setup.html';
       } else if (filePath === '/setup/cli') {
         filePath = '/join.html';
-      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/tutorial', '/cohort', '/posting-rules'].includes(filePath)) {
+      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/tutorial', '/cohort', '/posting-rules', '/docs'].includes(filePath)) {
         filePath = `${filePath}.html`;
       }
 
