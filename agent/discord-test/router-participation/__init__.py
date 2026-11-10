@@ -1,8 +1,9 @@
 """Router takes part in its Discord channel without being @-mentioned.
 
-Hermes still answers @-mentions; this plugin only watches everything else and, when a
-cheap check says there is something worth adding, writes and posts one reply (see
-participation.py for the rules and controller.py for the modes). Members can pause it
+In public profiles Hermes answers @-mentions. In private profiles this plugin owns
+mentions too, using fresh group reads. A cheap check decides whether there is
+something worth adding without a mention (see participation.py for the rules and
+controller.py for the modes). Members can pause it
 with /router-quiet, see its reasoning with /router-why, and see what drew replies with
 /router-stats. Message text never goes to the logs.
 """
@@ -89,7 +90,7 @@ def register(ctx):
             if m.is_self:
                 return
             person = not message.author.bot or (not private_conversation and message.webhook_id is not None and message.webhook_id in test_webhooks)
-            summoned = native.user is not None and native.user in message.mentions  # Hermes answers these
+            summoned = native.user is not None and native.user in message.mentions
             if person and not m.text.startswith("/"):
                 if private_conversation and summoned:
                     controller.mentioned(key, m)

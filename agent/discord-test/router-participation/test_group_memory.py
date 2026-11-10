@@ -29,6 +29,7 @@ class Router:
         self.calls=[]
         self.fail_verify=False
         self.fail_check=False
+        self.version="1"*64
 
     async def conversation(self, actor, action, **fields):
         self.calls.append((action,fields))
@@ -39,7 +40,7 @@ class Router:
             if self.fail_verify: raise RuntimeError("source revoked")
             return {"verified":True}
         entry={"id":"note-1","content":"The violet telescope ships Friday.","handle":"alice",
-               "url":"https://router.example/e/note-1","version":"1"*64}
+               "url":"https://router.example/e/note-1","version":self.version}
         return {"entries":[entry]} if action == "search" else {"entry":entry}
 
 class Messages:
@@ -92,6 +93,13 @@ class GroupMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.controller.evaluate(20,"direct mention",1))["outcome"],"access-unavailable")
         self.assertEqual(self.provider.calls,[])
 
+    async def test_unavailable_ambient_access_does_not_interrupt_chat(self):
+        self.router.fail_check=True
+        self.assertEqual((await self.controller.evaluate(20,"burst ended"))["outcome"],"access-unavailable")
+        self.assertEqual(self.provider.calls,[])
+        self.poster.assert_not_called()
+        self.assertEqual(self.store.count_checks(NOW-86400),0)
+
     async def test_shadow_does_not_post_or_keep_a_private_draft(self):
         self.controller.s["mode"]="shadow"
         self.assertEqual((await self.controller.evaluate(20,"direct mention",1))["outcome"],"shadow-drafted")
@@ -115,5 +123,13 @@ class GroupMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.router.calls.clear();self.provider.calls.clear()
         self.assertEqual((await self.controller.evaluate(20,"burst ended"))["outcome"],"paused-or-limited")
         self.assertEqual(self.router.calls,[]);self.assertEqual(self.provider.calls,[])
+
+    async def test_reread_cannot_replace_a_version_already_seen_by_the_model(self):
+        turn=await memory.GroupTurn(self.brain,self.router,10,20,TRIGGER).start()
+        await turn.call("search_group",{"query":"telescope"})
+        self.router.version="2"*64
+        with self.assertRaisesRegex(ValueError,"source changed"):
+            await turn.call("read_group_note",{"id":"note-1"})
+        self.assertEqual(turn.sources["note-1"]["version"],"1"*64)
 
 if __name__ == "__main__": unittest.main()

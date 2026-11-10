@@ -52,6 +52,11 @@ class GroupTurn:
         for entry in entries:
             if len(self.sources) >= 30 and entry["id"] not in self.sources:
                 raise ValueError("Source limit reached")
+            prior = self.sources.get(entry["id"])
+            if prior and prior["version"] != entry["version"]:
+                # The model has already seen the old version. A later read must
+                # not replace its reference and make that old content pass verification.
+                raise ValueError("A source changed during this answer")
             self.sources[entry["id"]] = {"id": entry["id"], "version": entry["version"]}
         # Keep only refs for the final check. Full source text lives in this model call only.
         records = [{k: v for k, v in entry.items() if k != "version"} for entry in entries]

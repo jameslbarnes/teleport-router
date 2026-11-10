@@ -78,7 +78,7 @@ A group admin enables destinations with `POST /api/discord/conversation/configur
 
 Private conversation offers only group search/read and anonymous public Router search to the model. The usual web search and configured external MCP servers are absent. Each reply rechecks source versions and current audience before sending. It stores neither source notes nor drafts in a persistent database; current channel context is held in memory, with previous bot reply text omitted. It never saves ordinary conversation to Router. Keep using `/router-save` for selected notes.
 
-The native commands remain private to their requester and retain their configured channel or guild scope. Shared replies are visible in Discord and remain in its history after source deletion or membership changes. The final check and Discord send are separate operations, with a small race between them. No claim of erasing Discord copies is made.
+The native commands remain private to their requester and retain their configured channel or guild scope. Failed ambient checks stay quiet; mentions get a short failure notice with private-command alternatives. Shared replies are visible in Discord and remain in its history after source deletion or membership changes. The final check and Discord send are separate operations, with a small race between them. No claim of erasing Discord copies is made.
 
 The following participation rules apply in both public and private conversation profiles. In the public profile Hermes answers mentions; in the private profile the native participation plugin answers them once, without starting a Hermes session.
 

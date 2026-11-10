@@ -54,7 +54,6 @@ class Controller:
         self.first_pending: dict[int, float] = {}
         self.locks: dict[int, asyncio.Lock] = {}
         self.turn_factory = None
-        self.access_notices: dict[int, float] = {}
 
     def mentioned(self, channel_id: int, m: Msg) -> None:
         """Private channels own mentions as well as ambient replies; Hermes never sees them."""
@@ -144,13 +143,12 @@ class Controller:
 
         async def unavailable():
             record("access-unavailable")
-            # One explanatory notice per five minutes, or on a direct question. No note text.
-            if mode == "live" and self.poster and (mentioned_id or now - self.access_notices.get(channel_id, 0) > 300):
-                self.access_notices[channel_id] = now
+            # Failed ambient checks stay quiet. A source change or outage must
+            # not interrupt ordinary chat or incorrectly blame an account link.
+            if mode == "live" and self.poster and mentioned_id:
                 try:
-                    await self.poster(channel_id, "I can't use group notes here while access is unavailable. "
-                        "Everyone in this Discord server must join the Router group and connect with /router-link. "
-                        "You can still use /router-recall for a private answer.", latest.id)
+                    await self.poster(channel_id, "I couldn't finish this group answer. Please try again. "
+                        "You can use /router-status to check your connection, or /router-recall for a private answer.", latest.id)
                 except Exception:
                     pass
             return {"outcome": "access-unavailable"}

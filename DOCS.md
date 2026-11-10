@@ -193,7 +193,7 @@ A Discord bot can answer from the public notebook, use a connected private group
 
 | Job | What it can read | Identity it uses |
 | --- | --- | --- |
-| Conversational replies, when mentioned in an allowed channel | The public notebook | The bot's public Router identity |
+| Public conversation profile, when enabled | The public notebook | The bot's public Router identity |
 | Private group conversation, in an enabled text channel | The connected group and public notebook, after Router checks everyone in the Discord server | The private service identity and the linked member's permission |
 | Private group commands | One private group, on behalf of the person running the command | A separate service identity, plus that person's own permission |
 | Public feed channel | The anonymous public feed | The bot's Discord account; no Router identity |
@@ -215,7 +215,9 @@ Replies are visible only to the person who ran the command. A saved note is shar
 
 In a Discord channel linked to your group, ask Router about something the group has saved. It can find the note and use it in its reply, with a source link. It can also bring relevant notes into an ongoing conversation when a question needs an answer or it has useful context to add. The [speaking rules](https://github.com/jameslbarnes/teleport-router/tree/master/agent/discord-test#speaking-without-an--mention) limit when it joins in. `/router-quiet` pauses those unprompted replies; mentions still get an answer.
 
-This first version connects one private Router group to a Discord server. Everyone in that server must join the group and connect their account with `/router-link`. Router reads the current Discord member list itself before releasing group notes, and checks access and the sources again before a reply is sent. An unlinked person, another bot, or an unavailable member list blocks shared group recall. The bot explains the pause; `/router-recall` remains available privately to linked members. Hosts enable specific text channels; threads and announcement channels are not supported.
+This first version connects one private Router group to a Discord server. Everyone in that server must join the group and connect their account with `/router-link`. Router reads the current Discord member list itself before releasing group notes, and checks access and the sources again before a reply is sent. An unlinked person, another bot, or an unavailable member list pauses all conversational replies in that channel. On a mention, the bot says it could not finish the answer; `/router-recall` remains available privately to linked members. Group admins enable specific text channels through the setup API; threads and announcement channels are not supported.
+
+The deployed private profile handles both mentions and unprompted replies. Its public Hermes conversation path is disabled. Router also receives the Discord bot token so it can check membership directly, and Discord's Server Members Intent must be enabled for that token. Both Router and the bot run in the same enclave.
 
 Private answers use a fresh model call with read-only Router tools. They do not enter Hermes's saved conversation history, and the participation plugin keeps its recent channel context in memory only. Earlier bot reply text is omitted from later prompts, so a fresh source read is needed. The model service receives the conversation and notes used for that answer; it has no web-search or external connector tools in this mode.
 
