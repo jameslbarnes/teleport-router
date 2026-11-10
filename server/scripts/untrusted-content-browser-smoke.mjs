@@ -34,7 +34,7 @@ const attribute = `x" onmouseover="${run}" style="position:fixed;inset:0" a="`;
 let browser;
 try {
   let ready = false;
-  for (let i = 0; i < 200; i++) { try { await ok('/health'); ready = true; break; } catch {} await new Promise(r => setTimeout(r, 150)); }
+  for (let i = 0; i < 300; i++) { try { await ok('/health'); ready = true; break; } catch {} await new Promise(r => setTimeout(r, 300)); } // up to 90 s on a busy machine
   if (!ready) throw Error('Local fixture failed: ' + serverError);
   const attacker = randomBytes(32).toString('base64url'), victim = randomBytes(32).toString('base64url');
   await ok('/api/identity/register', { secret_key: attacker, handle: 'mallory' });
