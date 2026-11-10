@@ -7,6 +7,16 @@ let groupId = params.get('group'), invite = params.get('channelinvite'), key = l
 let identity, context, storage, discord, rules, backup, envelope, step = 0, busy = false;
 let pairing;
 const retryText = 'This step did not finish. Try again.';
+// No invitation and no group: a person setting up Router for themselves. The same steps, without the group ones.
+const isSolo = !invite && !groupId, solo = () => isSolo;
+function showSolo() {
+  $('group-name').textContent = 'Set up Router'; document.title = 'Set up Router';
+  $('description').textContent = 'Create your account, keep a recovery file, choose your posting rules, then connect your agent.'; $('description').hidden = false;
+  $('audience').hidden = true; $('eyebrow').hidden = true; $('step-discord').hidden = true;
+  $('create-submit').textContent = 'Create account';
+  $('rules-intro').textContent = 'Posting rules say when your agent may post, who can read it, and what to leave out. They are your personal rules, used wherever you connect an agent to Router.';
+  $('rules-discord-hint').hidden = true;
+}
 function capturePairing() {
   const candidate = new URLSearchParams(location.hash.slice(1)).get('discord-pair');
   if (!candidate || !/^RD-PAIR-[A-Za-z0-9_-]{32}$/.test(candidate)) return false;
@@ -65,25 +75,28 @@ function showGroup() {
 }
 function accountView(signInOnly) {
   $('account-heading').textContent = signInOnly ? 'Sign in or restore your account' : identity ? 'Join this group' : 'Pick a name';
-  $('account-intro').hidden = signInOnly; $('restore-summary').hidden = signInOnly;
+  $('account-intro').hidden = signInOnly || solo(); $('restore-summary').hidden = signInOnly;
   if (signInOnly) $('restore').open = true;
 }
 async function load() {
   if (key) { try { identity = await lookup(key); } catch (error) { if (error.status !== 401 && error.status !== 404) throw error; identity = undefined; key = undefined; } }
-  if (!identity && !invite) {
-    // Signed out with no invitation: the only things to do here are to sign in or to restore a recovery file.
+  if (!identity && !invite && groupId) {
+    // Signed out, continuing a group's setup without its invitation: sign in or restore a recovery file.
     screen(0); $('steps').hidden = true; $('create-account').hidden = true; $('signed-in').hidden = true;
     $('group-name').textContent = 'Group setup'; $('description').hidden = true; $('audience').hidden = true;
     accountView(true);
-    message((groupId ? 'Sign in to continue your group setup. ' : '') + 'To create a new account, open a group’s invitation link.'); return;
+    message('Sign in to continue your group setup. To create a new account, open the group’s invitation link.'); return;
   }
-  if (!invite && !groupId) {
-    // Signed in with nothing to join, for example straight after restoring a recovery file on a new device.
-    screens.forEach(id => { $(id).hidden = true; }); step = 0;
-    $('steps').hidden = true; $('back').hidden = true; $('retry').hidden = true;
-    $('group-name').textContent = 'Group setup'; $('description').hidden = true; $('audience').hidden = true;
-    $('no-invite-account').textContent = 'You’re signed in as @' + identity.handle + '.';
-    $('no-invite').hidden = false; message(''); return;
+  if (solo()) {
+    showSolo();
+    if (!identity) {
+      screen(0); $('step-discord').hidden = true; $('create-account').hidden = false; $('signed-in').hidden = true; accountView(false);
+      message('Pick a handle to create your account.'); return;
+    }
+    // Signed in already, for example straight after restoring a recovery file on a new device.
+    await checkStorage();
+    if (storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running') await showRules();
+    return;
   }
   context = await groupContext(); showGroup();
   $('create-account').hidden = !!identity; $('signed-in').hidden = !identity;
@@ -105,7 +118,7 @@ async function joinGroup() {
 async function checkStorage() {
   screen(1);
   try { storage = await request('/api/tinycloud/status', { secret_key: key }); }
-  catch (error) { if (error.status === 404) throw Error('Personal storage is not turned on for this Router yet. Your account and group membership are saved. Come back when it has been turned on.'); throw error; }
+  catch (error) { if (error.status === 404) throw Error('Personal storage is not turned on for this Router yet. ' + (solo() ? 'Your account is saved. You can skip this step.' : 'Your account and group membership are saved. Come back when it has been turned on.')); throw error; }
   let saved; try { saved = JSON.parse(localStorage.getItem(backupName())); } catch { throw Error('The saved recovery file could not be read. Restore your downloaded file before continuing.'); }
   envelope ||= saved;
   const ready = storage.linked && storage.available && storage.encryption?.version === 2;
@@ -134,6 +147,7 @@ async function acceptBackup(data, encrypted) {
   await load();
 }
 async function showDiscord(back = false) {
+  if (solo()) return back ? checkStorage() : showRules();
   discord = context.group.private ? await request('/api/discord/link/status', { groupId }) : { configured: false, linked: false };
   // A group with no Discord connection has nothing to do on this screen, so it is passed over in both directions.
   const skip = !discord.configured && !discord.linked && !discord.pending && !discord.grantId && !pairing;
@@ -165,17 +179,35 @@ async function showDiscord(back = false) {
 }
 async function showRules() {
   screen(3); rules = await request('/api/posting-rules');
-  $('choose-rules').href = '/posting-rules?group=' + encodeURIComponent(groupId) + '&onboarding=1';
+  $('choose-rules').href = solo() ? '/posting-rules?onboarding=1' : '/posting-rules?group=' + encodeURIComponent(groupId) + '&onboarding=1';
   $('rules-next').hidden = !rules.rules;
   $('rules-next').textContent = rules.rules?.mode === 'automatic' && rules.rules?.audience === 'public'
     ? 'Keep automatic public posting and continue' : 'Keep these saved rules and continue';
-  $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public (anyone on the internet can read it)' : 'chosen with you for each note') + '. Keep it or edit it below.' : context.group.private
+  $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public (anyone on the internet can read it)' : 'chosen with you for each note') + '. Keep it or edit it below.' : solo()
+    ? 'You have no posting rules yet. Until you save some, an agent you connect is told to help you choose before it posts anything.'
+    : context.group.private
     ? 'Suggested for a private group: your agent posts useful notes here automatically, and asks for your approval before posting anything publicly. You review the exact wording before saving.'
     : 'This group is public. Suggested rules: your agent shows you each draft and waits for your approval before posting. You review the exact wording before saving.';
   message('Your posting rules apply to every agent you connect.');
 }
 async function finish() {
+  // After the posting rules page this script has started afresh, so look again for the recovery file kept in this browser.
+  try { envelope ||= JSON.parse(localStorage.getItem(backupName())) || undefined; } catch {}
   // Re-read saved settings and membership: finishing a page is never evidence of a successful write.
+  if (solo()) {
+    rules = await request('/api/posting-rules');
+    if (!rules.rules) throw Error('Save your posting rules before continuing.');
+    try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch { storage = undefined; }
+    screen(4); $('step-discord').hidden = true;
+    $('ready-heading').textContent = 'Your account is set up';
+    $('ready-intro').textContent = 'The last thing to do is connect your agent. Nothing is posted until an agent you connect posts within your rules.';
+    $('ready-connect').hidden = false; $('ready-later').hidden = true; $('ready-discord').hidden = true;
+    $('read-group').href = '/'; $('read-group').textContent = 'Open the notebook'; $('read-group').classList.remove('r-btn--primary');
+    $('ready-state').textContent = 'Your posting rules are saved. You can change them at any time.' +
+      (!envelope && !storage?.linked ? ' Your Router key is kept only in this browser. Go back to the storage step and download a recovery file before clearing the browser’s data or moving to another device.' : '') +
+      (envelope && (!storage?.linked || !storage?.available) ? ' Your recovery file is saved, but storage is not connected yet; you can finish that from the storage step.' : '');
+    message('Setup saved. Nothing has been posted.'); return;
+  }
   const fresh = await request('/api/group-onboarding?group=' + encodeURIComponent(groupId));
   rules = await request('/api/posting-rules');
   if (!fresh.member || !rules.rules) throw Error('Confirm your membership and save your posting rules before continuing.');
@@ -195,6 +227,7 @@ $('create-account').addEventListener('submit', event => { event.preventDefault()
   const result = await request('/api/identity/register', { secret_key: candidate, handle: $('handle').value.trim() }, null);
   if (!result.handle) throw Error('Account creation could not be confirmed.');
   key = candidate; identity = result; localStorage.setItem('router_key', key);
+  if (solo()) { await checkStorage(); return; }
   $('create-account').hidden = true; $('signed-in').hidden = false; $('account-name').textContent = 'You’re signed in as @' + identity.handle + '.'; accountView(false);
   await joinGroup();
 }); });
@@ -255,6 +288,14 @@ $('retry').onclick = () => act(() => step === 0 ? load() : step === 1 ? checkSto
 // the module, so consume that capability just as we do when opening a new tab.
 window.addEventListener('hashchange', () => { if (capturePairing()) act(load); });
 act(async () => {
+  if (params.get('rules') === 'saved' && key && solo()) {
+    // Back from the posting rules editor in a setup with no group.
+    identity = await lookup(key); showSolo();
+    rules = await request('/api/posting-rules');
+    history.replaceState(null, '', '/group-setup');
+    if (rules.rules) { await finish(); return; }
+    await showRules(); return;
+  }
   if (params.get('rules') === 'saved' && key && groupId) {
     // Back from the posting rules editor. The rules were reviewed and saved there, so finish() re-reads
     // them and goes to the last screen without asking the person to confirm them again.

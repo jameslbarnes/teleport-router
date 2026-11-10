@@ -26,7 +26,7 @@ const api = async (path, body, key) => {
   if (!r.ok) throw Error(path + ': HTTP ' + r.status);
   return r.json();
 };
-let browser, page, account, receipt, owner, saved;
+let browser, page, account, receipt, owner, saved, solo, soloPage, soloReceipt;
 try {
   for (let i = 0; i < 120; i++) { try { await api('/health'); break; } catch { if (i === 119) throw Error('Local server did not start'); await new Promise(r => setTimeout(r, 250)); } }
   await api('/api/identity/register', { secret_key: ownerKey, handle: 'browser_host' });
@@ -113,7 +113,77 @@ try {
   assert.deepEqual(blockedOrigins, [], 'The browser contacts only this Router and its TinyCloud node');
   assert.equal(consoleErrors.some(message => /Content Security Policy|Refused to|dynamically imported module/i.test(message)), false, 'No blocked script, network or WASM resources');
   console.log('PASS private save/read and independent owner decryption of the browser-created account');
+
+  // The same page with no invitation and no group: a person setting up on their own, against real storage.
+  const soloContext = await browser.newContext({ acceptDownloads: true });
+  await soloContext.route('**/*', route => {
+    const origin = new URL(route.request().url()).origin;
+    if ([base, new URL(host).origin].includes(origin)) return route.continue();
+    blockedOrigins.push(origin); return route.abort();
+  });
+  soloPage = await soloContext.newPage(); soloPage.setDefaultTimeout(120000);
+  const soloPosted = [];
+  soloPage.on('pageerror', error => pageErrors.push(error.message));
+  soloPage.on('console', event => { if (event.type() === 'error') consoleErrors.push(event.text()); });
+  soloPage.on('request', req => { if (req.postData()) soloPosted.push(req.postData()); });
+  await soloPage.goto(base + '/group-setup');
+  await soloPage.locator('#handle').fill('browser_solo');
+  await soloPage.locator('#create-submit').click();
+  await soloPage.locator('#storage-new').waitFor();
+  await soloPage.locator('#backup-password').fill('synthetic live solo password');
+  await soloPage.locator('#backup-repeat').fill('synthetic live solo password');
+  const soloDownloading = soloPage.waitForEvent('download');
+  await soloPage.locator('#prepare-backup button').click();
+  const soloStream = await (await soloDownloading).createReadStream(), soloChunks = [];
+  for await (const chunk of soloStream) soloChunks.push(chunk);
+  solo = await decryptBackup(JSON.parse(Buffer.concat(soloChunks).toString()), 'synthetic live solo password');
+  assert.equal(solo.handle, 'browser_solo');
+  await soloPage.locator('#backup-kept').check();
+  await soloPage.locator('#connect-storage').click();
+  await soloPage.waitForFunction(() => !document.getElementById('storage-ready').hidden || document.getElementById('status').classList.contains('error'));
+  if (await soloPage.locator('#status.error').count()) {
+    const raw = await soloPage.locator('#status').textContent();
+    throw Error('Browser storage without a group: ' + raw.replaceAll(solo.tinycloudKey, '[key]').replaceAll(solo.routerKey, '[key]').slice(0, 350));
+  }
+  soloReceipt = await soloPage.evaluate(handle => JSON.parse(localStorage.getItem('router_storage_grant:' + handle)), solo.handle);
+  assert.equal(soloPosted.some(body => body.includes(solo.tinycloudKey)), false, 'Owner key never leaves browser');
+  // Coming back signed in, with storage connected, goes on to the posting rules.
+  await soloPage.reload();
+  await soloPage.locator('#choose-rules[href]').waitFor();
+  assert.equal(await soloPage.locator('#step-discord').isVisible(), false);
+  await soloPage.locator('#choose-rules').click();
+  await soloPage.locator('input[name=mode][value=manual]').check();
+  await soloPage.locator('input[name=audience][value=ask]').check();
+  await soloPage.locator('#preview').click();
+  await soloPage.locator('#confirmed').check();
+  await soloPage.locator('#save').click();
+  await soloPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
+  await soloPage.getByRole('link', { name: 'Continue setup' }).click();
+  await soloPage.locator('#ready').waitFor();
+  assert.equal(await soloPage.locator('#ready-connect').isVisible(), true);
+  assert.doesNotMatch(await soloPage.locator('#ready-state').textContent(), /kept only in this browser|not connected/);
+  // The owner can recover the account's record key with nothing but their own key.
+  const soloOwner = new TinyCloudNode({ privateKey: solo.tinycloudKey, host, prefix: 'router', autoCreateSpace: false, enablePublicSpace: false });
+  await soloOwner.signIn();
+  const soloStatus = await api('/api/tinycloud/status', { secret_key: solo.routerKey });
+  assert.equal(soloStatus.linked && soloStatus.available && soloStatus.encryption?.version === 2, true);
+  const soloRecovery = await soloOwner.kv.get('router/recovery-v1', { source: 'network' });
+  assert(soloRecovery.ok);
+  const soloKey = recoverAuthorKey(solo.tinycloudKey, raw(soloRecovery.data.data), { ownerDid: soloOwner.did, space: soloStatus.space, prefix: 'router/' });
+  assert.equal(soloKey.length > 0, true); soloKey.fill(0);
+  assert.deepEqual(pageErrors, []);
+  assert.deepEqual(blockedOrigins, [], 'The browser contacts only this Router and its TinyCloud node');
+  assert.equal(consoleErrors.some(message => /Content Security Policy|Refused to|dynamically imported module/i.test(message)), false, 'No blocked script, network or WASM resources');
+  console.log('PASS setup without an invitation: account, recovery file, real storage, posting rules, and owner recovery of the record key');
 } finally {
+  if (solo) {
+    try {
+      if (!soloReceipt && soloPage && !soloPage.isClosed()) soloReceipt = await soloPage.evaluate(handle => JSON.parse(localStorage.getItem('router_storage_grant:' + handle)), solo.handle);
+      const soloOwner = new TinyCloudNode({ privateKey: solo.tinycloudKey, host, prefix: 'router', autoCreateSpace: false, enablePublicSpace: false });
+      await soloOwner.signIn();
+      if (soloReceipt?.cid) { const revoked = await soloOwner.revokeDelegation(soloReceipt.cid); if (!revoked.ok) console.error('Synthetic grant cleanup needs retry.'); }
+    } catch { console.error('Synthetic storage cleanup was unavailable. No personal account was used.'); }
+  }
   if (account) {
     try {
       if (!receipt && page && !page.isClosed()) receipt = await page.evaluate(handle => JSON.parse(localStorage.getItem('router_storage_grant:' + handle)), account.handle);

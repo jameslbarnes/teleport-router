@@ -4,10 +4,11 @@
   const form = $('rules-form');
   const key = localStorage.getItem('router_key');
   const groupId = new URLSearchParams(location.search).get('group');
-  if (groupId && new URLSearchParams(location.search).get('onboarding') === '1') {
+  if (new URLSearchParams(location.search).get('onboarding') === '1') {
+    // Reached from the guided setup, with a group or without one: offer the way back once rules are saved.
     const resume = document.createElement('a');
-    resume.href = '/group-setup?group=' + encodeURIComponent(groupId) + '&rules=saved';
-    resume.textContent = 'Continue group setup';
+    resume.href = groupId ? '/group-setup?group=' + encodeURIComponent(groupId) + '&rules=saved' : '/group-setup?rules=saved';
+    resume.textContent = groupId ? 'Continue group setup' : 'Continue setup';
     resume.className = 'r-btn r-btn--primary';
     $('after-save').prepend(resume);
   }

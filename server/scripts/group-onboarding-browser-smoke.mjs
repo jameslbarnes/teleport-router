@@ -213,8 +213,51 @@ try {
   assert.equal(await restoredPage.evaluate(() => localStorage.getItem('router_key')), recovered.routerKey);
   assert.equal(await restoredPage.evaluate(privateKey => JSON.stringify(localStorage).includes(privateKey), recovered.tinycloudKey), false);
   await restoredContext.close();
+
+  // A person with no invitation sets up on the same page: account, recovery file, posting rules, done.
+  const soloContext = await newContext({ acceptDownloads: true });
+  await soloContext.route('**/api/tinycloud/status', route => route.fulfill({ json: { linked: false } }));
+  const soloPage = await soloContext.newPage();
+  soloPage.on('pageerror', error => errors.push(error.message));
+  const soloLoads = []; soloPage.on('request', r => soloLoads.push(new URL(r.url()).pathname));
+  await soloPage.goto(base + '/join'); // the plain address sends a new person to the guided setup
+  await soloPage.waitForURL('**/group-setup');
+  await soloPage.locator('#create-account').waitFor();
+  assert.equal(await soloPage.locator('#step-discord').isVisible(), false);
+  assert.equal(await soloPage.locator('#create-submit').textContent(), 'Create account');
+  await soloPage.locator('#handle').fill('local_solo');
+  await soloPage.locator('#create-submit').click();
+  await soloPage.locator('#storage-new').waitFor();
+  assert.equal(await soloPage.locator('#skip-note').isVisible(), true);
+  await soloPage.locator('#backup-password').fill('synthetic solo recovery password');
+  await soloPage.locator('#backup-repeat').fill('synthetic solo recovery password');
+  const soloDownload = soloPage.waitForEvent('download');
+  await soloPage.locator('#prepare-backup button').click();
+  assert.equal((await soloDownload).suggestedFilename(), 'router-local_solo-recovery.json');
+  await soloPage.locator('#storage-connect').waitFor();
+  // The storage library is fetched only when someone connects storage.
+  assert.equal(soloLoads.some(path => /\/onboarding-assets\/chunks\/storage-/.test(path)), false);
+  await soloPage.locator('#skip-storage').click();
+  await soloPage.locator('#choose-rules[href]').waitFor();
+  assert.equal(await soloPage.locator('#choose-rules').getAttribute('href'), '/posting-rules?onboarding=1');
+  await soloPage.locator('#choose-rules').click();
+  await soloPage.locator('input[name=mode][value=manual]').check();
+  await soloPage.locator('input[name=audience][value=ask]').check();
+  await soloPage.locator('#preview').click();
+  await soloPage.locator('#confirmed').check();
+  await soloPage.locator('#save').click();
+  await soloPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
+  await soloPage.getByRole('link', { name: 'Continue setup' }).click();
+  await soloPage.locator('#ready').waitFor();
+  assert.equal(await soloPage.locator('#ready-connect').getAttribute('href'), '/connect');
+  assert.match(await soloPage.locator('#ready-state').textContent(), /Your recovery file is saved/);
+  assert.equal(await soloPage.locator('#step-discord').isVisible(), false);
+  // Coming back signed in goes on from the storage step, not to a dead end.
+  await soloPage.goto(base + '/group-setup');
+  await soloPage.locator('#storage-unlock').waitFor();
+  await soloContext.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
+  console.log('PASS: setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
 } finally {
   await browser?.close();
   child.kill();

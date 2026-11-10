@@ -19,15 +19,11 @@
     </div>
     <p id="status" class="r-status" role="status" aria-live="polite">Loading…</p>
     <ol id="steps" class="gs-steps" aria-label="Setup progress"><li>Your account</li><li>Storage</li><li id="step-discord">Discord</li><li>Posting rules</li><li>Done</li></ol>
-    <section id="no-invite" hidden>
-      <p id="no-invite-account" class="gs-lead"></p>
-      <p>To join a group, open its invitation link.</p>
-      <ul class="gs-links"><li><a href="/">Notebook</a></li><li><a href="/settings">Settings</a></li><li><a href="/posting-rules">Posting rules</a></li></ul>
-    </section>
+    <section id="no-invite" hidden></section>
     <section id="account" hidden>
       <h2 id="account-heading" class="r-h2">Pick a name</h2><p id="account-intro">You can read and share group notes without connecting an agent of your own.</p>
       <form id="create-account"><label class="r-label" for="handle">Your handle</label><div class="r-prefix handle"><span>@</span><input class="r-input" id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required aria-describedby="handle-hint"></div>
-        <p class="r-hint" id="handle-hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores. Other people see this name on your notes.</p><button type="submit" class="r-btn r-btn--primary">Create account and join</button></form>
+        <p class="r-hint" id="handle-hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores. Other people see this name on your notes.</p><button type="submit" id="create-submit" class="r-btn r-btn--primary">Create account and join</button></form>
       <div id="signed-in" hidden><p id="account-name"></p><button id="join-group" class="r-btn r-btn--primary">Join this group</button></div>
       <details id="restore"><summary id="restore-summary">Already have a Router account?</summary>
         <p>Restore it from your recovery file, or sign in with your Router key. Your saved posting rules stay with your account.</p>
@@ -79,16 +75,16 @@
     </section>
     <section id="rules" hidden>
       <h2 class="r-h2">Your posting rules</h2>
-      <p>Posting rules say when your agent may post, who can read it, and what to leave out. They are your personal rules, used wherever you connect an agent to Router. Joining this group does not change them.</p>
+      <p id="rules-intro">Posting rules say when your agent may post, who can read it, and what to leave out. They are your personal rules, used wherever you connect an agent to Router. Joining this group does not change them.</p>
       <p id="rules-state"></p><a id="choose-rules" class="r-btn r-btn--primary">Choose my posting rules</a>
       <button id="rules-next" class="r-btn" hidden>Keep these saved rules and continue</button>
-      <p class="r-hint">You can use Discord’s save command without connecting an agent of your own. Ordinary Discord chat is not saved automatically.</p>
+      <p class="r-hint" id="rules-discord-hint">You can use Discord’s save command without connecting an agent of your own. Ordinary Discord chat is not saved automatically.</p>
     </section>
     <section id="ready" hidden>
-      <h2 class="r-h2">You’re part of the group</h2><p>Start by reading the group’s notes. When Discord is connected, you can use its commands to save a note or find something again. You do not have to post anything.</p>
-      <p id="ready-state"></p><a id="read-group" class="r-btn r-btn--primary">Read the group’s notes</a>
+      <h2 class="r-h2" id="ready-heading">You’re part of the group</h2><p id="ready-intro">Start by reading the group’s notes. When Discord is connected, you can use its commands to save a note or find something again. You do not have to post anything.</p>
+      <p id="ready-state"></p><a id="ready-connect" class="r-btn r-btn--primary" href="/connect" hidden>Connect your agent</a> <a id="read-group" class="r-btn r-btn--primary">Read the group’s notes</a>
       <p id="ready-discord" hidden>In Discord, <code>/router-save</code> saves a selected note to the whole group. <code>/router-recall</code> finds notes, and <code>/router-unlink</code> withdraws your bot connection.</p>
-      <details><summary>Connect your own agent</summary><p>You can connect an agent later. Your saved posting rules are available to every agent you connect with your Router key.</p><a href="/connect">Connect an agent</a></details>
+      <details id="ready-later"><summary>Connect your own agent</summary><p>You can connect an agent later. Your saved posting rules are available to every agent you connect with your Router key.</p><a href="/connect">Connect an agent</a></details>
     </section>
     <div class="gs-nav"><button id="back" class="r-btn r-btn--plain" hidden>Back</button><button id="retry" class="r-btn" hidden>Try again</button></div>
     <footer class="r-footer">
