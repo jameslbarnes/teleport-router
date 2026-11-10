@@ -8,7 +8,7 @@ let identity, context, storage, discord, rules, backup, envelope, step = 0, busy
 let pairing;
 const retryText = 'This step did not finish. Try again.';
 // No invitation and no group: a person setting up Router for themselves. The same steps, without the group ones.
-const solo = () => !invite && !groupId;
+const isSolo = !invite && !groupId, solo = () => isSolo;
 function showSolo() {
   $('group-name').textContent = 'Set up Router'; document.title = 'Set up Router';
   $('description').textContent = 'Create your account, keep a recovery file, choose your posting rules, then connect your agent.'; $('description').hidden = false;
