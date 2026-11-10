@@ -1346,7 +1346,7 @@
             container.innerHTML = entries.map(entry => `
                 <div class="entry">
                     <p class="entry-content">${escapeHtml(entry.content)}</p>
-                    <div class="entry-meta">${formatTime(entry.timestamp)}${entry.client ? ` · ${entry.client}` : ''}</div>
+                    <div class="entry-meta">${formatTime(entry.timestamp)}${entry.client ? ` · ${escapeHtml(entry.client)}` : ''}</div>
                 </div>
             `).join('');
         }
