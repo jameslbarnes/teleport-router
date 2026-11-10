@@ -79,7 +79,7 @@ export function audienceLabel(rules: PostingRulesDraft): string {
 }
 
 export function renderPostingRules(rules?: PostingRules): string {
-  if (!rules) return `No saved personal posting rules. Preserve this person’s existing explicit Router instructions. If they have not chosen how to post, use router_posting_rules to help them choose before posting. Do not assume that installing a connection is consent to automatic posting. Briefly state the active choices you know; do not invent them. Without an explicit destination or a saved audience, a write is public. Group membership alone does not select a destination.\n\n${SHARING_NOTICE_INSTRUCTIONS}`;
+  if (!rules) return `No saved personal posting rules. Preserve this person’s existing explicit Router instructions. If they have not chosen how to post, use router_posting_rules to help them choose before posting. Do not assume that installing a connection is consent to automatic posting. Briefly state the active choices you know; do not invent them. Without an explicit destination or a saved audience, a write is public. Group membership alone does not select a destination.\n\nUntil they choose, these are the defaults:\n${POSTING_CADENCE_INSTRUCTIONS}\n${POSTING_STYLE_INSTRUCTIONS}\n\n${SHARING_NOTICE_INSTRUCTIONS}`;
   const cadence = {
     automatic: 'Post automatically within these rules. Combine related progress at a natural pause; skip routine checks and repetition. A conversation does not have to produce a post.',
     review: 'Show the proposed text and its audience, and wait for approval before posting. An explicit request to post already authorizes that requested post.',

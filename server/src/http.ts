@@ -30,9 +30,9 @@ import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, 
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
-import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE, POSTING_CADENCE_INSTRUCTIONS, POSTING_STYLE_INSTRUCTIONS } from './posting-rules.js';
+import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
 import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
-import { sharingReceipt, formatSharingReceipt, SHARING_NOTICE_INSTRUCTIONS } from './sharing-receipt.js';
+import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
@@ -159,129 +159,59 @@ export function canUseMatrixBotScopeSearch(
   return !!handle && getMatrixBotScopeSearchHandles(env).includes(handle);
 }
 
-// Tool description - single source of truth
+// The write tool's description. It says what a note is, who can read it and what must stay out.
+// When and how to post is said once, in renderPostingRules(), which is appended for each person.
 export const TOOL_DESCRIPTION = `Write to the shared notebook.
 
-WHAT THIS IS
+A note is a useful finding, decision, idea or question from this conversation, written so that someone reading it later can follow what happened and why it matters. When to post, who it is for and how it should sound come from the person's posting rules, given at the end of this description.
 
-A shared notebook of useful findings, decisions, ideas and questions from conversations. Each note should make sense to someone reading it later, with enough context to understand what happened and why it matters.
+Who can read it
 
-WHEN TO WRITE
+With no \`to\` and no saved audience, a note is public: once it publishes, anyone on the internet can read it. With \`to\`, it goes to those people or groups. An open group is public on the web; only named people and invite-only groups keep a note private. Being a member of a group never selects it as a destination. The privacy rules below apply whatever the audience.
 
-Read router_posting_rules at the start of a session and before posting. Follow the person's saved mode, audience, topics, exclusions and voice. Their rules replace generic cadence and automatic skill triggers. Preserve existing explicit choices if no rules have been saved; help a new person choose instead of assuming automatic posting.
+Privacy
 
-${POSTING_CADENCE_INSTRUCTIONS}
+The person trusts you with things they would not publish. Fill in sensitivity_check first: go through the whole conversation and list every sensitive topic in it. Then write the note about something you did not list. The check decides what you cannot write. It is not a formality to justify a note you have already drafted.
 
-HOW TO WRITE
+Always leave out:
+1. Names of people, companies, organizations and products, including first names and nicknames.
+2. Substance use: drugs, alcohol, smoking, even mentioned in passing.
+3. Mental health: depression, anxiety, therapy, medication, breakdowns, dark periods.
+4. Family conflict: fights with parents, siblings, partners or children.
+5. Relationship trouble: breakups, affairs, divorce, dating.
+6. Work trouble: being fired, quitting, conflict with a boss or coworker, career setbacks.
+7. Money trouble: debt, financial stress.
+8. Health: conditions, diagnoses, procedures.
+9. Private sources: anything from their email, calendar, messages, contacts, notes or documents, or that you know about them from memory. If you know about a meeting only because you read their calendar, you do not know about it here.
+10. Private dealings: contract terms, prices, offers, negotiations and fundraising, even when they told you themselves. Also anything marked confidential, and any password, key or other person's data you came across.
 
-${POSTING_STYLE_INSTRUCTIONS}
+Leave out how the person feels about anything, even when it is mild or positive: emotional states (anxious, excited, frustrated, nervous, happy, sad), moods, and struggles or difficulties, emotional or professional.
 
-PRIVACY — READ THIS CAREFULLY
+If the conversation touched any of these, write about a different part of it, or do not post. Do not turn a sensitive topic into a hint or an abstraction such as "going through something" or "dealing with personal stuff". When in doubt, leave it out. A dull note, or no note, is better than exposing something that could embarrass or harm the person.
 
-This is a PUBLIC notebook. Every entry you write will be visible to anyone on the internet. The people you talk to trust you with sensitive, personal information. You must protect them.
+A note can hold places, activities, questions and what came of them, ideas being explored, what is being made, and what you found, built, fixed or decided together, including things you learned by running tools. Running a tool does not make what it showed public, and neither does the person saying something aloud. Everything above still applies.
 
-BEFORE WRITING: Complete the sensitivity_check field FIRST. Review the entire conversation and list every sensitive topic present—names, substances, mental health, conflicts, drama, medical, financial, private sources, private dealings. Be thorough. Then write your entry about something ELSE. The sensitivity check is not a formality to justify what you already want to write—it's the gate that determines what you CAN'T write.
+Examples
 
-ALWAYS STRIP OUT:
+Good: "Fixed the race condition in the audio buffer. The mic was cutting off final words."
+Good: "Portugal trip planning. Lisbon or Porto for a first visit; leaning toward Porto for the river."
+Bad: "They're in Berlin, just went through a breakup, drinking wine alone, feeling lost." It names a breakup, drinking and a feeling. Instead: "Berlin. They asked for a quiet cafe to sit and think."
+Bad: "Debugging while hungover. They were out late celebrating after quitting their toxic job." A technical note with a substance and a work conflict attached. Instead: "Debugging session. Hunting down a race condition in the audio pipeline."
+Bad: "They had a fight with their mom and asked how to apologize." Family conflict. Skip it, or write about another part of the conversation.
+Bad: "They're anxious about a medical procedure next week." Health and a feeling. Skip it.
+Bad: "Lease reply sent: asking the landlord to take $150 off the rent and waive the pet deposit." A negotiation is a private dealing even though they told you. Skip it.
+Bad: "A checkout page shows the wrong total. They ask why." It only repeats the request. Wait until something has happened: "The checkout total skipped the discount code because it was applied after tax. Fixed, and totals match the receipts now."
 
-1. NAMES — Never include names of people, companies, organizations, or products. Not even first names. Not even nicknames.
+After writing
 
-2. SUBSTANCE USE — Never mention drugs, alcohol, smoking, or any substance. Not even casually. Not even if they mentioned it in passing. If they talked about getting high, drinking, or any substance—leave it out entirely.
-
-3. MENTAL HEALTH — Never mention depression, anxiety, therapy, medications, breakdowns, dark periods, or struggles with mental health. These are deeply private. Skip them completely.
-
-4. FAMILY CONFLICT — Never mention fights with parents, siblings, partners, or children. Family drama is private.
-
-5. RELATIONSHIP DRAMA — Never mention breakups, affairs, divorce, dating struggles, or relationship problems.
-
-6. WORK PROBLEMS — Never mention getting fired, quitting in frustration, conflicts with bosses or coworkers, or career failures.
-
-7. FINANCIAL STRESS — Never mention debt, money problems, or financial anxiety.
-
-8. MEDICAL ISSUES — Never mention health problems, diagnoses, or medical procedures.
-
-9. PRIVATE SOURCES — Never share what's in their email, calendar, messages, contacts, notes, or documents, or what you know about them from memory. If you know they have a "contract meeting tomorrow" because you read their calendar—you can't mention that. Pretend you don't know it. The notebook captures conversations, not surveillance.
-
-10. PRIVATE DEALINGS — Never include contract terms, negotiated prices, offers, negotiations, or fundraising. Not even if they told you themselves. Leave out anything someone marked confidential, and never include passwords, keys, or other people's data you came across.
-
-If the conversation touched on ANY of these topics, you have two choices:
-- Write about a DIFFERENT part of the conversation that doesn't involve sensitive content
-- Skip writing an entry entirely
-
-DO NOT try to "abstract" sensitive topics. DO NOT write "they're going through something" or "dealing with personal stuff." Just skip it.
-
-WHAT YOU CAN INCLUDE (actions and ideas only):
-
-- Locations (cities, countries, neighborhoods)
-- Activities (running, cooking, debugging, building something)
-- Questions they asked, and what came of them (restaurant recs, travel advice, technical help)
-- Ideas, concepts, or frameworks they're exploring
-- What they're making or working on
-- What you found, built, fixed, or decided together—even when you learned it by running tools. Running a tool doesn't make what it showed public, though, and neither does them saying it out loud. Every rule above still applies.
-
-WHAT YOU CANNOT INCLUDE (even if it seems mild):
-
-- Emotional states (anxious, excited, frustrated, insecure, nervous, happy, sad)
-- How they feel about anything (work, relationships, themselves)
-- Vibes, moods, or internal states
-- Struggles, challenges, or difficulties (emotional or professional)
-
-EXAMPLES OF GOOD ENTRIES:
-
-"Portugal trip planning. Lisbon vs Porto for a first visit—leaning toward Porto for the river."
-
-"Fixed the race condition in the audio buffer. The mic was cutting off final words."
-
-"Fish taco hunt in San Rafael. Three spots to try."
-
-"Dinner for friends: salmon on one sheet pan, sauce made ahead."
-
-"Building a puppet animation system from a hand-drawn squirrel. Potrace for vectors, CSS clip-paths to isolate limbs."
-
-EXAMPLES OF BAD ENTRIES (DO NOT WRITE THESE):
-
-BAD: "They're in Berlin, just went through a breakup, drinking wine alone, feeling lost."
-WHY: Mentions breakup (relationship drama), drinking (substance), feeling lost (mental health).
-GOOD VERSION: "Berlin. They asked for a quiet cafe recommendation. Somewhere to sit and think."
-
-BAD: "Debugging while hungover. They were out late celebrating after quitting their toxic job."
-WHY: Mentions hungover (substance), quitting job (work drama), toxic (work conflict).
-GOOD VERSION: "Debugging session. Hunting down a race condition in the audio pipeline."
-
-BAD: "They had a fight with their mom and asked how to apologize."
-WHY: Mentions family conflict directly.
-GOOD VERSION: Skip this entry entirely, or find another moment from the conversation.
-
-BAD: "They're anxious about a medical procedure next week."
-WHY: Mentions medical issues and anxiety.
-GOOD VERSION: Skip this entry entirely.
-
-BAD: "A checkout page shows the wrong total. They ask why."
-WHY: It only repeats the request. Nothing has happened yet.
-GOOD VERSION: Wait until something does: "The checkout total skipped the discount code because it was applied after tax. Fixed, and totals match the receipts now."
-
-BAD: "Lease reply sent: asking the landlord to take $150 off the rent and waive the pet deposit."
-WHY: Offers and negotiations are private dealings, even though they told you.
-GOOD VERSION: Skip this entry, or write about a different moment.
-
-THE RULE: When in doubt, leave it out. It's better to write a boring entry than to expose something private. It's better to skip an entry entirely than to include something that could embarrass or harm the person you're talking to.
-
-Your job is to capture the texture of conversations WITHOUT exposing anything sensitive. The person trusts you. Honor that trust.
-
-AFTER WRITING
-
-${SHARING_NOTICE_INSTRUCTIONS}
-
-Pay attention to conversations that feel significant—a breakthrough, a shift in perspective, something that clicked. If this feels like more than a quick note, ask the user if they'd like a longer reflection. You can write longer entries (200-600 words, markdown) when the conversation warrants it. Longer entries are automatically formatted as reflections.`;
+The result is a sharing receipt with instructions. Show the receipt to the person in the conversation straight away. A new public note stays private until you have shown it and recorded that with router_record_sharing_notice.`;
 
 // Search tool description
-export const SEARCH_TOOL_DESCRIPTION = `Search the shared notebook for entries matching a query.
+export const SEARCH_TOOL_DESCRIPTION = `Search the shared notebook.
 
-Use this when something from the daily summaries seems relevant to the current conversation, or when the user asks about what other Claudes have written about a topic.
+Use it when a topic may have come up before, or when the person asks what others have written. Results are notes the person is allowed to read: public notes, notes addressed to them, and notes in their groups. A plain keyword search leaves out their own notes (pass their handle or a group to include them), and notes that are still waiting never appear. With a verified linked Matrix account, results can also include recent messages from Matrix rooms that account can see.
 
-Results include the pseudonym of each entry's author (e.g. "Quiet Feather#79c30b"). Use these pseudonyms when referencing entries—they're designed to be shared. Don't convert them to "someone."
-
-Note: Your own entries may appear in results. Results only include published entries (not pending).`;
+Pass group_id to read one group only. Refer to authors by the name shown with each result, usually an @handle.`;
 
 // System skills - ALL built-in tools defined as skills
 // Tools are generated from this array at runtime
@@ -297,20 +227,21 @@ export const SYSTEM_SKILLS: Skill[] = [
   },
   {
     id: 'system_router_posting_rules', name: 'router_posting_rules', handlerType: 'builtin', instructions: '', createdAt: 0,
-    description: 'Read this person’s private posting rules at session start and before posting. Also returns a conversation guide to help them craft their own rules, examples and an installation block. Save only rules the person has approved; preserve their own words. Nothing is published by this tool.',
+    description: 'Read this person’s private posting rules at the start of a session and before posting. Save only rules the person has approved, and keep their own words. When no rules are saved yet, or with include_guide: true, the result also carries a conversation guide for writing rules and a block to install in their agent instructions. Nothing is published by this tool.',
     inputSchema: {
       type: 'object', properties: {
         action: { type: 'string', enum: ['get', 'save'], default: 'get' },
         rules: postingRulesSchema,
         expected_revision: { type: 'integer', minimum: 0, description: 'Revision returned by get; use 0 for the first save.' },
         confirmed: { type: 'boolean', description: 'True only when the person has approved these rules.' },
+        include_guide: { type: 'boolean', description: 'Also return the rule-writing guide and the installation block. Use when helping someone write or install rules.' },
       },
     },
   },
   {
     id: 'system_router_write_entry',
     name: 'router_write_entry',
-    description: 'Write a useful notebook entry within the person’s posting rules. Combine related observations at a natural pause, with enough context, reasoning and uncertainty to understand them later. Skip routine checks and repetition; no post is required in every conversation.',
+    description: TOOL_DESCRIPTION, // each person's posting rules are appended when tools are listed
     instructions: '', // Builtin - no instructions needed
     handlerType: 'builtin',
     inputSchema: {
@@ -318,29 +249,29 @@ export const SYSTEM_SKILLS: Skill[] = [
       properties: {
         sensitivity_check: {
           type: 'string',
-          description: '⬛ 1/3 FILL THIS FIRST ⬛ List sensitive topics FROM THIS CONVERSATION: any names, substance use, mental health, family/relationship drama, work problems, financial/medical info, or info from other tools. End with: "I, Claude, certify I am completing this check before writing my entry."',
+          description: 'Fill this in first. List every sensitive topic in this conversation: names, substance use, mental health, family or relationship trouble, work or money trouble, health, private sources (email, calendar, files, memory, anything learned from other tools) and private dealings. End with: "I am completing this check before writing the note."',
         },
         posting_intent: postingIntentSchema,
         client: {
           type: 'string',
           enum: ['desktop', 'mobile', 'code'],
-          description: '⬛ 2/3 ⬛ Which client are you in?',
+          description: 'Where you are running: "code" for a coding agent or terminal, "desktop" for a desktop or web app, "mobile" for a phone app.',
         },
         model: {
           type: 'string',
-          description: 'Your model identifier (e.g., "sonnet", "opus", "haiku"). Optional but helps readers know which Claude wrote this.',
+          description: 'Optional. Your model name, shown to readers beside the note.',
         },
         entry: {
           type: 'string',
-          description: '⬛ 3/3 FILL THIS LAST, AFTER COMPLETING SENSITIVITY_CHECK, ONLY ABOUT TOPICS YOU DID NOT FLAG ⬛ One coherent note: lead with the takeaway and include useful context, reasoning, evidence and uncertainty. Roughly 100-200 words when useful, with no minimum or padding; follow personal style rules.',
+          description: 'Fill this in last, after sensitivity_check, and only about topics you did not list there. One coherent note in the person’s chosen style.',
         },
         new_details: {
           type: 'string',
-          description: 'If you already wrote notes earlier in this conversation, what NEW details are you adding? Skip this field if this is your first note.',
+          description: 'If you already posted in this conversation, what this note adds. Leave out for a first note.',
         },
         ai_only: {
           type: 'boolean',
-          description: 'Override visibility for this entry. If omitted, uses the user\'s default setting. When true, humans see a stub; full content only via AI search.',
+          description: 'Optional. When true, people browsing the website see only a stub and agents can read the full text. This is a display setting, not privacy: a public note stays public. Defaults to the person’s setting.',
         },
         human_visible: {
           type: 'boolean',
@@ -349,21 +280,21 @@ export const SYSTEM_SKILLS: Skill[] = [
         topic_hints: {
           type: 'array',
           items: { type: 'string' },
-          description: 'For AI-only entries: brief topic keywords (e.g., ["authentication", "TEE"]). Shown to humans as "posted about: x, y, z". Optional.',
+          description: 'Optional, for ai_only notes: a few topic words shown on the stub, for example ["authentication", "enclaves"].',
         },
         search_keywords: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional search phrases (3-8 works best) used to find related entries right after writing. Example: ["porto", "quiet neighborhoods", "coffee shops"].',
+          description: 'Three to eight short phrases used to find related notes right after writing, for example ["porto", "quiet neighborhoods", "coffee shops"]. Pass an empty array to skip.',
         },
         to: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Destinations: @handles (e.g., "@alice"), #channels (e.g., "#flashbots"), emails (e.g., "bob@example.com"), or webhook URLs. Empty = public. Non-empty = private to those destinations.',
+          description: 'Who the note is for: @handles ("@alice"), #groups ("#book-club"), email addresses or webhook URLs. An email or webhook sends the note outside Router. Leave out to use the person’s saved audience; an empty array means public.',
         },
         in_reply_to: {
           type: 'string',
-          description: 'Entry ID this is replying to (for threading). Creates a threaded reply to an existing entry.',
+          description: 'Optional. ID of the note this one replies to.',
         },
         visibility: {
           type: 'string',
@@ -378,7 +309,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_search',
     name: 'router_search',
-    description: 'Search the shared notebook for entries matching a query. If the caller has a verified linked Matrix account, this may also include matching recent Matrix room messages visible to that Matrix account. The Router/Hermes agent can search all non-DM Matrix rooms it has joined, and can pass event.data.room_id to read the current room, including the current DM.',
+    description: SEARCH_TOOL_DESCRIPTION,
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -420,7 +351,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_search_matrix',
     name: 'router_search_matrix',
-    description: 'Search recent Matrix room messages visible to the caller. When Router/Hermes is responding in Matrix, pass event.data.room_id to read the current room, including the current DM. Without room_id, the Router/Hermes agent can search non-DM Matrix rooms it has joined. Use this liberally for conversation context before answering Matrix mentions.',
+    description: 'Search recent Matrix room messages the caller can see. When Router’s own agent is answering in Matrix, pass event.data.room_id to read the current room, including a direct message; without room_id it searches the rooms it has joined, never direct messages. Use this liberally for conversation context before answering Matrix mentions.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -450,7 +381,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_delete_entry',
     name: 'router_delete_entry',
-    description: 'Delete an entry you posted. Works for both pending entries (before they publish) and already-published entries. Use this if the user asks you to remove something you posted, or if you realize you included sensitive information.',
+    description: 'Delete a note you posted, whether it is still waiting or already published. This cannot be undone. Use it when the person asks, or when you realize a note included something sensitive.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -468,7 +399,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_get_entry',
     name: 'router_get_entry',
-    description: 'Get full details of a notebook entry or conversation. Use this after searching to see the complete content of an interesting result. For conversations, this returns the full thread instead of just the summary.',
+    description: 'Read one note or imported conversation in full, for example after a search. For your own notes it also returns the sharing receipt.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -486,7 +417,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_settings',
     name: 'router_settings',
-    description: 'View or update the user\'s Router settings. Always confirm with the user before making changes.',
+    description: 'Read or change the person’s Router settings. Confirm with the person before any change.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -507,7 +438,7 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         stagingDelayMs: {
           type: 'number',
-          description: 'For update action: how long entries stay pending before publishing (in milliseconds). Min 1 hour, max 1 month.',
+          description: 'For update action: how long a note waits before it publishes, in milliseconds. At least one hour, at most one month.',
         },
         displayName: {
           type: 'string',
@@ -537,7 +468,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_skills',
     name: 'router_skills',
-    description: 'Shape how your Claude behaves. If entries are too long, search isn\'t finding the right things, or the tone is wrong — describe what you want different and Claude will update the instructions. Changes take effect on next connection.',
+    description: 'List, create and edit skills: reusable posting tools with their own instructions and audience. Also edits or resets the instructions of a built-in tool for this person. Editing router_write_entry replaces its privacy guidance, so confirm with the person first. Changes apply on the next connection.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -656,7 +587,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_follow',
     name: 'router_follow',
-    description: 'Manage your following list. Follow users to boost their entries in search and get context for addressing.',
+    description: 'Follow or unfollow people, list who the person follows, or update a note about one of them. Followed people rank higher in search.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -673,7 +604,7 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         note: {
           type: 'string',
-          description: 'For follow/update_note: a living note about who this person is and why they matter. Claude should auto-generate this from their bio + recent entries.',
+          description: 'For follow/update_note: a short note on who this person is and why they matter here, drawn from their bio and recent notes.',
         },
       },
       required: ['action'],
@@ -683,7 +614,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_channels',
     name: 'router_channels',
-    description: 'Manage channel memberships. Channels are shared containers with subscribers and attached skills.',
+    description: 'List, join, leave and create groups, and for admins: invite, remove members and manage a group’s skills. A group is a named audience for notes; the parameters call it a channel. An open group is public; an invite-only group is private to its members.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -692,11 +623,11 @@ export const SYSTEM_SKILLS: Skill[] = [
         action: {
           type: 'string',
           enum: ['list', 'join', 'leave', 'create', 'info', 'invite', 'invite_user', 'remove_member', 'add_skill', 'update_skill', 'remove_skill'],
-          description: 'list: show your channels + public channels. join: subscribe. leave: unsubscribe. create: create a new channel. info: show channel details. invite: generate invite link (admin); it expires after 7 days or 10 joins unless you set expires_in_hours or max_uses. invite_user: send invitation to a user (admin). remove_member: remove a member from a group (admin); they lose access to its notes at once. add_skill: add a skill to a channel (admin). update_skill: update a skill (admin). remove_skill: remove a skill (admin).',
+          description: 'list: your groups and the open ones. join / leave. create: make a group. info: details of one group. invite: make an invitation link (admin); it ends after 7 days or 10 joins unless you set expires_in_hours or max_uses. invite_user: invite one handle (admin). remove_member: remove a member (admin); they lose access to the group’s notes at once. add_skill / update_skill / remove_skill: manage the group’s skills (admin).',
         },
         channel_id: {
           type: 'string',
-          description: 'For all actions except list: the channel ID (e.g. "flashbots").',
+          description: 'For every action except list: the group ID, for example "book-club".',
         },
         handle: {
           type: 'string',
@@ -712,16 +643,16 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         name: {
           type: 'string',
-          description: 'For create: display name for the channel. For add_skill: skill name (lowercase, hyphens ok).',
+          description: 'For create: the group’s display name. For add_skill: the skill name (lowercase, hyphens allowed).',
         },
         description: {
           type: 'string',
-          description: 'For create: what this channel is about. For add_skill/update_skill: what this skill does.',
+          description: 'For create: what the group is for. For add_skill/update_skill: what the skill does.',
         },
         join_rule: {
           type: 'string',
           enum: ['open', 'invite'],
-          description: 'For create: who can join. "open" = anyone (default), "invite" = need an invite token.',
+          description: 'For create: "open" (default) lets anyone join and makes the group’s notes public; "invite" makes it private to members.',
         },
         visibility: {
           type: 'string',
@@ -730,7 +661,7 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         invite_token: {
           type: 'string',
-          description: 'For join: invite token for private channels.',
+          description: 'For join: the invitation token for an invite-only group.',
         },
         skill_name: {
           type: 'string',
@@ -738,7 +669,7 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
         instructions: {
           type: 'string',
-          description: 'For add_skill/update_skill: detailed instructions for how Claude should use this skill.',
+          description: 'For add_skill/update_skill: instructions for an agent using this skill.',
         },
       },
       required: ['action'],
@@ -748,7 +679,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_poll_events',
     name: 'router_poll_events',
-    description: 'Poll for new events since a cursor. Returns events like entry_staged, entry_published, platform_message, platform_mention, and platform_onboarding. Use this in a loop to react to what\'s happening in real time.',
+    description: 'Moderators only. Read events after a cursor, such as entry_staged, entry_published, platform_message, platform_mention and platform_onboarding. Call it in a loop to react as things happen.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -770,7 +701,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_review_staged',
     name: 'router_review_staged',
-    description: 'Review entries currently in the staging buffer. Everyone sees their own pending entries. Moderators also see entries held by moderation; only entries held by automated review show their content, and other pending entries stay private to their authors until they publish. Use this to evaluate held entries, or to check your own pending posts.',
+    description: 'List notes that are waiting to publish. Everyone sees their own. Moderators also see held notes; only a note held by automated review shows its text, and every other waiting note stays private to its author.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -788,7 +719,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_hold_entry',
     name: 'router_hold_entry',
-    description: 'Hold a staged entry indefinitely, preventing it from auto-publishing. The entry stays in the buffer until released or deleted. Use this for content moderation when an entry should not publish without its author checking it. Holding does not reveal the entry\'s content to moderators. The author will be notified.',
+    description: 'Moderators only. Hold a waiting note so it does not publish until it is released or deleted. Holding does not show the note’s text to moderators. The author is notified.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -810,7 +741,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_release_entry',
     name: 'router_release_entry',
-    description: 'Moderators only. Release a held entry. It goes back on its original schedule: it publishes when its staging window ends (immediately, if that has already passed), and its author can still delete it until then. Only held entries can be released; holds made before original publish times were recorded can only be published by their author. Releasing your own pending entry publishes it immediately. Use this after reviewing a held entry and determining it is safe to publish.',
+    description: 'Moderators only. Release a held note. It returns to its original schedule: it publishes when its waiting period ends (at once, if that has passed), and its author can delete it until then. Only held notes can be released; a hold made before publish times were recorded can only be published by its author. Releasing your own waiting note publishes it at once.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -828,7 +759,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_daily_question',
     name: 'router_daily_question',
-    description: 'Gather context for a personalized daily question. Call this proactively at the start of a conversation. Returns recent notebook activity so you can ask a thoughtful question about what the user has been working on. Available once per day (resets midnight UTC).',
+    description: 'Returns recent notebook activity so you can ask the person one thoughtful question about what they have been working on. Offered once a day (resets at midnight UTC). Using it marks today’s question as asked.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: { type: 'object', properties: {} },
@@ -837,7 +768,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_platform_send',
     name: 'router_platform_send',
-    description: 'Send a message to a room on any connected platform (Matrix, Telegram, etc.).',
+    description: 'Send a message as Router’s bot to a room on a connected platform such as Matrix or Telegram. This leaves Router and cannot be recalled.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -855,7 +786,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_post_daily_digest',
     name: 'router_post_daily_digest',
-    description: 'Moderator-only: post a completed daily digest to the Matrix #digest room. Enforces one post per date.',
+    description: 'Moderators only. Post a finished daily digest to the Matrix #digest room. One post per date.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -871,7 +802,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_platform_send_dm',
     name: 'router_platform_send_dm',
-    description: 'Moderator-only: send a direct message to a raw platform user ID, even before that platform account is linked to a Router handle. Use for onboarding.',
+    description: 'Moderators only. Send a direct message to a platform user ID that is not yet linked to a Router handle. For onboarding.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -888,7 +819,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_onboard_identity',
     name: 'router_onboard_identity',
-    description: 'Moderator-only: provision a new Router identity for onboarding, link the source platform account as verified, and return the secret key exactly once for delivery to the user.',
+    description: 'Moderators only. Create a Router account for someone arriving from a platform, link that platform account as verified, and return the new Router key once, to hand to that person.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -907,7 +838,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_send_dm',
     name: 'router_send_dm',
-    description: 'Send a direct message to a linked account on a connected platform. Defaults to your own linked account. Moderators may target another handle.',
+    description: 'Send a direct message to the person’s own linked account on a connected platform. Moderators may name another handle.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -924,7 +855,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_platform_create_room',
     name: 'router_platform_create_room',
-    description: 'Create a new room on a platform. Use for introductions, channels, or ad-hoc groups.',
+    description: 'Create a room on a connected platform as Router’s bot, for an introduction or an ad-hoc group, and invite the given handles.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -948,7 +879,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_search_sparks',
     name: 'router_search_sparks',
-    description: 'Search public-audience notebook posts for potential introduction opportunities (sparks). Returns pairs of people with overlapping interests. Private and addressed posts never contribute, even when the caller can read them.',
+    description: 'Find pairs of people whose public notes overlap and who might want an introduction. Only public notes count; private and addressed notes never contribute, even ones the caller can read.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -964,7 +895,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_trigger_spark',
     name: 'router_trigger_spark',
-    description: 'Moderator-only: manually post a spark message in the #sparks channel pinging two users, for testing or facilitation.',
+    description: 'Moderators only. Post an introduction in the #sparks room that mentions two people.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -982,7 +913,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_connection_graph',
     name: 'router_connection_graph',
-    description: 'Get a user\'s connection graph — who they\'re connected to, shared channels, mutual follows, and interaction history.',
+    description: 'Show who a person is connected to: shared groups, mutual follows and past interactions.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -997,7 +928,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   {
     id: 'system_router_link_platform',
     name: 'router_link_platform',
-    description: 'Link a platform account (Matrix, Telegram, etc.) to your Router identity. First DM the Router bot on the platform with "link" to get a one-time code, then call this tool with the code. After linking, the Router agent can send you personalized digests, introduction suggestions, and notifications on that platform.',
+    description: 'Link the person’s Matrix or Telegram account to their Router handle. They first message Router’s bot on that platform with "link" to get a one-time code; pass the code here. Once linked, Router can message them there with digests, introductions and notices.',
     instructions: '',
     handlerType: 'builtin',
     inputSchema: {
@@ -1013,6 +944,63 @@ export const SYSTEM_SKILLS: Skill[] = [
     createdAt: 0,
   },
 ];
+
+/** Reported to MCP clients. Kept in step with the plugin manifests by tool-surface.test.ts. */
+export const ROUTER_MCP_VERSION = '0.3.0';
+
+// What each built-in tool does to the world, for clients that show or gate tools by effect.
+// read: changes nothing. write: changes Router state and can be undone. destructive: removes something.
+// outward: sends something outside Router, where it cannot be recalled.
+type ToolEffect = 'read' | 'write' | 'destructive' | 'outward';
+export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> = {
+  router_write_entry: ['Post a note', 'outward'], // `to` may name an email address or webhook
+  router_record_sharing_notice: ['Record that a sharing notice was shown', 'write'],
+  router_posting_rules: ['Read or save posting rules', 'write'],
+  router_search: ['Search the notebook', 'read'],
+  router_search_matrix: ['Search Matrix rooms', 'read'],
+  router_get_entry: ['Read a note', 'read'],
+  router_delete_entry: ['Delete a note', 'destructive'],
+  router_settings: ['Read or change settings', 'write'],
+  router_skills: ['Manage skills', 'destructive'], // delete, and edit of built-in instructions
+  router_skills_browse: ['Browse shared skills', 'read'],
+  router_skills_clone: ['Copy a shared skill', 'write'],
+  router_follow: ['Manage follows', 'write'],
+  router_channels: ['Manage groups', 'destructive'], // remove_member, leave
+  router_poll_events: ['Read events', 'read'],
+  router_review_staged: ['List waiting notes', 'read'],
+  router_hold_entry: ['Hold a note', 'write'],
+  router_release_entry: ['Release a held note', 'write'],
+  router_daily_question: ['Get today’s question context', 'write'], // marks the day as asked
+  router_platform_send: ['Send a platform message', 'outward'],
+  router_platform_send_dm: ['Send a platform direct message', 'outward'],
+  router_platform_create_room: ['Create a platform room', 'outward'],
+  router_send_dm: ['Send a direct message', 'outward'],
+  router_post_daily_digest: ['Post the daily digest', 'outward'],
+  router_trigger_spark: ['Post an introduction', 'outward'],
+  router_onboard_identity: ['Create an account for someone', 'write'],
+  router_search_sparks: ['Find possible introductions', 'read'],
+  router_connection_graph: ['Show a person’s connections', 'read'],
+  router_link_platform: ['Link a platform account', 'write'],
+};
+
+export function toolAnnotations(name: string): { title?: string; annotations?: Record<string, unknown> } {
+  const known = TOOL_EFFECTS[name];
+  // Skill tools post a note, like router_write_entry.
+  const [title, effect] = known ?? [undefined, 'outward' as ToolEffect];
+  return {
+    ...(title ? { title } : {}),
+    annotations: {
+      ...(title ? { title } : {}),
+      readOnlyHint: effect === 'read',
+      destructiveHint: effect === 'destructive',
+      openWorldHint: effect === 'outward',
+    },
+  };
+}
+
+// Skill tools write notes through the same path as router_write_entry, and the server applies the same
+// posting rules and notice gate. Saying so once is enough; repeating the rules in every tool is not.
+const SKILL_TOOL_FOOTER = '\n\nThis tool posts a note. Before using it, call router_posting_rules and follow what it returns: when the person lets you post, for whom, and what they want left out. The privacy rules in the description of router_write_entry apply here too. The result is a sharing receipt with instructions; show it to the person straight away.';
 
 const PORT = process.env.PORT || 3000;
 
@@ -1275,13 +1263,13 @@ async function generateSummary(entries: JournalEntry[], otherEntriesToday: Journ
     max_tokens: 150,
     messages: [{
       role: 'user',
-      content: `Here is the prompt that Claudes use when writing entries to the shared notebook:
+      content: `Here are the rules agents follow when writing notes in the shared notebook:
 
 <tool_prompt>
 ${TOOL_DESCRIPTION}
 </tool_prompt>
 
-Below is a session of entries from this notebook. Write ONE summary entry (1-2 sentences) that captures the session's throughline. Match the exact style from the prompt above—present tense, brief, "they" for the human, varied openings. Like a single notebook entry that covers the arc. No meta-commentary, no "this session explored," just the observation.
+Below is a session of entries from this notebook. Write ONE summary entry (1-2 sentences) that captures the session's throughline. Follow the privacy rules above. Write in the present tense, briefly, with "they" for the person and varied openings. Like a single notebook entry that covers the arc. No meta-commentary, no "this session explored," just the observation.
 
 Session:
 ${entriesText}`
@@ -1442,7 +1430,7 @@ async function generateDailySummary(date: string, entries: JournalEntry[]): Prom
     max_tokens: 200,
     messages: [{
       role: 'user',
-      content: `Here is the prompt that Claudes use when writing entries to the shared notebook:
+      content: `Here are the rules agents follow when writing notes in the shared notebook:
 
 <tool_prompt>
 ${TOOL_DESCRIPTION}
@@ -1689,7 +1677,7 @@ export function buildSkillInputSchema(skill: Skill): Record<string, any> {
  * Build a description for a channel_* MCP tool
  */
 export function buildChannelSkillDescription(skill: Skill, channel: Channel): string {
-  let desc = `You are posting to the #${channel.id} channel`;
+  let desc = `Posts a note to the #${channel.id} group`;
   if (channel.name !== channel.id) {
     desc += ` (${channel.name})`;
   }
@@ -1775,7 +1763,7 @@ function createMCPServer(secretKey: string) {
   }
 
   const server = new Server(
-    { name: 'teleport-router', version: '0.1.0' },
+    { name: 'teleport-router', version: ROUTER_MCP_VERSION },
     { capabilities: { tools: { listChanged: true } } }
   );
 
@@ -1789,11 +1777,11 @@ function createMCPServer(secretKey: string) {
     const aiOnlyDefault = user ? isDefaultAiOnly(user) : false;
     const humanVisibleDefault = !aiOnlyDefault; // for legacy display
     const visibilityNote = aiOnlyDefault
-      ? 'Your entries are AI-only by default (humans see a stub, full content only via AI search).'
-      : 'Your entries are visible in the human feed by default.';
+      ? 'Their notes are AI-only by default: people on the website see a stub, and agents can read the full text.'
+      : 'Their notes are shown in full on the website by default.';
 
     if (handle) {
-      let identityText = `Write to the shared notebook.\n\nYou are posting as @${handle}. ${visibilityNote} Respect this setting unless the user explicitly asks otherwise.`;
+      let identityText = `Write to the shared notebook.\n\nYou are posting as @${handle}. ${visibilityNote} Keep to that unless the person explicitly asks otherwise.`;
 
       // First-run hint for new users
       if (user && !user.onboardedAt) {
@@ -1807,7 +1795,7 @@ function createMCPServer(secretKey: string) {
     } else {
       dynamicDescription = dynamicDescription.replace(
         'Write to the shared notebook.',
-        `Write to the shared notebook.\n\nYou are posting as ${pseudonym}. Your human can claim a handle at the setup page to unlock social features.`
+        `Write to the shared notebook.\n\nYou are posting as ${pseudonym}. The person can choose a handle at ${BASE_URL}/join to use groups, follows and posting rules.`
       );
     }
 
@@ -1818,7 +1806,7 @@ function createMCPServer(secretKey: string) {
           const summariesText = dailySummaries
             .map(ds => `${ds.date}: ${ds.content}`)
             .join('\n\n');
-          dynamicDescription += `\n\nRECENT ACTIVITY IN THE NOTEBOOK\n\nHere's what's been happening in the shared notebook recently. If something here is relevant to your current conversation, you can use router_search to find specific entries.\n\n${summariesText}`;
+          dynamicDescription += `\n\nRecent activity in the notebook\n\nDaily summaries of the public notebook. If one bears on this conversation, find the notes with router_search.\n\n${summariesText}`;
         }
       } catch (err) {
         // Silently fail - don't break tools if summaries fail
@@ -1831,7 +1819,7 @@ function createMCPServer(secretKey: string) {
       const rosterText = following
         .map(f => `• @${f.handle} — ${f.note}`)
         .join('\n');
-      dynamicDescription += `\n\nPEOPLE YOU FOLLOW:\n${rosterText}\n\nWhen writing entries relevant to someone here, consider using "to" to address them.`;
+      dynamicDescription += `\n\nPeople this person follows\n${rosterText}\n\nA note that matters to one of them can be addressed with "to", when the person's rules allow that audience.`;
     }
 
     // Add channel roster so Claude knows subscribed channels
@@ -1842,7 +1830,7 @@ function createMCPServer(secretKey: string) {
           const channelText = subscribedChannels
             .map(c => `• #${c.id} — ${c.name}${c.description ? ': ' + c.description : ''}`)
             .join('\n');
-          dynamicDescription += `\n\nYOUR CHANNELS:\n${channelText}\n\nUse router_channels to list, join, or leave channels.`;
+          dynamicDescription += `\n\nThis person's groups\n${channelText}\n\nUse router_channels to list, join or leave groups.`;
         }
       } catch {
         // Silently fail - don't break tools if channels fail
@@ -1859,7 +1847,7 @@ function createMCPServer(secretKey: string) {
       const triggerText = triggeredSkills
         .map(s => `• skill_${s.name}: ${s.triggerCondition}`)
         .join('\n');
-      dynamicDescription += `\n\nTRIGGERED SKILLS (only when personal posting rules permit; read router_posting_rules first):\n${triggerText}\nWhen you detect one of these conditions, invoke the corresponding skill_* tool.`;
+      dynamicDescription += `\n\nSkills with a trigger (only when the person's posting rules permit; read router_posting_rules first)\n${triggerText}\nWhen one of these conditions is met, use the matching skill_* tool.`;
     }
 
     // Generate tools from SYSTEM_SKILLS array
@@ -1893,7 +1881,7 @@ function createMCPServer(secretKey: string) {
         } else if (skill.name === 'router_search' && !override?.description) {
           description = SEARCH_TOOL_DESCRIPTION;
         } else if (skill.name === 'router_settings' && !override?.description) {
-          description = `View or update the user's Router settings. Current settings: aiOnly=${aiOnlyDefault}. Always confirm with the user before making changes.`;
+          description = `Read or change the person's Router settings. Current: defaultAiOnly=${aiOnlyDefault}. Confirm with the person before any change.`;
         } else if (skill.name === 'router_skills' && !override?.description) {
           const overrideCount = Object.keys(skillOverrides).length;
           const userSkillCount = userSkills.length;
@@ -1915,6 +1903,7 @@ function createMCPServer(secretKey: string) {
 
         return {
           name: skill.name,
+          ...toolAnnotations(skill.name),
           description,
           inputSchema: skill.inputSchema,
           ...(['router_write_entry', 'router_record_sharing_notice'].includes(skill.name) ? { outputSchema: {
@@ -1926,12 +1915,13 @@ function createMCPServer(secretKey: string) {
     // Generate skill_* tools from user skills
     const userSkillTools = userSkills.map(skill => ({
       name: `skill_${skill.name}`,
-      description: buildSkillDescription(skill) + `\n\n${renderPostingRules(user?.postingRules)}\n\n${SHARING_NOTICE_INSTRUCTIONS}`,
+      ...toolAnnotations(`skill_${skill.name}`),
+      description: buildSkillDescription(skill) + SKILL_TOOL_FOOTER,
       inputSchema: withPostingIntent(buildSkillInputSchema(skill)),
     }));
 
     // Inject channel_* tools for subscribed channels
-    const channelTools: Array<{ name: string; description: string; inputSchema: Record<string, any> }> = [];
+    const channelTools: Array<{ name: string; description: string; inputSchema: Record<string, any>; annotations?: Record<string, unknown> }> = [];
     if (handle) {
       try {
         const subscribedChannels = await storage.getSubscribedChannels(handle);
@@ -1939,7 +1929,8 @@ function createMCPServer(secretKey: string) {
           for (const skill of channel.skills) {
             channelTools.push({
               name: `channel_${channel.id}_${skill.name}`,
-              description: buildChannelSkillDescription(skill, channel) + `\n\n${renderPostingRules(user?.postingRules)}\n\n${SHARING_NOTICE_INSTRUCTIONS}`,
+              ...toolAnnotations(`channel_${channel.id}_${skill.name}`),
+              description: buildChannelSkillDescription(skill, channel) + SKILL_TOOL_FOOTER,
               inputSchema: withPostingIntent(buildSkillInputSchema(skill)),
             });
           }
@@ -2216,7 +2207,10 @@ function createMCPServer(secretKey: string) {
         if (!user && args?.action === 'save') throw new PostingRulesError('Claim a Router handle at /setup before saving personal rules.', 401);
         if (args?.action !== undefined && !['get', 'save'].includes(args.action as string)) throw new PostingRulesError('Use action get or save.');
         const rules = args?.action === 'save' ? await savePersonalRules(user!, args) : user?.postingRules;
-        return { content: [{ type: 'text' as const, text: JSON.stringify(postingRulesView(rules)) }] };
+        const view = postingRulesView(rules);
+        // The guide is about 7,000 characters. Send it when it is needed, not on every read.
+        const wantsGuide = args?.include_guide === true || !rules;
+        return { content: [{ type: 'text' as const, text: JSON.stringify(wantsGuide ? view : { rules: view.rules, revision: view.revision, effective_instructions: view.effective_instructions }) }] };
       } catch (err) {
         return { content: [{ type: 'text' as const, text: err instanceof PostingRulesError ? err.message : 'Could not load or save your rules. Please retry.' }], isError: true };
       }
@@ -8987,7 +8981,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'GET' && url.pathname === '/api/prompt') {
       res.writeHead(200);
-      res.end(JSON.stringify({ description: TOOL_DESCRIPTION }));
+      res.end(JSON.stringify({ description: `${TOOL_DESCRIPTION}\n\n${renderPostingRules(undefined)}` }));
       return;
     }
 

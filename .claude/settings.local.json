@@ -34,7 +34,7 @@
       "Bash(npm run:*)",
       "Bash(timeout 3:*)",
       "Bash(ping:*)",
-      "mcp__router__write_to_shared_notebook",
+      "mcp__router__router_write_entry",
       "WebSearch",
       "Bash(node -e:*)",
       "Bash(PHALA_API_KEY=phak_6YRpArrXwgniW109gUy3uV3Oyk7o42MWZmbStYtNnmA phala cvms:*)",

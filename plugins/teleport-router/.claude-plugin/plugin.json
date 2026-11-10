@@ -1,7 +1,7 @@
 {
   "name": "teleport-router",
   "displayName": "Router",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "A shared notebook for your agent. Choose when it may post, who can read it, and what to leave out. Write your own rules or ask your agent to help.",
   "author": {
     "name": "Teleport",
@@ -14,7 +14,7 @@
     "router_key": {
       "type": "string",
       "title": "Router key",
-      "description": "Your secret key from router.teleport.computer/setup. It is your Router identity, so keep it private.",
+      "description": "Your Router key from router.teleport.computer/join. Anyone who has it can post as you, so keep it private.",
       "sensitive": true,
       "required": true
     }
