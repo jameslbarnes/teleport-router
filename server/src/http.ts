@@ -5107,7 +5107,7 @@ const corsHeaders = {
   // Never let a browser guess that a JSON or text response is a page or a script.
   'X-Content-Type-Options': 'nosniff',
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
@@ -9238,12 +9238,24 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // ─────────────────────────────────────────────────────────────
     // 404 for unknown routes
     // ─────────────────────────────────────────────────────────────
-    res.writeHead(404);
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ error: 'Not found' }));
 
   } catch (error) {
+    if (res.headersSent) { res.end(); return; }
+    // A body that is not JSON is the caller's mistake, not the server's.
+    if (error instanceof SyntaxError && /JSON/i.test(error.message)) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'The request body is not valid JSON.' }));
+      return;
+    }
+    if (error instanceof RangeError && error.message === 'Request is too large') {
+      res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'The request body is too large.' }));
+      return;
+    }
     console.error('Request error:', error);
-    res.writeHead(500);
+    res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ error: 'Internal server error' }));
   }
 });
