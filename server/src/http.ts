@@ -5153,6 +5153,28 @@ const server = createServer(async (req, res) => {
     res.setHeader(key, value);
   });
 
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/mcp/')) {
+    // The Router key belongs in the Authorization header, where it stays out of addresses, history and logs.
+    // Older routes read it from ?key= or ?secret_key=; a header key is presented to them under both names,
+    // so every route that takes a key in the address also takes it in the header.
+    const bearer = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i)?.[1];
+    if (bearer && isValidSecretKey(bearer)) {
+      if (!url.searchParams.has('key')) url.searchParams.set('key', bearer);
+      if (!url.searchParams.has('secret_key')) url.searchParams.set('secret_key', bearer);
+    }
+  }
+  if (url.pathname.startsWith('/api/') || url.pathname === '/health') {
+    // A list is never unbounded, whatever the route's own default is.
+    const limit = url.searchParams.get('limit');
+    if (limit !== null) {
+      const n = Number.parseInt(limit, 10);
+      url.searchParams.set('limit', String(Number.isFinite(n) ? Math.min(Math.max(n, 1), 200) : 50));
+    }
+    // API answers are JSON unless a route says otherwise, and an answer made for one person is never cached.
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (url.searchParams.has('key') || url.searchParams.has('secret_key') || req.headers.authorization) res.setHeader('Cache-Control', 'no-store');
+  }
+
   try {
     if (req.method === 'GET' && url.pathname === '/api/posting-rules-guide') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
