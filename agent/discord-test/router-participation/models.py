@@ -17,6 +17,7 @@ import httpx
 
 from .participation import AXES, INTENTS, Classification, Decision, Msg, format_context  # noqa: F401 (re-exported)
 from .prompts import CLASSIFIER, COMPOSE
+from .group_memory import GROUP_TOOLS, PRIVATE_SYSTEM
 
 log = logging.getLogger(__name__)
 
@@ -77,13 +78,15 @@ class Brain:
         text = next((b.text for b in resp.content if b.type == "text"), "")
         return Classification.from_json(json.loads(text)), usage
 
-    async def compose(self, context: str, decision: Decision, trigger: Msg, cap: int) -> tuple[str | None, dict]:
-        system = COMPOSE.format(channel_note=self.note, intent=decision.intent, reason=decision.reason,
+    async def compose(self, context: str, decision: Decision, trigger: Msg, cap: int, private=None) -> tuple[str | None, dict]:
+        template = PRIVATE_SYSTEM if private else COMPOSE
+        system = template.format(channel_note=self.note, intent=decision.intent, reason=decision.reason,
                                 trigger_index=decision.trigger_index, trigger_author=trigger.author, word_cap=cap)
         messages: list[dict] = [{"role": "user", "content": f"Recent channel messages:\n\n{context}"}]
         usage = {"in": 0, "out": 0, "rounds": 0, "tools": []}
-        async with self.mcp_connect(self.s.get("compose_mcp_servers", [])) as (mcp_tools, call_mcp):
-            tools = [SEARCH_TOOL, *mcp_tools, WEB_SEARCH]
+        # A model with private context cannot call web search or any external MCP server.
+        async with self.mcp_connect([] if private else self.s.get("compose_mcp_servers", [])) as (mcp_tools, call_mcp):
+            tools = [SEARCH_TOOL, *GROUP_TOOLS] if private else [SEARCH_TOOL, *mcp_tools, WEB_SEARCH]
             for _ in range(MAX_ROUNDS):
                 usage["rounds"] += 1
                 try:
@@ -114,7 +117,12 @@ class Brain:
                     for block in resp.content:
                         if block.type == "tool_use":
                             usage["tools"].append(block.name)
-                            results.append(await self._run_tool(block, call_mcp))
+                            if private and block.name in ("search_group", "read_group_note"):
+                                # Access failures abort this answer; never improvise from stale context.
+                                content = await private.call(block.name, dict(block.input))
+                                results.append({"type": "tool_result", "tool_use_id": block.id, "content": content[:MAX_TOOL_RESULT_CHARS]})
+                            else:
+                                results.append(await self._run_tool(block, call_mcp))
                     messages.append({"role": "user", "content": results})
                     continue
                 if resp.stop_reason not in ("end_turn", "stop_sequence"):

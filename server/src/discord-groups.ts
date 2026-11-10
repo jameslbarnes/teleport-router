@@ -3,6 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashSecretKey, isValidSecretKey } from './identity.js';
 import { tokenize } from './storage.js';
 import type { Channel, JournalEntry, Storage, User } from './storage.js';
+import type { DiscordAudienceReader } from './discord-audience.js';
 
 export interface DiscordGroupBinding {
   guildId: string;
@@ -11,6 +12,8 @@ export interface DiscordGroupBinding {
   channelId?: string;
   botHandle: string;
   version: string;
+  /** Shared replies are opt-in and checked against every current Discord server member. */
+  conversationChannelIds?: string[];
 }
 export interface DiscordGroupGrant extends DiscordGroupBinding {
   id: string;
@@ -50,7 +53,7 @@ export function rankNotes<T extends {content: string}>(notes: T[], query: string
 }
 
 export function discordGroups(storage: Storage, published: Storage, authorStatus: AuthorStatus,
-  { baseUrl, now = Date.now }: {baseUrl: string; now?: () => number}) {
+  { baseUrl, now = Date.now, audience }: {baseUrl: string; now?: () => number; audience?: DiscordAudienceReader}) {
   const pending = new Map<string, {handle: string; groupId: string; discordUserId: string; binding: DiscordGroupBinding; expiresAt: number}>();
   type Pair = { groupId: string; discordUserId: string; channelId: string; displayName: string; username: string;
     binding: DiscordGroupBinding; expiresAt: number; owner?: string; grantId?: string; connected?: boolean;
@@ -112,6 +115,49 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     return {owner, grant, group};
   }
 
+  async function conversationAccess(bot: User, body: Body) {
+    const initial = await authorize(bot, body);
+    if (!initial.group.discord?.conversationChannelIds?.includes(String(body.channelId)))
+      return fail(403, 'Shared group replies are not enabled in this channel. Private /router-recall still works.');
+    if (!audience) return fail(503, 'Router cannot check this Discord audience. Private /router-recall still works.');
+    let viewers;
+    try { viewers = await audience(initial.grant.guildId, String(body.channelId)); }
+    catch { return fail(503, 'Router cannot check this Discord audience. Private /router-recall still works.'); }
+    // Discord can take seconds. Reload Router membership and the binding afterwards.
+    const auth = await authorize(bot, body), {group, grant} = auth;
+    if (!group.discord?.conversationChannelIds?.includes(String(body.channelId)))
+      return fail(403, 'Shared group replies are not enabled in this channel. Private /router-recall still works.');
+    if (!viewers.memberIds.includes(grant.discordUserId)) return fail(403, 'The requesting Discord account is no longer in this server.');
+    const linked = new Set<string>();
+    for (const subscriber of group.subscribers) {
+      const person = await storage.getUser(subscriber.handle);
+      for (const permission of person?.discordGrants || []) {
+        if (permission.groupId === group.id && !permission.revokedAt && !permission.deliveryPending
+          && permission.expiresAt > now() && sameBinding(permission, group.discord)
+          && person?.linkedAccounts?.some(a => a.platform === 'discord' && a.verified === true && a.platformUserId === permission.discordUserId))
+          linked.add(permission.discordUserId);
+      }
+    }
+    if (viewers.memberIds.some(id => id !== viewers.botId && !linked.has(id)))
+      return fail(403, 'I cannot use group notes here until everyone in this Discord server has linked their account and joined the Router group. Private /router-recall still works.');
+    // No claims about who saw a reply, and no trust in a member list supplied by the bot process.
+    return {...auth, audienceVersion: digest(JSON.stringify([grant.guildId, body.channelId, viewers.botId, viewers.memberIds]))};
+  }
+  const conversationView = (entry: JournalEntry) => ({...view(entry), version: digest(JSON.stringify(view(entry)))});
+
+  async function renewGrant(owner: User, grant: DiscordGroupGrant) {
+    const renewed = Math.min(now() + GRANT_IDLE_MS, grant.createdAt + GRANT_MAX_MS);
+    if (renewed - grant.expiresAt < GRANT_RENEW_EVERY_MS) return grant.expiresAt;
+    return exclusive('links', async () => {
+      const current = await storage.getUser(owner.handle);
+      const active = current?.discordGrants?.find(g => g.id === grant.id && !g.revokedAt && g.expiresAt > now());
+      if (!active) return fail(403, 'This Discord permission is no longer active. Use /router-link to connect again.');
+      const expiresAt = Math.max(active.expiresAt, renewed);
+      await storage.updateUser(owner.handle, {discordGrants: current!.discordGrants!.map(g => g.id === grant.id ? {...g, expiresAt} : g)});
+      return expiresAt;
+    });
+  }
+
   /** Shared by the original one-use codes and browser pairing. Caller holds the links lock. */
   async function issueGrant(owner: User, group: Channel, binding: DiscordGroupBinding, discordUserId: string, pairing?: Pair) {
     if (!group.discord || !sameBinding(binding, group.discord) || !member(group, owner.handle) || !member(group, binding.botHandle))
@@ -147,6 +193,52 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
   async function serve(path: string, authorization: string | undefined, body: Body): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail(400, 'JSON object required.');
     const user = await caller(authorization);
+    if (path === '/api/discord/conversation/configure') {
+      return exclusive('links', async () => {
+        const group = await groupFor(body.groupId);
+        if (!group.subscribers.some(s => s.handle === user.handle && s.role === 'admin')) return fail(403, 'Group admin required.');
+        if (!group.discord || !Array.isArray(body.channelIds) || body.channelIds.length > 20
+          || body.channelIds.some(id => !snowflake(id)) || new Set(body.channelIds).size !== body.channelIds.length
+          || (group.discord.scope !== 'guild' && body.channelIds.some(id => id !== group.discord!.channelId)))
+          return fail(400, 'Choose up to 20 text channels covered by the existing Discord connection.');
+        await storage.updateChannel(group.id, {discord: {...group.discord, conversationChannelIds: body.channelIds as string[]}});
+        return {groupId: group.id, channelIds: body.channelIds};
+      });
+    }
+    if (path === '/api/discord/conversation/operate') {
+      const {group, owner, grant, audienceVersion} = await conversationAccess(user, body);
+      if (body.action === 'check') {
+        await renewGrant(owner, grant);
+        return {groupId: group.id, audienceVersion};
+      }
+      if (body.audienceVersion !== audienceVersion) return fail(409, 'The Discord audience changed. Please try again.');
+      if (body.action === 'search') {
+        if (typeof body.query !== 'string' || body.query.length > 500) return fail(400, 'Search text is too long.');
+        const entries = rankNotes((await published.getChannelEntries(group.id, 500)).filter(e => e.to?.includes(`#${group.id}`)), body.query).slice(0, 6);
+        const final = await conversationAccess(user, body);
+        if (final.audienceVersion !== audienceVersion) return fail(409, 'The Discord audience changed. Please try again.');
+        return {groupId: group.id, entries: entries.map(conversationView)};
+      }
+      if (body.action === 'read' || body.action === 'verify') {
+        const refs = body.action === 'read' ? [{id: body.entryId}] : body.sources;
+        if (!Array.isArray(refs) || refs.length > 30 || refs.some(r => !r || typeof r.id !== 'string' || !/^[\w-]{1,160}$/.test(r.id)
+          || (body.action === 'verify' && (typeof r.version !== 'string' || !/^[a-f0-9]{64}$/.test(r.version)))))
+          return fail(400, 'Provide valid source references.');
+        const entries = [];
+        for (const ref of refs) {
+          const entry = await published.getEntry(ref.id);
+          if (!entry || !entry.to?.includes(`#${group.id}`)) return fail(404, 'A source is no longer available in this group.');
+          const current = conversationView(entry);
+          if (body.action === 'verify' && current.version !== ref.version) return fail(409, 'A source changed. Please try again.');
+          entries.push(current);
+        }
+        // Check the current audience and permissions after potentially slow storage reads.
+        const final = await conversationAccess(user, body);
+        if (final.audienceVersion !== audienceVersion) return fail(409, 'The Discord audience changed. Please try again.');
+        return body.action === 'read' ? {entry: entries[0]} : {verified: true, audienceVersion};
+      }
+      return fail(400, 'Conversation access is read-only.');
+    }
     if (path === '/api/discord/link/status') {
       const group = await groupFor(body.groupId);
       if (!member(group, user.handle)) return fail(403, 'Join this private group first.');
@@ -226,7 +318,9 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           ...(scope === 'channel' ? {channelId: body.channelId as string} : {}), botHandle: bot.handle};
         const binding: DiscordGroupBinding = {...destination,
           version: prior && sameDestination(prior, destination)
-            ? prior.version : randomBytes(16).toString('hex')};
+            ? prior.version : randomBytes(16).toString('hex'),
+          ...(prior && sameDestination(prior, destination) && prior.conversationChannelIds
+            ? {conversationChannelIds: prior.conversationChannelIds} : {})};
         // The admin explicitly grants this service identity membership, without a cross-platform invitation.
         if (!member(group, bot.handle)) await storage.addSubscriber(group.id, bot.handle, 'member');
         await storage.updateChannel(group.id, {discord: binding});
@@ -275,17 +369,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     }
     if (path !== '/api/discord/operate') return fail(404, 'Not found.');
     const {owner, group, grant} = await authorize(user, body);
-    let expiresAt = grant.expiresAt;
-    const renewed = Math.min(now() + GRANT_IDLE_MS, grant.createdAt + GRANT_MAX_MS);
-    if (body.action !== 'unlink' && renewed - expiresAt >= GRANT_RENEW_EVERY_MS) {
-      expiresAt = await exclusive('links', async () => {
-        const current = (await storage.getUser(owner.handle))!;
-        const active = current.discordGrants?.find(g => g.id === grant.id && !g.revokedAt && g.expiresAt > now());
-        if (!active) return fail(403, 'This Discord permission is no longer active. Use /router-link to connect again.');
-        await storage.updateUser(owner.handle, {discordGrants: current.discordGrants!.map(g => g.id === grant.id ? {...g, expiresAt: renewed} : g)});
-        return renewed;
-      });
-    }
+    const expiresAt = body.action === 'unlink' ? grant.expiresAt : await renewGrant(owner, grant);
     if (body.action === 'status') return {handle: owner.handle, groupId: group.id, expiresAt,
       storage: await authorStatus(owner.handle)};
     if (body.action === 'unlink') {

@@ -30,6 +30,7 @@ import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, 
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
+import { discordAudience } from './discord-audience.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
 import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
@@ -1137,7 +1138,7 @@ const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progr
 let authorLinkQueue: Promise<unknown> = Promise.resolve();
 const STATIC_DIR = join(process.cwd(), '..');
 const discordGroupService = authorLayer ? discordGroups(storage, publishedStorage,
-  handle => authorLayer.status(handle), {baseUrl: BASE_URL.replace(/\/$/, '')}) : null;
+  handle => authorLayer.status(handle), {baseUrl: BASE_URL.replace(/\/$/, ''), audience: discordAudience(process.env.DISCORD_BOT_TOKEN)}) : null;
 
 /**
  * True only when the viewer wrote the entry. Each side must be present: a viewer

@@ -12,6 +12,8 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   let clock = 1_000_000;
   const data = new Map<string, Map<string,string>>();
   const revoked = new Set<string>();
+  const audienceState = {botId:'100000000000000090',memberIds:['100000000000000003','100000000000000090'], unavailable:false,
+    beforeRead:async()=>{}};
   const layer = authorStorage(base, async b => {
     const check = () => {if (revoked.has(b.space)) throw new Error('revoked');};
     const records = data.get(b.space)!;
@@ -27,7 +29,8 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   }
   await base.createChannel({id:'test-group', name:'Private test', visibility:'private', joinRule:'invite', createdBy:'alice', createdAt:clock,
     skills:[], subscribers:['alice','bob','router_bot'].map(handle=>({handle,role:handle==='alice'?'admin':'member',joinedAt:clock}))});
-  const service = discordGroups(layer.storage, layer.storage, layer.status, {baseUrl:'https://router.example',now:()=>clock});
+  const service = discordGroups(layer.storage, layer.storage, layer.status, {baseUrl:'https://router.example',now:()=>clock,
+    audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {...audienceState,memberIds:[...audienceState.memberIds]};}});
   const context = {guildId:'100000000000000001', channelId:'100000000000000002', discordUserId:'100000000000000003'};
   const call = (who: keyof typeof keys, path: string, body: Record<string,unknown>) => service.serve('/api/discord/'+path, `Bearer ${keys[who]}`, body) as Promise<any>;
   await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',
@@ -38,8 +41,68 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   }
   const operate = (grant: string, body: Record<string,unknown> = {}) => call('router_bot','operate',{grant,...context,...body});
   const save = (grant: string, content='Selected synthetic note', interactionId='100000000000000010') => operate(grant,{action:'save',content,interactionId});
-  return {base,layer,data,revoked,keys,context,call,link,operate,save,advance:(ms=60001)=>{clock+=ms;}};
+  return {base,layer,data,revoked,keys,context,call,link,operate,save,audienceState,advance:(ms=60001)=>{clock+=ms;}};
 }
+
+describe('Shared conversational group access',()=>{
+  async function conversation() {
+    const f=await fixture('guild'), {grant}=await f.link();
+    const ask=(action:string,extra:Record<string,unknown>={})=>f.call('router_bot','conversation/operate',{...f.context,grant,action,...extra});
+    const enable=()=>f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[f.context.channelId]});
+    return {...f,grant,ask,enable};
+  }
+  it('requires an opted-in channel, scoped linked author and fresh server audience',async()=>{
+    const f=await conversation();await expect(f.ask('check')).rejects.toMatchObject({status:403});
+    await expect(f.call('bob','conversation/configure',{groupId:'test-group',channelIds:[f.context.channelId]})).rejects.toMatchObject({status:403});
+    await f.enable(); const access=await f.ask('check');expect(access.groupId).toBe('test-group');
+    await expect(f.call('router_bot','conversation/operate',{...f.context,action:'check'})).rejects.toMatchObject({status:403});
+    await expect(f.ask('check',{channelId:'100000000000000030'})).rejects.toMatchObject({status:403});
+    await expect(f.ask('save',{audienceVersion:access.audienceVersion,content:'No writes'})).rejects.toMatchObject({status:400});
+    f.audienceState.unavailable=true;await expect(f.ask('check')).rejects.toMatchObject({status:503});
+  });
+  it('blocks any unlinked arrival or other bot, then permits a currently linked group member',async()=>{
+    const f=await conversation();await f.enable();
+    const bobId='100000000000000008';f.audienceState.memberIds.push(bobId);
+    await expect(f.ask('check')).rejects.toMatchObject({status:403});
+    await f.link('bob',bobId); expect((await f.ask('check')).groupId).toBe('test-group');
+    f.audienceState.memberIds.push('100000000000000099');await expect(f.ask('check')).rejects.toMatchObject({status:403});
+    f.audienceState.memberIds.pop();await f.base.removeSubscriber('test-group','bob');
+    await expect(f.ask('check')).rejects.toMatchObject({status:403});
+  });
+  it('rechecks source deletion, edits, audience changes and permission revocation before delivery',async()=>{
+    const f=await conversation();await f.enable();const saved=await f.save(f.grant,'The violet telescope is ready');
+    const {audienceVersion}=await f.ask('check');
+    const result=await f.ask('search',{audienceVersion,query:'violet telescope'});
+    expect(result.entries).toHaveLength(1);expect(result.entries[0].id).toBe(saved.entry.id);
+    const sources=result.entries.map((e:any)=>({id:e.id,version:e.version}));
+    expect(await f.ask('verify',{audienceVersion,sources})).toMatchObject({verified:true});
+    const original=(await f.layer.storage.getEntry(saved.entry.id))!;
+    await f.layer.storage.addEntry({...original,content:'The telescope date changed.'});
+    await expect(f.ask('verify',{audienceVersion,sources})).rejects.toMatchObject({status:409});
+    await f.layer.storage.addEntry(original);
+    f.audienceState.memberIds.push('100000000000000008');await f.link('bob','100000000000000008');
+    await expect(f.ask('verify',{audienceVersion,sources})).rejects.toMatchObject({status:409});
+    f.audienceState.memberIds.pop();
+    await f.layer.storage.deleteEntry(saved.entry.id);
+    await expect(f.ask('verify',{audienceVersion,sources})).rejects.toMatchObject({status:404});
+    await f.base.removeSubscriber('test-group','alice');await expect(f.ask('verify',{audienceVersion,sources:[]})).rejects.toMatchObject({status:403});
+  });
+  it('cannot read another group and disables conversations without breaking ephemeral commands',async()=>{
+    const f=await conversation();await f.enable();const saved=await f.save(f.grant);
+    const {audienceVersion}=await f.ask('check');
+    await expect(f.ask('read',{audienceVersion,entryId:'other-private-group-note'})).rejects.toMatchObject({status:404});
+    await f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[]});
+    await expect(f.ask('verify',{audienceVersion,sources:[]})).rejects.toMatchObject({status:403});
+    expect((await f.operate(f.grant,{action:'read',entryId:saved.entry.id})).entry.id).toBe(saved.entry.id);
+  });
+  it('rechecks removal while Discord is responding and renews only active conversation grants',async()=>{
+    const f=await conversation();await f.enable();f.advance(20*86400_000);
+    await f.ask('check');f.advance(20*86400_000);
+    expect((await f.ask('check')).groupId).toBe('test-group');
+    f.audienceState.beforeRead=async()=>{await f.base.removeSubscriber('test-group','alice');};
+    await expect(f.ask('check')).rejects.toMatchObject({status:403});
+  });
+});
 
 describe('Scoped private Discord group access',()=>{
   it('pairs a real Discord context with an author-confirmed account without exposing the grant to the browser', async()=>{

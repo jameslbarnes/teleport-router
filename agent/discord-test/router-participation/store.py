@@ -118,7 +118,7 @@ class Store:
     def count_checks(self, since: float) -> int:
         """Decisions that called the model (skips for pauses and limits don't count)."""
         return self.db.execute("SELECT COUNT(*) FROM decisions WHERE ts >= ? AND outcome NOT IN "
-                               "('paused', 'rate-limited', 'budget')", (since,)).fetchone()[0]
+                               "('paused', 'rate-limited', 'budget', 'paused-or-limited', 'check-unavailable', 'access-unavailable')", (since,)).fetchone()[0]
 
     # Quiet periods ------------------------------------------------------------
     def pause(self, channel_id: int, until: float, by_user: int) -> None:

@@ -27,6 +27,8 @@ def register(ctx):
     def install(native, adapter):
         import discord
         from discord import app_commands
+        # In-process bridge; neither the model nor Hermes's public toolset receives this credential.
+        adapter.router_private = router
         guild = discord.Object(id=int(settings["guild_id"]))
 
         async def run(interaction, operation):

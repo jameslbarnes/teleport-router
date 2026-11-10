@@ -70,7 +70,19 @@ Validation commands: server TypeScript build and Vitest suite, `node scripts/dis
 
 ## Speaking without an @-mention
 
-`router-participation/` is a second Hermes plugin. It ports the retired Telegram bot's group-chat behavior: the March 2026 bot in `server/src/telegram/` (see commit `9081484^`) and the unmerged classifier and analytics in PRs #13 and #17. Hermes keeps answering @-mentions. The plugin watches the rest of `#router-test`, and after each burst of messages a Claude Haiku 5.5 check scores the latest message: question, wrong, stuck, relevant, directed at the bot, social. PR #13's rules then decide:
+### Private group conversation
+
+Set `private_conversation: true` in the participation profile to handle mentions and ambient replies through the private connection. This requires `router-private` in the same profile. Its native handler supplies the scoped connection in-process; credentials never enter a model tool argument. Set Hermes `discord.ignored_channels` to `["*"]`, remove `extra.group_allowed_chats` grants and set `history_backfill: false`. Native plugins still receive events, while the Hermes adapter rejects group messages even from a previously paired user.
+
+A group admin enables destinations with `POST /api/discord/conversation/configure` and `{groupId, channelIds}`. An empty list turns shared recall off without revoking ephemeral commands. The Router service needs the existing `DISCORD_BOT_TOKEN` to check membership independently of the bot process. It uses Discord's complete, paginated member list, not the gateway cache or IDs supplied by a model. The bot needs Discord's Guild Members privileged intent; a denied, malformed or incomplete response stops retrieval. Every guild member except this exact bot must have a verified, active link to the connected Router group. This conservative whole-server check includes owners, admins and other bots without recreating Discord's channel permission rules. It is intended for a small group using one server.
+
+Private conversation offers only group search/read and anonymous public Router search to the model. The usual web search and configured external MCP servers are absent. Each reply rechecks source versions and current audience before sending. It stores neither source notes nor drafts in a persistent database; current channel context is held in memory, with previous bot reply text omitted. It never saves ordinary conversation to Router. Keep using `/router-save` for selected notes.
+
+The native commands remain private to their requester and retain their configured channel or guild scope. Failed ambient checks stay quiet; mentions get a short failure notice with private-command alternatives. Shared replies are visible in Discord and remain in its history after source deletion or membership changes. The final check and Discord send are separate operations, with a small race between them. No claim of erasing Discord copies is made.
+
+The following participation rules apply in both public and private conversation profiles. In the public profile Hermes answers mentions; in the private profile the native participation plugin answers them once, without starting a Hermes session.
+
+`router-participation/` is a second Hermes plugin. It ports the retired Telegram bot's group-chat behavior: the March 2026 bot in `server/src/telegram/` (see commit `9081484^`) and the unmerged classifier and analytics in PRs #13 and #17. After each burst of ordinary messages, a Claude Haiku 5.5 check scores the latest message: question, wrong, stuck, relevant, directed at the bot, social. PR #13's rules then decide:
 
 - Silence is the default. The check must say speak, or the adjusted confidence must reach 0.85.
 - Two people trading quick messages are never interrupted. An answered question isn't answered again.
@@ -79,9 +91,9 @@ Validation commands: server TypeScript build and Vitest suite, `node scripts/dis
 - A question with no real answer is checked again after 8 and 20 minutes. On Nov 7, 2026 Haiku 5.5 waited at 3 and 5 minutes and spoke in 8 of 8 runs at 8 minutes. Chatter such as "brb" doesn't count as an answer.
 - Unprompted posts are limited to 6 an hour and 30 a day, 5 minutes apart. Checks are capped at 400 a day and drafts at 40.
 
-When the rules say speak, Claude Opus 5.5 drafts at most a matching number of words. It can search the public notebook (addressed entries are dropped even if the server returns them), call the read-only MCP servers listed in `compose_mcp_servers`, and search the web. It answers `SKIP` when there's nothing worth adding, and the reply is posted as a Discord reply to the message that prompted it, with mentions and link previews off.
+When the rules say speak, Claude Opus 5.5 drafts at most a matching number of words. Both profiles can search the public notebook (addressed entries are dropped even if the server returns them). The public profile can also call the read-only MCP servers listed in `compose_mcp_servers` and search the web; the private profile uses only the Router tools described above. It answers `SKIP` when there's nothing worth adding, and the reply is posted as a Discord reply to the message that prompted it, with mentions and link previews off.
 
-Modes, set in `settings.json` or the runtime-only `settings.local.json`: `off` records messages only; `shadow` decides and drafts but never posts, so a person can compare what it would have said; `live` posts. Every decision is logged with its scores, adjustments and draft.
+Modes, set in `settings.json` or the runtime-only `settings.local.json`: `off` records messages only; `shadow` decides and drafts but never posts; `live` posts. The public profile logs scores, adjustments and drafts for review. The private profile keeps only decision metadata in memory and never saves drafts.
 
 In #router-test, replies visible only to the person asking:
 
@@ -89,6 +101,6 @@ In #router-test, replies visible only to the person asking:
 - `/router-why`: the last five decisions, with confidence, bar, top scores, reason and any draft.
 - `/router-stats days`: the bot's posts by kind (unprompted, answers to mentions, other posts such as digests), with how many drew a human reply or reaction.
 
-Privacy: the plugin keeps the channel's messages, reactions and decisions in `plugin-data/router-participation/participation.db` on this machine for `retention_days` (30); deleted messages lose their text at once. The last 15 to 30 messages are sent to the model provider each time the check or a draft runs. Logs carry IDs and counts, never message text.
+Privacy: the public profile keeps the channel's messages, reactions and decisions in `plugin-data/router-participation/participation.db` for `retention_days` (30); deleted messages lose their text at once. The private profile uses an in-memory database and omits previous bot reply text. Both send the last 15 to 30 messages to the model provider for checks and drafts. Logs carry IDs and counts, never message text.
 
 Install: copy the folder to `C:\RouterDiscord\plugins\router-participation`, add `router-participation` to `plugins.enabled`, optionally add `settings.local.json` with `channel_note` (what the channel is for) and `compose_mcp_servers` (`[{"name", "command", "args"}]`), and restart the gateway. The plugin reads `ANTHROPIC_API_KEY` from the profile's environment and records messages only when it has none. Tests run with the pinned runtime Python: `-m unittest discover -s agent/discord-test/router-participation -p 'test_*.py'`.

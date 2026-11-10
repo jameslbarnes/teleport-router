@@ -134,5 +134,61 @@ class PluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Draft: Two entries disagree.", text)
 
 
+class PrivateChannelRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp=tempfile.TemporaryDirectory()
+        self.bot=commands.Bot(command_prefix="!",intents=discord.Intents.none())
+        self.bot.tree.sync=AsyncMock(return_value=[])
+        self.bot.wait_until_ready=AsyncMock()
+        self.bot.get_channel=lambda cid: NS(history=self.history)
+        self.user_patch=patch.object(commands.Bot,"user",new_callable=PropertyMock,return_value=BOT_USER)
+        self.user_patch.start()
+        self.controllers=[]; self.stores=[]
+        real_controller,real_store=plugin.Controller,plugin.Store
+        def install(platform,factory): factory(self.bot,NS())
+        settings={"guild_id":str(GUILD),"channel_id":str(CHANNEL),"mode":"shadow","private_conversation":True}
+        with patch.dict(os.environ,{"HERMES_HOME":self.temp.name,"ANTHROPIC_API_KEY":"synthetic"}), \
+            patch.object(plugin,"load_settings",return_value=settings), \
+            patch.object(plugin,"Controller",side_effect=lambda *a,**k:self.controllers.append(real_controller(*a,**k)) or self.controllers[-1]), \
+            patch.object(plugin,"Store",side_effect=lambda *a,**k:self.stores.append(real_store(*a,**k)) or self.stores[-1]):
+            plugin.register(NS(register_platform_handler=install))
+        await asyncio.sleep(0.01)
+        self.controller=self.controllers[0]
+        # Listener methods are synchronous scheduling functions, so use a plain Mock.
+        from unittest.mock import Mock
+        self.controller.mentioned=Mock(); self.controller.human_message=Mock()
+        self.listener=self.bot.extra_events["on_message"][0]
+
+    async def history(self,limit):
+        if False: yield None
+
+    def message(self,mid,text,bot=False,mentions=(),parent=None,channel=CHANNEL):
+        return NS(id=mid,content=text,type=discord.MessageType.default,guild=NS(id=GUILD),
+            channel=NS(id=channel,parent_id=parent),author=NS(id=BOT_USER.id if bot else 7,display_name="Ada",bot=bot),
+            mentions=list(mentions),webhook_id=None,created_at=dt.datetime.now(dt.timezone.utc),reference=None)
+
+    async def asyncTearDown(self):
+        self.user_patch.stop();await self.bot.close()
+        for store in self.stores: store.close()
+        self.temp.cleanup()
+
+    async def test_private_mentions_route_once_and_threads_stay_out(self):
+        await self.listener(self.message(1,"@Router tell me",mentions=[BOT_USER]))
+        self.controller.mentioned.assert_called_once()
+        self.controller.human_message.assert_not_called()
+        await self.listener(self.message(2,"ordinary question"))
+        self.controller.human_message.assert_called_once()
+        await self.listener(self.message(3,"thread",parent=CHANNEL,channel=OTHER,mentions=[BOT_USER]))
+        self.controller.mentioned.assert_called_once()
+
+    async def test_private_reply_text_never_enters_store_or_disk_even_on_edit(self):
+        await self.listener(self.message(10,"SENSITIVE source from private recall",bot=True))
+        self.assertNotIn("SENSITIVE",self.stores[0].get_message(10).text)
+        edit=self.bot.extra_events["on_raw_message_edit"][0]
+        await edit(NS(channel_id=CHANNEL,message_id=10,data={"content":"SENSITIVE edited source"}))
+        self.assertNotIn("SENSITIVE",self.stores[0].get_message(10).text)
+        self.assertEqual(list(Path(self.temp.name).rglob("*.db")),[])
+
+
 if __name__ == "__main__":
     unittest.main()

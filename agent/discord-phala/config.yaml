@@ -44,19 +44,22 @@ default_reset_policy:
 
 discord:
   group_allow_admin_from: ["1568048209002111017"]
-  # The central gateway needs its own chat grant in addition to adapter gating.
+  # Native private conversation owns replies. No central Hermes conversation grant.
   extra:
-    group_allowed_chats: ["1568051571751788644"]
+    group_allowed_chats: []
   # Channel-only authorization also denies DMs when the user/role allowlists
   # and allow-all switches are empty/false. Do not add a user-wide grant.
   allowed_channels: ["1568051571751788644"]
-  # Reply only when @-mentioned. Recent channel messages since the bot's last
-  # reply are fetched as context (history_backfill below).
+  # Native plugins receive Discord events independently. Keep group messages out
+  # of Hermes even if a previously paired user has a central gateway grant.
+  ignored_channels: ["*"]
   require_mention: true
   no_thread_channels: ["1568051571751788644"]
   auto_thread: false
   allow_bots: none
-  history_backfill: true
+  # The native participation plugin owns this private channel, including mentions.
+  # Hermes must not import private replies into its persistent public-tool sessions.
+  history_backfill: false
   history_backfill_limit: 30
   allow_mentions:
     everyone: false

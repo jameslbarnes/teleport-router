@@ -23,6 +23,7 @@ assert.deepEqual(Object.keys(bot.environment).sort(), allowed.sort());
 for (const [name, service] of Object.entries(config.services)) {
   if (name === 'discord-bot') continue;
   assert(!service.volumes?.some(v => v.source === 'discord-data'), `${name} must not mount Discord state`);
-  assert(!Object.keys(service.environment || {}).some(key => allowed.includes(key)), `${name} must not receive Discord credentials`);
+  const permitted = name === 'router' ? ['DISCORD_BOT_TOKEN'] : [];
+  assert(!Object.keys(service.environment || {}).some(key => allowed.includes(key) && !permitted.includes(key)), `${name} must not receive unrelated Discord credentials`);
 }
 console.log('Discord has its own image, volume, credentials and resource limits; no inbound ports or host sockets.');
