@@ -9207,9 +9207,11 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
       const fullPath = join(STATIC_DIR, filePath);
       const ext = extname(fullPath);
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-      const cacheControl = ext === '.html'
+      // setup.js names its lazily loaded parts by content hash, so it must always be current while the
+      // parts themselves never change.
+      const cacheControl = ext === '.html' || filePath === '/onboarding-assets/setup.js'
         ? 'no-cache'
-        : (filePath.startsWith('/assets/')
+        : (filePath.startsWith('/assets/') || filePath.startsWith('/onboarding-assets/chunks/')
           ? 'public, max-age=31536000, immutable'
           : 'public, max-age=3600');
 
