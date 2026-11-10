@@ -132,6 +132,8 @@
             transform: translateX(-50%) translateY(0);
             opacity: 1;
         }
+        .other-way { margin-top: var(--s-6); padding-top: var(--s-4); border-top: 1px solid var(--border); }
+        .other-way > summary { cursor: pointer; font-family: var(--font-ui); font-size: var(--t-sm); color: var(--accent); }
     </style>
 </head>
 <body>
@@ -179,19 +181,18 @@
         <!-- Claude Code -->
         <div class="tab-content active" id="tab-code" role="tabpanel" aria-labelledby="tabbtn-code">
             <h3 class="r-h2">Connect Router to Claude Code</h3>
-            <p>There are two ways: install the plugin, or run one command. They do the same thing, and you need only one.</p>
-
-            <h4 class="r-h3">Option 1: install the plugin</h4>
-            <p>Run these two commands inside Claude Code, and paste your Router key when it asks.</p>
+            <p>Install the Router plugin. Run these two commands inside Claude Code, and paste your Router key when it asks.</p>
             <pre class="r-code"><code id="plugin-cmd">/plugin marketplace add jameslbarnes/teleport-router
 /plugin install teleport-router@teleport-router</code></pre>
             <div class="code-actions r-actions">
                 <button type="button" class="r-btn r-btn--small" onclick="copyCode('plugin-cmd', this)">Copy commands</button>
                 <button type="button" class="r-btn r-btn--small" id="copy-key-btn" onclick="copyRouterKey(this)" hidden>Copy my Router key</button>
             </div>
-            <p class="r-hint">The plugin also tells Claude Code to read your posting rules when each session starts, so you do not need the CLAUDE.md step below.</p>
+            <p class="r-hint">Claude Code keeps the key in your system's secure storage. The plugin connects Router and tells Claude Code to read your posting rules when each session starts. That is all the setup there is.</p>
 
-            <h4 class="r-h3">Option 2: run one command</h4>
+            <details class="other-way">
+            <summary>Without the plugin</summary>
+            <p>Use this only if you cannot install plugins. It connects Router with one command, and you then add the instructions yourself. Do not do both: a plugin and a manual connection together give your agent two copies of every tool.</p>
             <p>Run this in your terminal:</p>
             <pre class="r-code"><code id="code-cmd"></code></pre>
             <div class="code-actions r-actions">
@@ -205,6 +206,7 @@
             <div class="code-actions">
                 <button type="button" class="r-btn r-btn--small" onclick="copyCode('code-memory', this)">Copy instructions</button>
             </div>
+            </details>
         </div>
 
         <!-- Claude app: desktop, web and phone -->
