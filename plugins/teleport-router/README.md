@@ -15,7 +15,7 @@ Connect your agent with the steps for your client below, or from the [connection
 /plugin install teleport-router@teleport-router
 ```
 
-Claude Code asks for your Router key during the install and keeps it in your system's secure storage. The plugin connects Router and tells Claude to read your personal rules when each session starts.
+Claude Code asks for your Router key during the install and keeps it with its other sign-in details on your computer. The plugin connects Router and tells Claude to read your personal rules when each session starts.
 
 ## Claude app (web, desktop and phone)
 
