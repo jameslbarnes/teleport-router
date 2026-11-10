@@ -69,7 +69,7 @@ try {
   await page.locator('#storage-ready').waitFor();
   if (evidence) await page.screenshot({ path: resolve(evidence, 'setup-desktop.png'), fullPage: true });
   await page.locator('#storage-next').click();
-  await page.locator('#skip-discord').click();
+  // This fixture has no Discord connection, so setup goes straight to the posting rules.
   await page.locator('#choose-rules').click();
   await page.locator('#group-start').waitFor();
   assert.equal((await rules()).revision, 0);
@@ -96,7 +96,6 @@ try {
   assert.equal((await rules()).revision, 2);
   page.on('dialog', dialog => dialog.accept());
   await page.goto(inviteUrl);
-  await page.locator('#skip-discord').click();
   await page.locator('#choose-rules').click();
   await page.locator('#group-start').waitFor();
   assert.equal((await rules()).revision, 2);
@@ -128,8 +127,6 @@ try {
   await openPage.locator('#save').click();
   await openPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
   await openPage.goto(base + '/group-setup?group=open-club');
-  await openPage.locator('#discord-explanation').filter({ hasText: 'public group' }).waitFor();
-  await openPage.locator('#skip-discord').click();
   await openPage.locator('#rules-next').filter({ hasText: 'Keep automatic public posting and continue' }).waitFor();
   assert.equal(await openPage.locator('#rules-next').textContent(), 'Keep automatic public posting and continue');
   await publicContext.close();
@@ -194,8 +191,8 @@ try {
   await recoveryPage.locator('#confirmed').check();
   await recoveryPage.locator('#save').click();
   await recoveryPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
+  // Coming back from saving rules goes straight to the finish, with no second confirmation.
   await recoveryPage.getByRole('link', { name: 'Continue group setup' }).click();
-  await recoveryPage.locator('#rules-next').click();
   await recoveryPage.locator('#ready').waitFor();
   assert.match(await recoveryPage.locator('#ready-state').textContent(), /Storage setup is still pending/);
   assert.equal(await recoveryPage.locator('#read-group').getAttribute('href'), base + '/?view=channel&id=reading-club');
@@ -212,7 +209,7 @@ try {
   await restoredPage.locator('#restore-file').setInputFiles({ name: 'router-recovery.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(envelope)) });
   await restoredPage.locator('#restore-password').fill('synthetic browser recovery password');
   await restoredPage.locator('#restore-account button').click();
-  await restoredPage.locator('#discord').waitFor();
+  await restoredPage.locator('#rules').waitFor();
   assert.equal(await restoredPage.evaluate(() => localStorage.getItem('router_key')), recovered.routerKey);
   assert.equal(await restoredPage.evaluate(privateKey => JSON.stringify(localStorage).includes(privateKey), recovered.tinycloudKey), false);
   await restoredContext.close();

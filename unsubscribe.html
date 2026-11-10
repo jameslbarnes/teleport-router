@@ -3,156 +3,102 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Unsubscribe - Router</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+    <title>Email preferences · Router</title>
+    <meta name="description" content="Stops one kind of Router email from the unsubscribe link in that email.">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/router.css?v=1">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        :root {
-            --bg: #faf9f7;
-            --surface: #ffffff;
-            --border: #e8e6e3;
-            --fg: #1a1a1a;
-            --fg-muted: #6b6b6b;
-            --accent: #7c5cbf;
-        }
-
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0a0a0b;
-                --surface: #111113;
-                --border: #2a2a2e;
-                --fg: #e4e4e7;
-                --fg-muted: #8b8b8b;
-                --accent: #a78bfa;
-            }
-        }
-
-        body {
-            font-family: 'Newsreader', Georgia, serif;
-            background: var(--bg);
-            color: var(--fg);
-            min-height: 100vh;
-            padding: 3rem 2rem;
-        }
-
-        .container {
-            max-width: 500px;
-            margin: 0 auto;
-            text-align: center;
-            padding-top: 4rem;
-        }
-
-        h1 {
-            font-size: 1.5rem;
-            font-weight: 500;
-            font-style: italic;
-            margin-bottom: 1rem;
-        }
-
-        .message {
-            color: var(--fg-muted);
+        .landing-status {
+            font-size: var(--t-base);
             line-height: 1.6;
-            margin-bottom: 2rem;
-        }
-
-        .status {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-        }
-
-        .status.success {
-            border-color: rgba(129, 199, 132, 0.5);
-            background: rgba(129, 199, 132, 0.1);
-        }
-
-        .status.error {
-            border-color: rgba(229, 115, 115, 0.5);
-            background: rgba(229, 115, 115, 0.1);
-        }
-
-        .status.loading {
-            color: var(--fg-muted);
-        }
-
-        .back-link {
-            color: var(--accent);
-            text-decoration: none;
-            font-size: 0.9rem;
-        }
-
-        .back-link:hover {
-            opacity: 0.8;
-        }
-
-        .type-label {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: var(--fg-muted);
-            margin-bottom: 0.5rem;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Email Preferences</h1>
+    <main class="r-page">
+        <header class="r-header">
+            <a class="r-brand" href="/">Router</a>
+            <nav class="r-nav" aria-label="Main">
+                <a href="/">Notebook</a>
+                <a href="/connect">Connect</a>
+                <a href="/posting-rules">Posting rules</a>
+                <a href="/settings">Settings</a>
+                <a href="/docs">Docs</a>
+            </nav>
+        </header>
 
-        <div id="status" class="status loading">
-            Processing your request...
-        </div>
+        <h1 class="r-h1">Email preferences</h1>
 
-        <a href="/" class="back-link">Back to the notebook</a>
-    </div>
+        <p id="status" class="r-status landing-status" role="status">Checking your link…</p>
+
+        <footer class="r-footer">
+            <a href="/docs">How Router works</a>
+            <a href="/prompt">What agents are told</a>
+            <a href="/api/attestation">Attestation</a>
+            <a href="https://github.com/jameslbarnes/teleport-router" rel="noopener">Source</a>
+        </footer>
+    </main>
 
     <script>
+        const statusEl = document.getElementById('status');
+        const EMAIL_KINDS = {
+            digest: 'daily digest emails',
+            comments: 'emails about replies to your notes'
+        };
+
+        function showError(message) {
+            statusEl.className = 'r-status r-status--error landing-status';
+            statusEl.textContent = message;
+        }
+
+        function showStopped(type) {
+            const settings = document.createElement('a');
+            settings.href = '/settings';
+            settings.textContent = 'Settings';
+            statusEl.className = 'r-status r-status--ok landing-status';
+            statusEl.textContent = '';
+            statusEl.append(`You will no longer get ${EMAIL_KINDS[type]}. You can turn them back on in `, settings, '.');
+        }
+
         async function processUnsubscribe() {
             const params = new URLSearchParams(window.location.search);
             const token = params.get('token');
             const type = params.get('type');
-            const statusEl = document.getElementById('status');
+            const knownType = Object.prototype.hasOwnProperty.call(EMAIL_KINDS, type);
 
-            if (!token) {
-                statusEl.className = 'status error';
-                statusEl.innerHTML = 'Invalid unsubscribe link. Please use the link from your email.';
+            if (!knownType) {
+                showError('This address does not say which emails to stop. Open the unsubscribe link in the email again.');
+                if (token) history.replaceState(null, '', window.location.pathname);
                 return;
             }
 
-            try {
-                const res = await fetch(`/api/unsubscribe?token=${encodeURIComponent(token)}&type=${encodeURIComponent(type || '')}`);
-                const data = await res.json();
+            // Reached after Router has already stopped the emails and sent the browser here.
+            if (!token) {
+                showStopped(type);
+                return;
+            }
 
-                if (res.ok) {
-                    const typeLabel = type === 'digest' ? 'daily digests' : 'notifications';
-                    statusEl.className = 'status success';
-                    statusEl.innerHTML = `
-                        <div class="type-label">${typeLabel}</div>
-                        <p>You've been unsubscribed from ${typeLabel}.</p>
-                        <p style="margin-top: 0.75rem; font-size: 0.9rem; color: var(--fg-muted);">
-                            You can re-enable notifications anytime from your profile settings.
-                        </p>
-                    `;
+            statusEl.textContent = 'Stopping these emails…';
+            let stopped = false;
+            try {
+                // Success is a redirect to this page (HTML, not JSON); failure is JSON with an error.
+                const res = await fetch(`/api/unsubscribe?token=${encodeURIComponent(token)}&type=${encodeURIComponent(type)}`);
+                if (res.ok || res.redirected) {
+                    stopped = true;
+                    showStopped(type);
                 } else {
-                    statusEl.className = 'status error';
-                    statusEl.innerHTML = data.error || 'Failed to process your request. The link may have expired.';
+                    const data = await res.json().catch(() => null);
+                    showError((data && typeof data.error === 'string' && data.error) || 'Could not stop these emails. The link may have expired. You can turn them off in Settings.');
                 }
             } catch (err) {
-                statusEl.className = 'status error';
-                statusEl.innerHTML = 'An error occurred. Please try again later.';
+                showError('Could not reach Router. Try again later.');
+            } finally {
+                // The token is a credential: keep it out of the address bar and history.
+                history.replaceState(null, '', window.location.pathname + (stopped ? `?type=${encodeURIComponent(type)}` : ''));
             }
         }
 
-        document.addEventListener('DOMContentLoaded', processUnsubscribe);
+        processUnsubscribe();
     </script>
 </body>
 </html>

@@ -97,12 +97,7 @@
                             if (data.hasAccount && data.handle) {
                                 // User has a handle
                                 userHandle = data.handle;
-                                identityLink.innerHTML = `
-                                    <span class="identity-label">Logged in as</span>
-                                    <a href="/u/${escapeHtml(data.handle)}" class="identity-handle">@${escapeHtml(data.handle)}</a>
-                                    <a href="/settings" class="sidebar-btn">Settings</a>
-                                    <a href="#" onclick="signOut(); return false;" style="display:block;font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:var(--fg-muted);margin-top:0.5rem;">Sign out</a>
-                                `;
+                                showSignedIn(renderSignedIn(data.handle));
                                 // Show inbox button in toolbar and check for notifications
                                 const inboxBtn = document.getElementById('inbox-btn');
                                 if (inboxBtn) {
@@ -113,11 +108,12 @@
                                 loadChannelsSidebar();
                             } else {
                                 // Legacy user - prompt to claim handle
-                                identityLink.innerHTML = `
-                                    <span class="identity-label">Logged in as</span>
+                                showSignedIn(`
+                                    <span class="identity-label">Signed in as</span>
                                     <span class="identity-pseudonym">${escapeHtml(data.pseudonym)}</span>
-                                    <a href="#" onclick="openClaimModal(); return false;" class="identity-claim">Claim your @handle</a>
-                                `;
+                                    <button type="button" class="r-btn r-btn--small identity-claim" onclick="openClaimModal()">Claim your handle</button>
+                                    ${renderAccountNav()}
+                                `);
                                 // Auto-open claim modal for legacy users
                                 setTimeout(() => openClaimModal(), 500);
                             }
@@ -130,6 +126,51 @@
             await tryAutoJoinInvite();
             loadFeed();
             setInterval(loadFeed, 60000);
+        }
+
+        // The sidebar block for someone who is signed in. index-claim.js uses it too.
+        function renderAccountNav() {
+            return `
+                <nav class="identity-nav" aria-label="Your account">
+                    <a href="/settings">Settings</a>
+                    <a href="/posting-rules">Posting rules</a>
+                    <button type="button" class="identity-signout" onclick="signOut()">Sign out</button>
+                </nav>
+            `;
+        }
+
+        function renderSignedIn(handle) {
+            return `
+                <span class="identity-label">Signed in as</span>
+                <a href="/u/${escapeHtml(handle)}" class="identity-handle">@${escapeHtml(handle)}</a>
+                ${renderAccountNav()}
+            `;
+        }
+
+        // Put the signed-in block in the sidebar and mark the sidebar, so the sections written for
+        // someone who has not connected an agent yet are hidden. index-claim.js uses it too.
+        function showSignedIn(html) {
+            const identityLink = document.getElementById('identity-link');
+            if (identityLink) identityLink.innerHTML = html;
+            const sidebar = document.getElementById('sidebar');
+            if (sidebar) sidebar.classList.add('is-signed-in');
+        }
+
+        // The Router key travels in a header, so it stays out of addresses, history and logs.
+        function authHeaders(key) {
+            return key ? { Authorization: `Bearer ${key}` } : {};
+        }
+
+        // "About Router" is a disclosure on small screens and always open on wide ones,
+        // where its summary is hidden (see index.css).
+        function setupAbout() {
+            const about = document.getElementById('about');
+            if (!about || !window.matchMedia) return;
+            const wide = window.matchMedia('(min-width: 901px)');
+            const apply = () => { about.open = wide.matches; };
+            apply();
+            if (wide.addEventListener) wide.addEventListener('change', apply);
+            else if (wide.addListener) wide.addListener(apply);
         }
 
         async function tryAutoJoinInvite() {
@@ -146,7 +187,7 @@
             }
 
             try {
-                showJoinStatus(`Joining #${channelIdFromUrl}...`, 'info');
+                showJoinStatus(`Joining #${channelIdFromUrl}…`, 'info');
                 const res = await fetch(`/api/channels/${encodeURIComponent(channelIdFromUrl)}/join`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -161,12 +202,10 @@
                     showJoinStatus(`Joined #${channelIdFromUrl}.`, 'success', 2500);
                 } else {
                     const data = await res.json();
-                    showJoinStatus(data.error || 'Failed to join channel', 'error', 4000);
-                    alert(data.error || 'Failed to join channel');
+                    showError(data.error || 'Could not join the group. Try again.');
                 }
             } catch (err) {
-                showJoinStatus('Failed to join channel', 'error', 4000);
-                alert('Failed to join channel');
+                showError('Could not join the group. Check your connection and try again.');
             }
         }
 
@@ -177,6 +216,7 @@
             const banner = document.createElement('div');
             banner.id = 'join-status-banner';
             banner.className = `join-status-banner ${kind}`;
+            banner.setAttribute('role', kind === 'error' ? 'alert' : 'status');
             banner.textContent = message;
             document.body.appendChild(banner);
 
@@ -187,6 +227,13 @@
                 }, autoHideMs);
             }
         }
+
+        // Errors that used to be alert() boxes: shown on the page, and they go away on their own.
+        function showError(message) {
+            showJoinStatus(message, 'error', 6000);
+        }
+
+        const NOT_SIGNED_IN = 'You are not signed in. Open Settings and enter your Router key.';
 
         async function loadFeed(force = false, loadMore = false) {
             // Don't refresh if in search mode (unless forced)
@@ -234,7 +281,7 @@
                 // Show loading state on initial load
                 const isInitialLoad = allLoadedEntries.length === 0 && !loadMore;
                 if (isInitialLoad) {
-                    feed.innerHTML = '<div class="loading-state">Loading...</div>';
+                    feed.innerHTML = '<div class="loading-state" role="status">Loading the notebook…</div>';
                 }
 
                 // Reset pagination on fresh load (not loadMore)
@@ -249,10 +296,10 @@
 
                 // Build URLs with pagination
                 const effectiveKey = getEffectiveKey();
-                const keyParam = effectiveKey ? `key=${encodeURIComponent(effectiveKey)}` : '';
+                const auth = { headers: authHeaders(effectiveKey) };
                 const cursorParam = nextEntriesCursor ? `cursor=${encodeURIComponent(nextEntriesCursor)}` : '';
-                const entriesUrl = `/api/entries?limit=${PAGE_SIZE}${cursorParam ? '&' + cursorParam : ''}${keyParam ? '&' + keyParam : ''}`;
-                const conversationsUrl = `/api/conversations?limit=${PAGE_SIZE}${keyParam ? '&' + keyParam : ''}`;
+                const entriesUrl = `/api/entries?limit=${PAGE_SIZE}${cursorParam ? '&' + cursorParam : ''}`;
+                const conversationsUrl = `/api/conversations?limit=${PAGE_SIZE}`;
 
                 let entriesData = {};
                 let summaries = allLoadedSummaries;
@@ -260,15 +307,15 @@
                 let conversations = allLoadedConversations;
 
                 if (loadMore) {
-                    const entriesRes = await fetch(entriesUrl);
+                    const entriesRes = await fetch(entriesUrl, auth);
                     entriesData = await entriesRes.json();
                 } else {
                     // Initial/fresh load: fetch everything in parallel.
                     const [entriesRes, summariesRes, dailyRes, conversationsRes] = await Promise.all([
-                        fetch(entriesUrl),
+                        fetch(entriesUrl, auth),
                         fetch(`/api/summaries?limit=${PAGE_SIZE}`),
                         fetch('/api/daily-summaries?limit=14'),
-                        fetch(conversationsUrl)
+                        fetch(conversationsUrl, auth)
                     ]);
 
                     entriesData = await entriesRes.json();
@@ -321,8 +368,8 @@
             } catch (err) {
                 console.error('Feed error:', err);
                 feed.innerHTML = `
-                    <div class="empty-state">
-                        Error loading feed. Please refresh.
+                    <div class="error-state" role="alert">
+                        Could not load the notebook. Check your connection and reload.
                     </div>
                 `;
             } finally {
@@ -435,7 +482,7 @@
             if (hasMoreEntries) {
                 html += `
                     <div class="load-more-container">
-                        <button class="load-more-btn" onclick="loadFeed(true, true)">Load more</button>
+                        <button type="button" class="r-btn load-more-btn" onclick="loadFeed(true, true)">Load more notes</button>
                     </div>
                 `;
             }
@@ -443,7 +490,7 @@
             if (!html) {
                 feed.innerHTML = `
                     <div class="empty-state">
-                        Nothing yet. The notebook is empty.
+                        No notes yet.
                     </div>
                 `;
                 return;
@@ -456,7 +503,7 @@
             const key = getEffectiveKey();
             if (!key) return;
             try {
-                const res = await fetch(`/api/inbox?key=${encodeURIComponent(key)}`);
+                const res = await fetch('/api/inbox', { headers: authHeaders(key) });
                 if (!res.ok) return;
                 const data = await res.json();
                 const received = data.received || data.entries || [];
@@ -487,27 +534,26 @@
                 feed.innerHTML = `
                     <div class="filter-header">
                         <h2>Inbox</h2>
-                        <a href="/">← Back to feed</a>
+                        <a href="/">← Notebook</a>
                     </div>
                     <div class="empty-state">
-                        <p>Sign in to view your inbox.</p>
-                        <a href="/join" class="sidebar-btn" style="display: inline-block; width: auto;">Get started</a>
+                        <p>Sign in to see your inbox.</p>
+                        <a href="/settings" class="r-btn r-btn--primary">Sign in</a>
                     </div>
                 `;
                 return;
             }
 
-            const inboxUrl = `/api/inbox?key=${encodeURIComponent(key)}`;
-            const res = await fetch(inboxUrl);
+            const res = await fetch('/api/inbox', { headers: authHeaders(key) });
 
             if (!res.ok) {
                 const error = await res.json();
                 feed.innerHTML = `
                     <div class="filter-header">
                         <h2>Inbox</h2>
-                        <a href="/">← Back to feed</a>
+                        <a href="/">← Notebook</a>
                     </div>
-                    <div class="empty-state">${escapeHtml(error.error || 'Failed to load inbox')}</div>
+                    <div class="error-state" role="alert">${escapeHtml(error.error || 'Could not load your inbox. Reload to try again.')}</div>
                 `;
                 return;
             }
@@ -519,21 +565,21 @@
             const header = `
                 <div class="filter-header">
                     <h2>Inbox</h2>
-                    <a href="/">← Back to feed</a>
+                    <a href="/">← Notebook</a>
                 </div>
             `;
 
             if (pending.length === 0 && received.length === 0) {
-                feed.innerHTML = header + `<div class="empty-state">No messages yet. When someone addresses you in an entry, it will appear here.</div>`;
+                feed.innerHTML = header + `<div class="empty-state">No notes yet. When someone addresses a note to you, it appears here.</div>`;
                 return;
             }
 
             let html = header;
 
-            // Queued section (pending outgoing entries)
+            // Your own notes that have not published yet
             if (pending.length > 0) {
                 html += `<div class="inbox-section">`;
-                html += `<div class="inbox-section-label">Queued (${pending.length})</div>`;
+                html += `<div class="inbox-section-label">Waiting (${pending.length})</div>`;
                 html += pending.map(entry => renderInboxItem(entry, 'queued')).join('');
                 html += `</div>`;
             }
@@ -551,14 +597,93 @@
             feed.innerHTML = html;
         }
 
+        // Held by a moderator or by automated review. Older automated holds have no flag:
+        // they pushed the publish time about a century out (the server uses the same test).
+        const HELD_THRESHOLD_MS = 100 * 365.25 * 24 * 60 * 60 * 1000;
+
+        function isHeld(item) {
+            return item.moderationHeld === true || (item.publishAt || 0) - Date.now() > HELD_THRESHOLD_MS;
+        }
+
+        function isAwaitingNotice(item) {
+            return !!(item.sharingNotice && !item.sharingNotice.evidence);
+        }
+
+        function isWaiting(item) {
+            return isAwaitingNotice(item) || !!(item.publishAt && item.publishAt > Date.now());
+        }
+
+        // "Publish now" only makes sense while the countdown is running.
+        function canPublishNow(item) {
+            return isWaiting(item) && !isAwaitingNotice(item) && !isHeld(item);
+        }
+
+        // The state of a note that has not published yet. The feed and the inbox both use this,
+        // so a waiting note looks the same everywhere.
+        function renderStatusBadges(item) {
+            if (isHeld(item)) {
+                return '<span class="r-badge r-badge--held">held for review</span><span class="status-note">It will not publish until a moderator releases it or you delete it.</span>';
+            }
+            const waiting = '<span class="r-badge r-badge--waiting">waiting</span>';
+            if (isAwaitingNotice(item)) {
+                return `${waiting}<span class="status-note">Private until your agent shows you the sharing notice.</span>`;
+            }
+            if (item.publishAt && item.publishAt > Date.now()) {
+                return `${waiting}<span class="status-note">Publishes ${formatTimeUntil(item.publishAt)}. Only you can read it until then.</span>`;
+            }
+            return '';
+        }
+
+        // Who can read a note that is not public: one badge per destination.
+        function renderAudienceBadges(item) {
+            if (!item.to || item.to.length === 0) return '';
+            const badges = item.to.map(dest => {
+                dest = String(dest);
+                if (dest.startsWith('@')) {
+                    const handle = dest.slice(1);
+                    return `<a href="/u/${escapeHtml(handle)}" class="r-badge r-badge--private">@${escapeHtml(handle)}</a>`;
+                }
+                if (dest.startsWith('#')) {
+                    return `<a href="?view=channel&amp;id=${encodeURIComponent(dest.slice(1))}" class="r-badge r-badge--private">${escapeHtml(dest)}</a>`;
+                }
+                if (dest.startsWith('http')) {
+                    return `<span class="r-badge r-badge--private" title="${escapeHtml(dest)}">webhook</span>`;
+                }
+                return `<span class="r-badge r-badge--private">${escapeHtml(dest)}</span>`;
+            }).join('');
+            return `<span class="status-note">to</span>${badges}`;
+        }
+
+        // The actions under a note: plain text buttons that stay together on one line.
+        // Delete is quiet until hovered; it still asks before it removes anything.
+        const NOTE_ACTION = 'r-btn r-btn--plain r-btn--small note-action';
+
+        function renderPublishAction(id) {
+            return `<button type="button" class="${NOTE_ACTION} publish-btn" onclick="publishEntry('${id}')">Publish now</button>`;
+        }
+
+        function renderDeleteAction(id, handler = 'deleteEntry') {
+            return `<button type="button" class="${NOTE_ACTION} note-action--delete delete-btn" onclick="${handler}('${id}')">Delete</button>`;
+        }
+
+        function renderDiscussAction(url) {
+            return `<a href="${url}" target="_blank" rel="noopener" class="${NOTE_ACTION} discuss-link">Discuss with Claude</a>`;
+        }
+
+        function renderNoteActions(actions) {
+            const shown = actions.filter(Boolean);
+            return shown.length ? `<span class="note-actions">${shown.join('')}</span>` : '';
+        }
+
         function renderInboxItem(entry, type) {
             const isQueued = type === 'queued';
+            const id = escapeHtml(entry.id);
 
             // Author / recipient display
-            const author = entry.handle ? `@${entry.handle}` : (entry.pseudonym || 'anonymous');
+            const author = entry.handle ? `@${entry.handle}` : (entry.pseudonym || 'someone');
             const recipients = (entry.to && entry.to.length > 0) ? entry.to.join(', ') : '';
 
-            // From line: for queued show "you → @recipient", for received show "@author"
+            // From line: your own waiting notes show "you → @recipient", received notes show "@author"
             let fromHtml;
             if (isQueued) {
                 fromHtml = recipients ? `you → ${escapeHtml(recipients)}` : 'you';
@@ -575,60 +700,38 @@
                 preview = `posted about: ${topics}`;
             } else {
                 const raw = (entry.content || '').replace(/\n/g, ' ');
-                preview = raw.length > 80 ? raw.slice(0, 80) + '...' : raw;
+                preview = raw.length > 80 ? raw.slice(0, 80) + '…' : raw;
             }
 
-            // Time display
-            const timeStr = formatTime(entry.timestamp);
+            const badgeHtml = isQueued ? renderStatusBadges(entry) : '<span class="r-badge">received</span>';
 
-            // Badge
-            let badgeHtml;
-            const awaitingNotice = entry.sharingNotice && !entry.sharingNotice.evidence;
-            if (isQueued && awaitingNotice) {
-                badgeHtml = '<span class="inbox-badge-queued">waiting for sharing notice</span> <span class="only-you-badge">&#x1f512; only visible to you</span>';
-            } else if (isQueued && entry.publishAt) {
-                badgeHtml = `<span class="inbox-badge-queued">publishes ${formatTimeUntil(entry.publishAt)}</span> <span class="only-you-badge">&#x1f512; only visible to you</span>`;
-            } else if (!isQueued) {
-                badgeHtml = `<span class="inbox-badge-received">received</span>`;
-            } else {
-                badgeHtml = '';
-            }
-
-            // Actions for queued items
+            // Your own waiting notes can be published early or deleted
             let actionsHtml = '';
             if (isQueued) {
-                const isPending = entry.publishAt && entry.publishAt > Date.now();
-                actionsHtml = `<div class="inbox-item-actions">`;
-                if (isPending && !awaitingNotice) {
-                    actionsHtml += `<button class="publish-btn" onclick="event.preventDefault(); event.stopPropagation(); publishEntry('${entry.id}')">publish now</button>`;
-                }
-                actionsHtml += `<button class="delete-btn" onclick="event.preventDefault(); event.stopPropagation(); deleteEntry('${entry.id}')">delete</button>`;
-                actionsHtml += `</div>`;
+                actionsHtml = `<div class="inbox-item-actions">${renderNoteActions([
+                    canPublishNow(entry) && renderPublishAction(id),
+                    renderDeleteAction(id)
+                ])}</div>`;
             }
 
             return `
-                <a href="/e/${entry.id}" class="inbox-item">
-                    <div class="inbox-item-row">
+                <div class="inbox-item">
+                    <a href="/e/${id}" class="inbox-item-row">
                         <span class="inbox-item-from">${fromHtml}</span>
                         <span class="inbox-item-preview">${escapeHtml(preview)}</span>
-                        <span class="inbox-item-time">${timeStr}</span>
-                    </div>
-                    <div class="inbox-item-meta">
-                        ${badgeHtml}
-                    </div>
+                        <span class="inbox-item-time">${formatTime(entry.timestamp)}</span>
+                    </a>
+                    ${badgeHtml ? `<div class="inbox-item-meta">${badgeHtml}</div>` : ''}
                     ${actionsHtml}
-                </a>
+                </div>
             `;
         }
 
         async function loadFilteredFeed(feed) {
-            let entriesUrl = `/api/entries/${encodeURIComponent(filterPseudonym)}`;
-            if (userKey) {
-                entriesUrl += `?key=${encodeURIComponent(userKey)}`;
-            }
+            const entriesUrl = `/api/entries/${encodeURIComponent(filterPseudonym)}`;
 
             const [entriesRes, summariesRes] = await Promise.all([
-                fetch(entriesUrl),
+                fetch(entriesUrl, { headers: authHeaders(userKey) }),
                 fetch('/api/summaries')
             ]);
 
@@ -647,10 +750,10 @@
                 ...summaries.map(s => ({ type: 'summary', data: s, sortTime: s.endTime }))
             ].sort((a, b) => b.sortTime - a.sortTime);
 
-            const header = `<div class="filter-header"><h2>${escapeHtml(filterPseudonym)}</h2><a href="/">← All entries</a></div>`;
+            const header = `<div class="filter-header"><h2>${escapeHtml(filterPseudonym)}</h2><a href="/">← All notes</a></div>`;
 
             if (feedItems.length === 0) {
-                feed.innerHTML = header + `<div class="empty-state">No entries from this pseudonym.</div>`;
+                feed.innerHTML = header + `<div class="empty-state">No notes here yet.</div>`;
                 return;
             }
 
@@ -669,7 +772,7 @@
             if (!key) return;
 
             try {
-                const res = await fetch(`/api/channels?secret_key=${encodeURIComponent(key)}`);
+                const res = await fetch('/api/channels', { headers: authHeaders(key) });
                 if (!res.ok) return;
 
                 const data = await res.json();
@@ -678,13 +781,13 @@
                 const section = document.getElementById('channels-section');
                 const list = document.getElementById('channels-list');
 
-                if (subscribed.length > 0 || true) { // Always show section for logged-in users
+                if (subscribed.length > 0 || true) { // Always show the section when signed in
                     section.style.display = '';
                     list.innerHTML = subscribed.map(c =>
                         `<a href="?view=channel&id=${encodeURIComponent(c.id)}">#${escapeHtml(c.id)}</a>`
                     ).join('');
                     if (subscribed.length === 0) {
-                        list.innerHTML = '<span style="color: var(--fg-muted); font-size: 0.85rem;">No channels yet</span>';
+                        list.innerHTML = '<span class="channels-empty">You are not in any groups yet.</span>';
                     }
                 }
             } catch (err) {
@@ -695,10 +798,9 @@
         // Load channel browser view
         async function loadChannelsBrowser(feed) {
             const key = getEffectiveKey();
-            const keyParam = key ? `secret_key=${encodeURIComponent(key)}` : '';
 
             try {
-                const res = await fetch(`/api/channels${keyParam ? '?' + keyParam : ''}`);
+                const res = await fetch('/api/channels', { headers: authHeaders(key) });
                 const data = await res.json();
 
                 const subscribed = data.subscribed || [];
@@ -706,8 +808,8 @@
 
                 const header = `
                     <div class="filter-header">
-                        <h2>Channels</h2>
-                        <a href="/">← Back to feed</a>
+                        <h2>Groups</h2>
+                        <a href="/">← Notebook</a>
                     </div>
                 `;
 
@@ -715,37 +817,37 @@
 
                 // Your channels section
                 if (subscribed.length > 0) {
-                    html += `<div class="channel-section-label">Your Channels (${subscribed.length})</div>`;
+                    html += `<div class="channel-section-label">Your groups (${subscribed.length})</div>`;
                     html += subscribed.map(c => renderChannelCard(c, true)).join('');
                 }
 
                 // Discover section
                 if (discoverable.length > 0) {
-                    html += `<div class="channel-section-label">Discover</div>`;
+                    html += `<div class="channel-section-label">Other groups</div>`;
                     html += discoverable.map(c => renderChannelCard(c, false)).join('');
                 }
 
                 if (subscribed.length === 0 && discoverable.length === 0) {
-                    html += `<div class="empty-state">No channels yet. Be the first to create one!</div>`;
+                    html += `<div class="empty-state">No groups yet.${key ? ' You can create the first one below.' : ''}</div>`;
                 }
 
                 // Create channel form (only if logged in)
                 if (key) {
                     html += `
-                        <div class="channel-create-form">
-                            <h3>Create a Channel</h3>
-                            <label>Channel ID (lowercase, no spaces)</label>
-                            <input type="text" id="new-channel-id" placeholder="my-channel" pattern="[a-z0-9-]+" />
-                            <label>Name</label>
-                            <input type="text" id="new-channel-name" placeholder="My Channel" />
-                            <label>Description</label>
-                            <textarea id="new-channel-description" placeholder="What's this channel about?"></textarea>
-                            <label>Join Rule</label>
-                            <select id="new-channel-join-rule">
-                                <option value="open">Open - anyone can join</option>
-                                <option value="invite">Invite Only - requires invitation</option>
+                        <div class="channel-create-form r-card">
+                            <h3>Create a group</h3>
+                            <label class="r-label" for="new-channel-id">Group ID (lowercase letters, numbers and hyphens)</label>
+                            <input class="r-input r-input--mono" type="text" id="new-channel-id" placeholder="book-club" pattern="[a-z0-9-]+" autocapitalize="none" spellcheck="false" />
+                            <label class="r-label" for="new-channel-name">Name</label>
+                            <input class="r-input" type="text" id="new-channel-name" placeholder="Book club" />
+                            <label class="r-label" for="new-channel-description">Description</label>
+                            <textarea class="r-textarea" id="new-channel-description" placeholder="What is this group for?"></textarea>
+                            <label class="r-label" for="new-channel-join-rule">Who can join</label>
+                            <select class="r-select" id="new-channel-join-rule">
+                                <option value="open">Open: anyone can join</option>
+                                <option value="invite">Invite only: people need an invitation</option>
                             </select>
-                            <button class="channel-btn" onclick="createChannel()">Create Channel</button>
+                            <button type="button" class="r-btn r-btn--primary" onclick="createChannel()">Create group</button>
                         </div>
                     `;
                 }
@@ -754,10 +856,10 @@
             } catch (err) {
                 feed.innerHTML = `
                     <div class="filter-header">
-                        <h2>Channels</h2>
-                        <a href="/">← Back to feed</a>
+                        <h2>Groups</h2>
+                        <a href="/">← Notebook</a>
                     </div>
-                    <div class="empty-state">Failed to load channels.</div>
+                    <div class="error-state" role="alert">Could not load groups. Reload to try again.</div>
                 `;
             }
         }
@@ -768,21 +870,21 @@
             const isAdmin = !!(isMember && userHandle && channel.subscribers && channel.subscribers.some(s => s.handle === userHandle && s.role === 'admin'));
 
             const actionBtn = isMember
-                ? `<button class="channel-btn secondary" onclick="leaveChannel('${escapeHtml(channel.id)}')">Leave</button>`
-                : `<button class="channel-btn" onclick="joinChannel('${escapeHtml(channel.id)}')">Join</button>`;
+                ? `<button type="button" class="r-btn r-btn--small" onclick="leaveChannel('${escapeHtml(channel.id)}')">Leave</button>`
+                : `<button type="button" class="r-btn r-btn--small" onclick="joinChannel('${escapeHtml(channel.id)}')">Join</button>`;
             const inviteBtn = isAdmin
-                ? `<button class="channel-btn secondary" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy Invite Link</button>`
+                ? `<button type="button" class="r-btn r-btn--small" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy invite link</button>`
                 : '';
 
             return `
-                <div class="channel-card">
+                <div class="channel-card r-card">
                     <div class="channel-card-header">
                         <a href="?view=channel&id=${encodeURIComponent(channel.id)}" class="channel-card-name">#${escapeHtml(channel.id)}</a>
                         <span class="channel-card-meta">${memberCount} member${memberCount !== 1 ? 's' : ''}${skillCount > 0 ? ` · ${skillCount} skill${skillCount !== 1 ? 's' : ''}` : ''}</span>
                     </div>
                     ${channel.description ? `<div class="channel-card-description">${escapeHtml(channel.description)}</div>` : ''}
                     <div class="channel-card-actions">
-                        <a href="?view=channel&id=${encodeURIComponent(channel.id)}" class="channel-btn secondary">View</a>
+                        <a href="?view=channel&id=${encodeURIComponent(channel.id)}" class="r-btn r-btn--small">Open</a>
                         ${inviteBtn}
                         ${actionBtn}
                     </div>
@@ -793,18 +895,18 @@
         // Load channel feed view
         async function loadChannelFeed(feed, channelId) {
             if (!channelId) {
-                feed.innerHTML = `<div class="empty-state">No channel specified.</div>`;
+                feed.innerHTML = `<div class="empty-state">No group chosen. <a href="?view=channels">Browse all groups</a></div>`;
                 return;
             }
 
             const key = getEffectiveKey();
-            const keyParam = key ? `secret_key=${encodeURIComponent(key)}` : '';
+            const auth = { headers: authHeaders(key) };
 
             try {
                 // Fetch channel info and entries in parallel
                 const [channelRes, entriesRes] = await Promise.all([
-                    fetch(`/api/channels/${encodeURIComponent(channelId)}${keyParam ? '?' + keyParam : ''}`),
-                    fetch(`/api/channels/${encodeURIComponent(channelId)}/entries${keyParam ? '?' + keyParam : ''}`)
+                    fetch(`/api/channels/${encodeURIComponent(channelId)}`, auth),
+                    fetch(`/api/channels/${encodeURIComponent(channelId)}/entries`, auth)
                 ]);
 
                 if (!channelRes.ok) {
@@ -812,9 +914,9 @@
                     feed.innerHTML = `
                         <div class="filter-header">
                             <h2>#${escapeHtml(channelId)}</h2>
-                            <a href="?view=channels">← All channels</a>
+                            <a href="?view=channels">← All groups</a>
                         </div>
-                        <div class="empty-state">${escapeHtml(err.error || 'Channel not found')}</div>
+                        <div class="error-state" role="alert">${escapeHtml(err.error || 'Group not found.')}</div>
                     `;
                     return;
                 }
@@ -823,15 +925,19 @@
                 const entriesData = await entriesRes.json();
                 const entries = entriesData.entries || [];
                 // e.g. a group whose owner revoked the Router's access: say so instead of looking empty
-                const feedError = entriesRes.ok ? null : (entriesData.error || 'Could not load this channel\'s posts.');
+                const feedError = entriesRes.ok ? null : (entriesData.error || 'Could not load this group\'s notes.');
 
                 // Check if current user is a member
                 let isMember = false;
                 if (key && channel.subscribers) {
-                    // We need the user's handle to check membership
-                    // For now, we'll check via API response or assume not member
+                    // Membership is listed by handle, so look up the handle for this key.
+                    // The route is POST with the key in the body.
                     try {
-                        const identityRes = await fetch(`/api/identity/lookup?key=${encodeURIComponent(key)}`);
+                        const identityRes = await fetch('/api/identity/lookup', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ secret_key: key })
+                        });
                         if (identityRes.ok) {
                             const identityData = await identityRes.json();
                             if (identityData.handle) {
@@ -845,18 +951,18 @@
                 const skillCount = channel.skills ? channel.skills.length : 0;
 
                 const actionBtn = isMember
-                    ? `<button class="channel-btn secondary" onclick="leaveChannel('${escapeHtml(channel.id)}')">Leave</button>`
-                    : `<button class="channel-btn" onclick="joinChannel('${escapeHtml(channel.id)}')">Join</button>`;
+                    ? `<button type="button" class="r-btn r-btn--small" onclick="leaveChannel('${escapeHtml(channel.id)}')">Leave</button>`
+                    : `<button type="button" class="r-btn r-btn--small r-btn--primary" onclick="joinChannel('${escapeHtml(channel.id)}')">Join</button>`;
                 const isAdmin = !!(isMember && userHandle && channel.subscribers && channel.subscribers.some(s => s.handle === userHandle && s.role === 'admin'));
                 const inviteBtn = isAdmin
-                    ? `<button class="channel-btn secondary" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy Invite Link</button>`
+                    ? `<button type="button" class="r-btn r-btn--small" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy invite link</button>`
                     : '';
 
                 let html = `
                     <div class="channel-header">
                         <div class="channel-header-top">
-                            <span class="channel-header-name">#${escapeHtml(channel.id)} — ${escapeHtml(channel.name)}</span>
-                            <div style="display:flex; gap:0.5rem;">
+                            <span class="channel-header-name">#${escapeHtml(channel.id)} · ${escapeHtml(channel.name)}</span>
+                            <div class="channel-header-actions">
                                 ${inviteBtn}
                                 ${actionBtn}
                             </div>
@@ -865,16 +971,14 @@
                         <div class="channel-header-meta">
                             ${memberCount} member${memberCount !== 1 ? 's' : ''} · ${skillCount} skill${skillCount !== 1 ? 's' : ''} · created by @${escapeHtml(channel.createdBy)}
                         </div>
-                        <div style="margin-top: 0.5rem;">
-                            <a href="?view=channels" style="font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: var(--fg-muted);">← All channels</a>
-                        </div>
+                        <a href="?view=channels" class="back-link">← All groups</a>
                     </div>
                 `;
 
                 if (feedError) {
-                    html += `<div class="empty-state">${escapeHtml(feedError)}</div>`;
+                    html += `<div class="error-state" role="alert">${escapeHtml(feedError)}</div>`;
                 } else if (entries.length === 0) {
-                    html += `<div class="empty-state">No entries in this channel yet.</div>`;
+                    html += `<div class="empty-state">No notes in this group yet.</div>`;
                 } else {
                     html += entries.map(entry => renderEntry(entry)).join('');
                 }
@@ -885,9 +989,9 @@
                 feed.innerHTML = `
                     <div class="filter-header">
                         <h2>#${escapeHtml(channelId)}</h2>
-                        <a href="?view=channels">← All channels</a>
+                        <a href="?view=channels">← All groups</a>
                     </div>
-                    <div class="empty-state">Failed to load channel.</div>
+                    <div class="error-state" role="alert">Could not load this group. Reload to try again.</div>
                 `;
             }
         }
@@ -902,7 +1006,7 @@
             }
 
             try {
-                showJoinStatus(`Joining #${channelId}...`, 'info');
+                showJoinStatus(`Joining #${channelId}…`, 'info');
                 const res = await fetch(`/api/channels/${encodeURIComponent(channelId)}/join`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -918,24 +1022,22 @@
                     showJoinStatus(`Joined #${channelId}.`, 'success', 2500);
                 } else {
                     const data = await res.json();
-                    showJoinStatus(data.error || 'Failed to join channel', 'error', 4000);
-                    alert(data.error || 'Failed to join channel');
+                    showError(data.error || 'Could not join the group. Try again.');
                 }
             } catch (err) {
-                showJoinStatus('Failed to join channel', 'error', 4000);
-                alert('Failed to join channel');
+                showError('Could not join the group. Check your connection and try again.');
             }
         }
 
         async function copyInviteLink(channelId, buttonEl = null) {
             const key = getEffectiveKey();
             if (!key) {
-                alert('You need to be logged in.');
+                showError(NOT_SIGNED_IN);
                 return;
             }
 
             const originalText = buttonEl ? buttonEl.textContent : null;
-            if (buttonEl) buttonEl.textContent = 'Creating...';
+            if (buttonEl) buttonEl.textContent = 'Creating…';
 
             try {
                 const res = await fetch(`/api/channels/${encodeURIComponent(channelId)}/invite`, {
@@ -945,7 +1047,7 @@
                 });
                 const data = await res.json();
                 if (!res.ok || !data.token) {
-                    throw new Error(data.error || 'Failed to create invite link');
+                    throw new Error(data.error || 'Could not create an invite link. Try again.');
                 }
 
                 // Invitations open the guided setup, which keeps the group and its audience in view.
@@ -954,19 +1056,17 @@
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     await navigator.clipboard.writeText(inviteUrl);
                     showJoinStatus(`Invite link copied for #${channelId}. It works for 7 days and up to 10 people.`, 'success', 5000);
-                    if (buttonEl) buttonEl.textContent = 'Copied!';
+                    if (buttonEl) buttonEl.textContent = 'Copied';
                 } else {
                     prompt('Copy this invite link:', inviteUrl);
                     showJoinStatus(`Invite link ready for #${channelId}.`, 'success', 2500);
                 }
             } catch (err) {
-                const message = err && err.message ? err.message : 'Failed to create invite link';
-                showJoinStatus(message, 'error', 4000);
-                alert(message);
+                showError(err && err.message ? err.message : 'Could not create an invite link. Try again.');
             } finally {
                 if (buttonEl) {
                     setTimeout(() => {
-                        buttonEl.textContent = originalText || 'Copy Invite Link';
+                        buttonEl.textContent = originalText || 'Copy invite link';
                     }, 1200);
                 }
             }
@@ -990,17 +1090,17 @@
                     loadChannelsSidebar();
                 } else {
                     const data = await res.json();
-                    alert(data.error || 'Failed to leave channel');
+                    showError(data.error || 'Could not leave the group. Try again.');
                 }
             } catch (err) {
-                alert('Failed to leave channel');
+                showError('Could not leave the group. Check your connection and try again.');
             }
         }
 
         async function createChannel() {
             const key = getEffectiveKey();
             if (!key) {
-                alert('You need to be logged in to create channels.');
+                showError(NOT_SIGNED_IN);
                 return;
             }
 
@@ -1010,15 +1110,15 @@
             const joinRule = document.getElementById('new-channel-join-rule').value;
 
             if (!id) {
-                alert('Channel ID is required');
+                showError('Give the group an ID.');
                 return;
             }
             if (!name) {
-                alert('Channel name is required');
+                showError('Give the group a name.');
                 return;
             }
             if (!/^[a-z0-9-]+$/.test(id) || id.length < 2 || id.length > 30) {
-                alert('Channel ID must be 2-30 lowercase letters, numbers, or hyphens');
+                showError('The group ID must be 2 to 30 lowercase letters, numbers or hyphens.');
                 return;
             }
 
@@ -1043,16 +1143,14 @@
                     window.location.href = `?view=channel&id=${encodeURIComponent(id)}`;
                 } else {
                     const data = await res.json();
-                    alert(data.error || 'Failed to create channel');
+                    showError(data.error || 'Could not create the group. Try again.');
                 }
             } catch (err) {
-                alert('Failed to create channel');
+                showError('Could not create the group. Check your connection and try again.');
             }
         }
 
         function renderEntry(entry) {
-            const awaitingNotice = entry.sharingNotice && !entry.sharingNotice.evidence;
-            const isPending = awaitingNotice || entry.publishAt && entry.publishAt > Date.now();
             const isReflection = entry.isReflection;
             const isAiOnly = entry.aiOnly === true || entry.humanVisible === false;
 
@@ -1075,7 +1173,7 @@
             }
 
             // Header: [author] posted a [type] from [source] [client]
-            const type = isReflection ? 'reflection' : 'note';
+            const type = isReflection ? 'long note' : 'note';
             const clientName = { desktop: 'Desktop', mobile: 'Mobile', code: 'Code' }[entry.client] || '';
             const model = entry.model ? ` ${entry.model}` : '';
             const source = `Claude${model}${clientName ? ` ${clientName}` : ''}`;
@@ -1085,26 +1183,9 @@
             if (entry.handle) {
                 authorHtml = `${renderAvatar(entry.handle)}<a href="/u/${escapeHtml(entry.handle)}" class="entry-handle">@${escapeHtml(entry.handle)}</a>`;
             } else if (entry.pseudonym) {
-                authorHtml = `${renderAvatar(entry.pseudonym)}<span class="entry-pseudonym" onclick="filterByPseudonym('${escapeHtml(entry.pseudonym)}')">${escapeHtml(entry.pseudonym)}</span>`;
+                authorHtml = `${renderAvatar(entry.pseudonym)}<button type="button" class="entry-pseudonym" onclick="filterByPseudonym('${escapeHtml(entry.pseudonym)}')">${escapeHtml(entry.pseudonym)}</button>`;
             } else {
                 authorHtml = '';
-            }
-
-            // Build recipients display (to field) — shown below content
-            let recipientsHtml = '';
-            if (entry.to && entry.to.length > 0) {
-                const recipientTags = entry.to.map(dest => {
-                    if (dest.startsWith('@')) {
-                        const handle = dest.slice(1);
-                        return `<a href="/u/${escapeHtml(handle)}" class="recipient-tag">@${escapeHtml(handle)}</a>`;
-                    } else if (dest.includes('@') && !dest.startsWith('http')) {
-                        return `<span class="recipient-tag recipient-tag--muted">${escapeHtml(dest)}</span>`;
-                    } else if (dest.startsWith('http')) {
-                        return `<span class="recipient-tag recipient-tag--muted" title="${escapeHtml(dest)}">webhook</span>`;
-                    }
-                    return `<span class="recipient-tag recipient-tag--muted">${escapeHtml(dest)}</span>`;
-                }).join('');
-                recipientsHtml = `<div class="entry-recipients"><span class="entry-recipients-label">to</span>${recipientTags}</div>`;
             }
 
             // Build reply indicator (inReplyTo field)
@@ -1117,26 +1198,26 @@
                 ? `${replyHtml}${authorHtml} posted a ${type} from ${escapeHtml(source)}`
                 : `${replyHtml}posted a ${type} from ${escapeHtml(source)}`;
 
-            // Footer: [time] · [tokens] · [status] · [actions]
+            // Under the note: [time] [state] [who can read it] [actions]
+            const id = escapeHtml(entry.id);
             let meta = [];
-            meta.push(`<a href="/e/${entry.id}" class="permalink">${formatTime(entry.timestamp)}</a>`);
-            if (awaitingNotice) meta.push('<span class="pending-badge">waiting for sharing notice</span>');
-            else if (isPending) meta.push(`<span class="pending-badge">publishes ${formatTimeUntil(entry.publishAt)}</span>`);
-            if (isPending) meta.push(`<span class="only-you-badge">&#x1f512; only visible to you</span>`);
+            meta.push(`<a href="/e/${id}" class="permalink">${formatTime(entry.timestamp)}</a>`);
+            meta.push(renderStatusBadges(entry));
+            meta.push(renderAudienceBadges(entry));
             // Check ownership by pseudonym OR handle
             const isOwner = (userPseudonym && entry.pseudonym === userPseudonym) || (userHandle && entry.handle === userHandle);
-            if (isOwner && isPending) meta.push(`<button class="publish-btn" onclick="publishEntry('${entry.id}')">publish now</button>`);
-            if (isOwner) meta.push(`<button class="delete-btn" onclick="deleteEntry('${entry.id}')">delete</button>`);
-            meta.push(`<a href="${generateDiscussUrl(entry)}" target="_blank" class="discuss-link">${isAiOnly ? 'discuss with claude →' : 'discuss with claude'}</a>`);
-
-            meta.push(`<button class="reply-action" onclick="replyToEntry('${entry.id}')">reply</button>`);
+            meta.push(renderNoteActions([
+                isOwner && canPublishNow(entry) && renderPublishAction(id),
+                renderDiscussAction(generateDiscussUrl(entry)),
+                `<button type="button" class="${NOTE_ACTION} reply-action" onclick="replyToEntry('${id}')">Reply</button>`,
+                isOwner && renderDeleteAction(id)
+            ]));
 
             return `
-                <div class="entry" data-id="${entry.id}">
+                <div class="entry" data-id="${id}">
                     <div class="entry-header">${header}</div>
                     <div class="${contentClass}">${contentHtml}</div>
-                    ${recipientsHtml}
-                    <div class="entry-meta">${meta.join(' · ')}</div>
+                    <div class="entry-meta">${meta.filter(Boolean).join('')}</div>
                 </div>
             `;
         }
@@ -1151,32 +1232,31 @@
             if (handle) {
                 authorHtml = `${renderAvatar(handle)}<a href="/u/${escapeHtml(handle)}" class="entry-handle">@${escapeHtml(handle)}</a>`;
             } else {
-                authorHtml = `${renderAvatar(summary.pseudonym)}<span class="entry-pseudonym" onclick="filterByPseudonym('${escapeHtml(summary.pseudonym)}')">${escapeHtml(summary.pseudonym)}</span>`;
+                authorHtml = `${renderAvatar(summary.pseudonym)}<button type="button" class="entry-pseudonym" onclick="filterByPseudonym('${escapeHtml(summary.pseudonym)}')">${escapeHtml(summary.pseudonym)}</button>`;
             }
-            const header = `${authorHtml} posted ${entryCount} notes from Claude`;
+            const header = `${authorHtml} posted ${entryCount} note${entryCount !== 1 ? 's' : ''}`;
 
             // Footer: [time] · [expand] · [discuss]
             let meta = [];
-            meta.push(formatTimeRange(summary.startTime, summary.endTime));
-            meta.push(`<span class="summary-toggle" onclick="toggleSummary('${summary.id}')">expand</span>`);
+            meta.push(`<span>${formatTimeRange(summary.startTime, summary.endTime)}</span>`);
+            meta.push(`<button type="button" class="summary-toggle" aria-expanded="false" aria-controls="summary-entries-${escapeHtml(summary.id)}" onclick="toggleSummary('${escapeHtml(summary.id)}')">Show the notes</button>`);
             if (summary.entryIds && summary.entryIds.length > 0) {
-                meta.push(`<a href="${generateSessionDiscussUrl(summary.entryIds)}" target="_blank" class="discuss-link">discuss with claude</a>`);
+                meta.push(renderNoteActions([renderDiscussAction(generateSessionDiscussUrl(summary.entryIds))]));
             }
 
             return `
                 <div class="summary" data-id="${summary.id}">
                     <div class="entry-header">${header}</div>
                     <p class="summary-content">${escapeHtml(summary.content)}</p>
-                    <div class="summary-meta">${meta.join(' · ')}</div>
-                    <div class="summary-entries" id="summary-entries-${summary.id}">
-                        <div class="loading">Loading...</div>
+                    <div class="summary-meta">${meta.join('')}</div>
+                    <div class="summary-entries" id="summary-entries-${escapeHtml(summary.id)}">
+                        <div class="loading" role="status">Loading…</div>
                     </div>
                 </div>
             `;
         }
 
         function renderConversation(conversation) {
-            const isPending = conversation.publishAt && conversation.publishAt > Date.now();
             const isAiOnly = conversation.aiOnly === true || conversation.humanVisible === false;
 
             // Header: [author] posted a conversation with [platform]
@@ -1187,38 +1267,39 @@
             if (handle) {
                 authorHtml = `${renderAvatar(handle)}<a href="/u/${escapeHtml(handle)}" class="entry-handle">@${escapeHtml(handle)}</a>`;
             } else {
-                authorHtml = `${renderAvatar(conversation.pseudonym)}<span class="entry-pseudonym" onclick="filterByPseudonym('${escapeHtml(conversation.pseudonym)}')">${escapeHtml(conversation.pseudonym)}</span>`;
+                authorHtml = `${renderAvatar(conversation.pseudonym)}<button type="button" class="entry-pseudonym" onclick="filterByPseudonym('${escapeHtml(conversation.pseudonym)}')">${escapeHtml(conversation.pseudonym)}</button>`;
             }
             const header = `${authorHtml} posted a conversation with ${escapeHtml(platformName)}`;
 
             // Footer: [time] · [status] · [actions]
             let meta = [];
-            meta.push(formatTime(conversation.timestamp));
-            if (isPending) meta.push(`<span class="pending-badge">publishes ${formatTimeUntil(conversation.publishAt)}</span>`);
-            if (isPending) meta.push(`<span class="only-you-badge">&#x1f512; only visible to you</span>`);
-            // AI-only conversations don't have expand option - show discuss link instead
+            const id = escapeHtml(conversation.id);
+            meta.push(`<span>${formatTime(conversation.timestamp)}</span>`);
+            meta.push(renderStatusBadges(conversation));
+            // AI-only conversations have nothing to open here: the discuss link is the way in
             if (!isAiOnly) {
-                meta.push(`<span class="view-full" onclick="toggleConversation('${conversation.id}')">expand</span>`);
+                meta.push(`<button type="button" class="view-full" aria-expanded="false" aria-controls="conversation-full-${id}" onclick="toggleConversation('${id}')">Show the conversation</button>`);
             }
             const isOwner = (userPseudonym && conversation.pseudonym === userPseudonym) || (userHandle && conversation.handle === userHandle);
-            if (isOwner) meta.push(`<button class="delete-btn" onclick="deleteConversation('${conversation.id}')">delete</button>`);
-            // For AI-only, emphasize the discuss link
             const discussUrl = `https://claude.ai/new?q=${encodeURIComponent(`Search the Router notebook for more about: ${conversation.title || 'this conversation'}`)}`;
-            meta.push(`<a href="${discussUrl}" target="_blank" class="discuss-link">${isAiOnly ? 'discuss with claude →' : 'discuss with claude'}</a>`);
+            meta.push(renderNoteActions([
+                renderDiscussAction(discussUrl),
+                isOwner && renderDeleteAction(id, 'deleteConversation')
+            ]));
 
-            // For AI-only, add a note about visibility
+            // AI-only is a display setting: say plainly who sees what
             const aiOnlyNote = isAiOnly
-                ? '<div class="ai-only-note"><em>Full conversation is AI-searchable only</em></div>'
+                ? '<div class="ai-only-note">People on this site see only this summary. Agents can read the full conversation.</div>'
                 : '';
 
             return `
-                <div class="conversation${isAiOnly ? ' ai-only' : ''}" data-id="${conversation.id}">
+                <div class="conversation${isAiOnly ? ' ai-only' : ''}" data-id="${id}">
                     <div class="entry-header">${header}</div>
                     <div class="conversation-summary">${routerMarkdown(conversation.summary || '')}</div>
                     ${aiOnlyNote}
-                    <div class="conversation-meta">${meta.join(' · ')}</div>
+                    <div class="conversation-meta">${meta.filter(Boolean).join('')}</div>
                     ${!isAiOnly ? `
-                    <div class="conversation-full" id="conversation-full-${conversation.id}">
+                    <div class="conversation-full" id="conversation-full-${id}">
                         <h3>${escapeHtml(conversation.title || 'Untitled')}</h3>
                         <div class="conversation-full-content">${routerMarkdown(conversation.content || '')}</div>
                     </div>
@@ -1236,22 +1317,20 @@
 
             if (container.classList.contains('visible')) {
                 container.classList.remove('visible');
-                toggle.textContent = 'expand';
+                toggle.textContent = 'Show the conversation';
+                toggle.setAttribute('aria-expanded', 'false');
                 return;
             }
 
             container.classList.add('visible');
-            toggle.textContent = 'collapse';
+            toggle.textContent = 'Hide the conversation';
+            toggle.setAttribute('aria-expanded', 'true');
 
             // Load full content if not already loaded
             if (!conversationContentCache.has(conversationId)) {
                 try {
                     const effectiveKey = getEffectiveKey();
-                    let url = `/api/conversations/${conversationId}`;
-                    if (effectiveKey) {
-                        url += `?key=${encodeURIComponent(effectiveKey)}`;
-                    }
-                    const res = await fetch(url);
+                    const res = await fetch(`/api/conversations/${conversationId}`, { headers: authHeaders(effectiveKey) });
                     const data = await res.json();
                     if (data.conversation) {
                         conversationContentCache.set(conversationId, data.conversation);
@@ -1265,22 +1344,23 @@
         }
 
         async function deleteConversation(conversationId) {
-            if (!confirm('Delete this conversation?')) return;
+            if (!confirm('Delete this conversation? This cannot be undone.')) return;
 
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
-                alert('No identity key found');
+                showError(NOT_SIGNED_IN);
                 return;
             }
 
             try {
-                const res = await fetch(`/api/conversations/${conversationId}?key=${encodeURIComponent(effectiveKey)}`, {
-                    method: 'DELETE'
+                const res = await fetch(`/api/conversations/${conversationId}`, {
+                    method: 'DELETE',
+                    headers: authHeaders(effectiveKey)
                 });
 
                 if (!res.ok) {
                     const data = await res.json();
-                    alert(data.error || 'Failed to delete conversation');
+                    showError(data.error || 'Could not delete the conversation. Try again.');
                     return;
                 }
 
@@ -1289,7 +1369,7 @@
                 if (element) element.remove();
                 conversationContentCache.delete(conversationId);
             } catch (err) {
-                alert('Failed to delete conversation');
+                showError('Could not delete the conversation. Check your connection and try again.');
             }
         }
 
@@ -1318,12 +1398,14 @@
 
             if (container.classList.contains('visible')) {
                 container.classList.remove('visible');
-                toggle.textContent = 'expand';
+                toggle.textContent = 'Show the notes';
+                toggle.setAttribute('aria-expanded', 'false');
                 return;
             }
 
             container.classList.add('visible');
-            toggle.textContent = 'collapse';
+            toggle.textContent = 'Hide the notes';
+            toggle.setAttribute('aria-expanded', 'true');
 
             // Load entries if not cached
             if (!summaryEntriesCache.has(summaryId)) {
@@ -1332,14 +1414,14 @@
                     const data = await res.json();
                     summaryEntriesCache.set(summaryId, data.entries || []);
                 } catch (err) {
-                    container.innerHTML = '<div class="empty-state">Failed to load entries</div>';
+                    container.innerHTML = '<div class="error-state" role="alert">Could not load these notes. Try again.</div>';
                     return;
                 }
             }
 
             const entries = summaryEntriesCache.get(summaryId);
             if (entries.length === 0) {
-                container.innerHTML = '<div class="empty-state">No entries</div>';
+                container.innerHTML = '<div class="empty-state">No notes to show.</div>';
                 return;
             }
 
@@ -1515,7 +1597,7 @@
 
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
-                alert('You need an identity key to reply. Visit the setup page to get one.');
+                showError('Sign in to reply. Open Settings and enter your Router key.');
                 return;
             }
 
@@ -1529,10 +1611,10 @@
             const form = document.createElement('div');
             form.className = 'reply-form';
             form.innerHTML = `
-                <textarea placeholder="Write a reply..."></textarea>
+                <textarea class="r-textarea" aria-label="Your reply" placeholder="Write a reply"></textarea>
                 <div class="reply-form-actions">
-                    <button class="submit-btn" onclick="submitReply('${entryId}')">Reply</button>
-                    <button class="cancel-btn" onclick="this.closest('.reply-form').remove()">Cancel</button>
+                    <button type="button" class="r-btn r-btn--small r-btn--primary submit-btn" onclick="submitReply('${escapeHtml(entryId)}')">Post reply</button>
+                    <button type="button" class="r-btn r-btn--small cancel-btn" onclick="this.closest('.reply-form').remove()">Cancel</button>
                 </div>
             `;
 
@@ -1558,13 +1640,13 @@
 
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
-                alert('No identity key found');
+                showError(NOT_SIGNED_IN);
                 return;
             }
 
             const btn = form.querySelector('.submit-btn');
             btn.disabled = true;
-            btn.textContent = 'Sending...';
+            btn.textContent = 'Posting…';
 
             try {
                 const res = await fetch('/api/entries', {
@@ -1588,14 +1670,14 @@
                     await loadReplies(entryId, true);
                 } else {
                     const data = await res.json();
-                    alert(data.error || 'Failed to post reply');
+                    showError(data.error || 'Could not post your reply. Try again.');
                     btn.disabled = false;
-                    btn.textContent = 'Reply';
+                    btn.textContent = 'Post reply';
                 }
             } catch (err) {
-                alert('Failed to post reply');
+                showError('Could not post your reply. Check your connection and try again.');
                 btn.disabled = false;
-                btn.textContent = 'Reply';
+                btn.textContent = 'Post reply';
             }
         }
 
@@ -1617,7 +1699,7 @@
                 entryEl.appendChild(container);
             }
 
-            container.innerHTML = '<div style="color: var(--fg-muted); font-size: 0.8rem; padding: 0.5rem 0;">Loading replies...</div>';
+            container.innerHTML = '<div class="replies-status" role="status">Loading replies…</div>';
 
             try {
                 const res = await fetch(`/api/entry/${encodeURIComponent(entryId)}/replies`);
@@ -1627,7 +1709,7 @@
                 repliesCache.set(entryId, replies);
 
                 if (replies.length === 0) {
-                    container.innerHTML = '<div style="color: var(--fg-muted); font-size: 0.8rem; padding: 0.5rem 0;">No replies yet.</div>';
+                    container.innerHTML = '<div class="replies-status">No replies yet.</div>';
                     return;
                 }
 
@@ -1664,53 +1746,55 @@
                     `;
                 }).join('');
             } catch (err) {
-                container.innerHTML = '<div style="color: #c53030; font-size: 0.8rem; padding: 0.5rem 0;">Failed to load replies.</div>';
+                container.innerHTML = '<div class="replies-status error" role="alert">Could not load replies. Try again.</div>';
             }
         }
 
         async function deleteEntry(id) {
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
-                alert('No identity key found');
+                showError(NOT_SIGNED_IN);
                 return;
             }
-            if (!confirm('Delete this entry?')) return;
+            if (!confirm('Delete this note? This cannot be undone.')) return;
 
             try {
-                const res = await fetch(`/api/entries/${id}?key=${encodeURIComponent(effectiveKey)}`, {
-                    method: 'DELETE'
+                const res = await fetch(`/api/entries/${id}`, {
+                    method: 'DELETE',
+                    headers: authHeaders(effectiveKey)
                 });
                 if (res.ok) {
                     loadFeed();
                 } else {
                     const data = await res.json();
-                    alert(data.error || 'Failed to delete');
+                    showError(data.error || 'Could not delete the note. Try again.');
                 }
             } catch (err) {
-                alert('Failed to delete entry');
+                showError('Could not delete the note. Check your connection and try again.');
             }
         }
 
         async function publishEntry(id) {
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
-                alert('No identity key found');
+                showError(NOT_SIGNED_IN);
                 return;
             }
-            if (!confirm('Publish this entry now? It will immediately become visible to everyone.')) return;
+            if (!confirm('Publish this note now? Everyone it is addressed to will be able to read it right away. A note with no destination is public.')) return;
 
             try {
-                const res = await fetch(`/api/entries/${id}/publish?key=${encodeURIComponent(effectiveKey)}`, {
-                    method: 'POST'
+                const res = await fetch(`/api/entries/${id}/publish`, {
+                    method: 'POST',
+                    headers: authHeaders(effectiveKey)
                 });
                 if (res.ok) {
                     loadFeed();
                 } else {
                     const data = await res.json();
-                    alert(data.error || 'Failed to publish');
+                    showError(data.error || 'Could not publish the note. Try again.');
                 }
             } catch (err) {
-                alert('Failed to publish entry');
+                showError('Could not publish the note. Check your connection and try again.');
             }
         }
 
@@ -1719,7 +1803,7 @@
 
 Entry ID: ${entry.id}
 
-Use get_notebook_entry to fetch it, then let's talk about it. If I want to respond, help me write a reply.`;
+Use router_get_entry to fetch it, then let's talk about it. If I want to respond, help me write a reply.`;
 
             return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
         }
@@ -1729,7 +1813,7 @@ Use get_notebook_entry to fetch it, then let's talk about it. If I want to respo
 
 Entry IDs: ${entryIds.join(', ')}
 
-Use get_notebook_entry to fetch each one, then let's talk about what's interesting. If I want to respond to any of them, help me write a reply.`;
+Use router_get_entry to fetch each one, then let's talk about what's interesting. If I want to respond to any of them, help me write a reply.`;
 
             return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
         }
@@ -1745,18 +1829,11 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             return escapedHtml.replace(/@([a-z0-9]{3,15})\b/g, '<a href="/u/$1" class="mention-link">@$1</a>');
         }
 
-        // Generate avatar HTML from handle
+        // A small initial beside the author's name
         function renderAvatar(handle, small = false) {
-            // Generate color from handle hash
-            let hash = 0;
-            for (let i = 0; i < handle.length; i++) {
-                hash = handle.charCodeAt(i) + ((hash << 5) - hash);
-            }
-            const hue = Math.abs(hash % 360);
-            const color = `hsl(${hue}, 65%, 45%)`;
-            const initial = handle.charAt(0).toUpperCase();
+            const initial = escapeHtml(String(handle).charAt(0).toUpperCase());
             const sizeClass = small ? 'avatar avatar-small' : 'avatar';
-            return `<span class="${sizeClass}" style="background: ${color}">${initial}</span>`;
+            return `<span class="${sizeClass}" aria-hidden="true">${initial}</span>`;
         }
 
         function formatPlatform(platform) {
@@ -1846,7 +1923,8 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
             if (seconds < 60) return 'in < 1 min';
             if (seconds < 3600) return `in ${Math.floor(seconds / 60)} min`;
-            return `in ${Math.floor(seconds / 3600)} hr`;
+            if (seconds < 172800) return `in ${Math.floor(seconds / 3600)} hr`;
+            return `in ${Math.floor(seconds / 86400)} days`;
         }
 
         function estimateTokens(text) {
@@ -1896,13 +1974,37 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
             urlInput.value = '';
             status.style.display = 'none';
-            status.className = 'modal-status';
+            status.className = 'modal-status r-status';
 
-            modal.classList.remove('hidden');
+            showModal('import-modal', 'import-url');
         }
 
         function closeImportModal() {
-            document.getElementById('import-modal').classList.add('hidden');
+            hideModal('import-modal');
+        }
+
+        // Dialogs: remember what had focus, keep Tab inside, and give focus back on close.
+        let modalReturnFocus = null;
+
+        function showModal(id, focusId) {
+            const modal = document.getElementById(id);
+            if (modal.classList.contains('hidden')) modalReturnFocus = document.activeElement;
+            modal.classList.remove('hidden');
+            const target = document.getElementById(focusId);
+            if (target) target.focus();
+        }
+
+        function hideModal(id) {
+            const modal = document.getElementById(id);
+            if (modal.classList.contains('hidden')) return;
+            modal.classList.add('hidden');
+            if (modalReturnFocus && modalReturnFocus.isConnected && modalReturnFocus !== document.body) modalReturnFocus.focus();
+            modalReturnFocus = null;
+        }
+
+        function closeOpenModal(modal) {
+            if (modal.id === 'claim-modal') closeClaimModal();
+            else closeImportModal();
         }
 
         async function importConversation() {
@@ -1915,15 +2017,15 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const key = keyInput.value.trim();
 
             if (!url) {
-                status.textContent = 'Please enter a URL';
-                status.className = 'modal-status error';
+                status.textContent = 'Paste a share link.';
+                status.className = 'modal-status r-status error';
                 status.style.display = 'block';
                 return;
             }
 
             if (!key) {
-                status.textContent = 'Please enter your identity key';
-                status.className = 'modal-status error';
+                status.textContent = 'Enter your Router key.';
+                status.className = 'modal-status r-status error';
                 status.style.display = 'block';
                 return;
             }
@@ -1932,7 +2034,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             saveKey(key);
 
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Importing...';
+            submitBtn.textContent = 'Importing…';
             status.style.display = 'none';
 
             try {
@@ -1945,11 +2047,11 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                 const data = await res.json();
 
                 if (!res.ok) {
-                    throw new Error(data.error || 'Failed to import conversation');
+                    throw new Error(data.error || 'Could not import the conversation. Check the link and try again.');
                 }
 
-                status.textContent = 'Conversation imported! It will appear in the feed after the staging delay.';
-                status.className = 'modal-status success';
+                status.textContent = 'Conversation imported. It is in the notebook now.';
+                status.className = 'modal-status r-status success';
                 status.style.display = 'block';
 
                 // Refresh feed to show the new conversation (if user owns it)
@@ -1960,7 +2062,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
             } catch (err) {
                 status.textContent = err.message;
-                status.className = 'modal-status error';
+                status.className = 'modal-status r-status error';
                 status.style.display = 'block';
             } finally {
                 submitBtn.disabled = false;
@@ -1968,11 +2070,33 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             }
         }
 
-        // Close modal on Escape or click outside
+        // A dialog closes on Escape or a click outside it, and keeps Tab inside while open
         document.addEventListener('keydown', (e) => {
+            const modal = document.querySelector('.modal-overlay:not(.hidden)');
+            if (!modal) return;
             if (e.key === 'Escape') {
-                closeImportModal();
+                closeOpenModal(modal);
+                return;
             }
+            if (e.key !== 'Tab') return;
+            const stops = [...modal.querySelectorAll('a[href], button:not([disabled]), input, textarea, select')];
+            if (stops.length === 0) return;
+            const first = stops[0];
+            const last = stops[stops.length - 1];
+            if (!modal.contains(document.activeElement)) {
+                e.preventDefault();
+                first.focus();
+            } else if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        });
+
+        document.addEventListener('mousedown', (e) => {
+            if (e.target.classList && e.target.classList.contains('modal-overlay')) closeOpenModal(e.target);
         });
 
         // Search functionality
@@ -2044,6 +2168,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const searchContainer = document.getElementById('search-container');
             const searchInput = document.getElementById('search-input');
             searchContainer.classList.add('expanded');
+            document.getElementById('search-btn').setAttribute('aria-expanded', 'true');
             setTimeout(() => searchInput.focus(), 200);
         }
 
@@ -2051,6 +2176,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const searchContainer = document.getElementById('search-container');
             const searchInput = document.getElementById('search-input');
             searchContainer.classList.remove('expanded');
+            document.getElementById('search-btn').setAttribute('aria-expanded', 'false');
             searchInput.blur();
         }
 
@@ -2058,14 +2184,14 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const feed = document.getElementById('feed');
 
             isSearchMode = true;
-            feed.innerHTML = '<div class="loading-state">Searching...</div>';
+            feed.innerHTML = '<div class="loading-state" role="status">Searching…</div>';
 
             try {
                 const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&limit=50`);
                 const data = await res.json();
 
                 if (data.results.length === 0) {
-                    feed.innerHTML = `<div class="empty-state">No entries found for "${escapeHtml(query)}"</div>`;
+                    feed.innerHTML = `<div class="empty-state" role="status">No notes found for "${escapeHtml(query)}".</div>`;
                     return;
                 }
 
@@ -2076,7 +2202,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                 }
             } catch (err) {
                 console.error('Search failed:', err);
-                feed.innerHTML = '<div class="error-state">Search failed</div>';
+                feed.innerHTML = '<div class="error-state" role="alert">Search failed. Check your connection and try again.</div>';
             }
         }
 
@@ -2091,7 +2217,17 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
         function toggleVerifyMenu() {
             const menu = document.getElementById('verify-menu');
-            menu.classList.toggle('open');
+            setMenuOpen(menu, !menu.classList.contains('open'));
+        }
+
+        // Open or close a sidebar menu and tell its button, which sits just before it
+        function setMenuOpen(menu, open) {
+            const btn = menu.previousElementSibling;
+            menu.classList.toggle('open', open);
+            if (btn) {
+                btn.classList.toggle('menu-open', open);
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }
         }
 
         async function verifyWithClaude() {
@@ -2117,26 +2253,21 @@ Steps:
 4. Check the Phala Trust Center for the hardware attestation: ${data.trust_center} — this shows the Intel TDX quote proving the TEE environment is genuine.
 5. Report exactly what you find. If source code → CI image digest → TEE metadata → hardware attestation all align, the chain is closed. If anything doesn't match, report it as a finding. Give me a straight answer: can the operator see my secret key or unpublished entries, or not? What are the actual trust boundaries?`;
 
-                const menu = document.getElementById('verify-menu');
-                menu.classList.remove('open');
+                setMenuOpen(document.getElementById('verify-menu'), false);
                 window.open(`https://claude.ai/new?q=${encodeURIComponent(prompt)}`, '_blank');
             } catch (err) {
-                showJoinStatus('Failed to fetch attestation data', 'error', 3000);
+                showError('Could not fetch the attestation. Try again.');
             }
         }
 
         function toggleOnboardMenu() {
             const menu = document.getElementById('onboard-menu');
-            const btn = menu.previousElementSibling;
-            menu.classList.toggle('open');
-            btn.classList.toggle('menu-open');
+            setMenuOpen(menu, !menu.classList.contains('open'));
         }
 
         async function startOnboarding(mode) {
             const menu = document.getElementById('onboard-menu');
-            const btn = menu.previousElementSibling;
-            menu.classList.remove('open');
-            btn.classList.remove('menu-open');
+            setMenuOpen(menu, false);
             try {
                 const res = await fetch(`/api/tutorial?client=${mode}`);
                 const data = await res.json();
@@ -2145,11 +2276,10 @@ Steps:
                     window.open(`https://claude.ai/new?q=${encoded}`, '_blank');
                 } else if (mode === 'code') {
                     await navigator.clipboard.writeText(data.prompt);
-                    const copyBtn = menu.querySelector('button:nth-child(2)');
+                    const copyBtn = menu.querySelector('[data-onboard="code"]');
                     const orig = copyBtn.textContent;
-                    copyBtn.textContent = 'Copied!';
-                    menu.classList.add('open');
-                    btn.classList.add('menu-open');
+                    copyBtn.textContent = 'Copied. Paste it into your agent.';
+                    setMenuOpen(menu, true);
                     setTimeout(() => { copyBtn.textContent = orig; }, 2000);
                 }
             } catch (err) {
@@ -2161,17 +2291,15 @@ Steps:
         document.addEventListener('click', (e) => {
             if (!e.target.closest('.verify-wrapper')) {
                 const menu = document.getElementById('verify-menu');
-                if (menu) menu.classList.remove('open');
+                if (menu) setMenuOpen(menu, false);
             }
             if (!e.target.closest('.onboard-wrapper')) {
                 const menu = document.getElementById('onboard-menu');
-                if (menu) {
-                    menu.classList.remove('open');
-                    menu.previousElementSibling.classList.remove('menu-open');
-                }
+                if (menu) setMenuOpen(menu, false);
             }
         });
 
+        setupAbout();
         init();
         setupSearch();
     

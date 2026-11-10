@@ -43,8 +43,11 @@ export async function confirmOwnerRecovery(privateKey, prepared) {
   } finally { bytes.fill(0); }
 }
 const backupAAD = utf8('teleport-router/account-backup/v1');
+const wrongPassword = 'That password did not open the recovery file. Check it and try again.';
 async function passwordKey(password, salt, usage) {
-  if (typeof password !== 'string' || password.length < 12 || password.length > 1024) throw Error('Use a recovery password with at least 12 characters.');
+  // Every recovery file was made with a password of 12 to 1024 characters, so anything else cannot open one.
+  // Say that, not the advice for choosing a new password.
+  if (typeof password !== 'string' || password.length < 12 || password.length > 1024) throw Error(usage === 'decrypt' ? wrongPassword : 'Use a recovery password with at least 12 characters.');
   const key = await crypto.subtle.importKey('raw', utf8(password), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' }, key, { name: 'AES-GCM', length: 256 }, false, [usage]);
 }
@@ -68,5 +71,5 @@ export async function decryptBackup(envelope, password) {
   const key = await passwordKey(password, unb64(envelope.salt, 16), 'decrypt');
   try {
     return validateBackup(JSON.parse(text(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(envelope.nonce, 12), additionalData: backupAAD }, key, unb64(envelope.ciphertext)))));
-  } catch { throw Error('Could not unlock this recovery file. Check the password and file.'); }
+  } catch { throw Error(wrongPassword + ' If the password is right, the file may be damaged.'); }
 }

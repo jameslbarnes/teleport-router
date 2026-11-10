@@ -49,6 +49,9 @@ COPY posting-rules.html posting-rules.js sharing-notice.js safe-html.js /app/
 # Pinned local copies of the markdown renderer and HTML sanitizer: pages load no third-party script.
 COPY vendor/ /app/vendor/
 COPY group-setup.html group-setup.css /app/
+# The shared stylesheet, the icon and the self-hosted fonts every page uses.
+COPY router.css favicon.svg verify-email.html unsubscribe.html /app/
+COPY assets/ /app/assets/
 COPY --from=setup-builder /app/onboarding-assets/ /app/onboarding-assets/
 
 # Copy Astro-built index + static assets

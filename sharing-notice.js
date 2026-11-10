@@ -3,14 +3,22 @@ window.showRouterSharingNotice = async function (receipt, key) {
     if (!receipt) return;
     const card = document.createElement('aside');
     card.setAttribute('role', 'status');
-    card.style.cssText = 'position:fixed;z-index:1000;bottom:16px;left:50%;transform:translateX(-50%);width:min(560px,calc(100% - 32px));max-height:70vh;overflow:auto;box-sizing:border-box;background:#fff;color:#222;border:1px solid #bbb;border-radius:8px;padding:20px;box-shadow:0 4px 24px #0002;font:15px/1.5 system-ui';
+    // Colours, type and the Close button come from /router.css, which every page that shows this card loads.
+    // The system colours after each comma only apply if a page forgets it, so the card never turns see-through.
+    card.className = 'r-card';
+    card.style.cssText = 'position:fixed;z-index:1000;bottom:var(--s-4,16px);left:50%;transform:translateX(-50%);width:min(560px,calc(100% - 32px));max-height:70vh;overflow:auto;box-sizing:border-box;background:var(--surface,Canvas);color:var(--fg,CanvasText);border:1px solid var(--border-strong,GrayText);border-radius:var(--r-md,8px);padding:var(--s-5,24px);font-family:var(--font-ui,system-ui);font-size:var(--t-sm,0.875rem);line-height:1.5';
     const title = document.createElement('strong'); title.textContent = 'Saved to Router';
+    title.style.cssText = 'display:block;font-size:var(--t-base,1rem);font-weight:600';
     const audience = document.createElement('p'); audience.textContent = 'Audience: ' + receipt.audience;
-    const text = document.createElement('p'); text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere'; text.textContent = receipt.content;
-    const status = document.createElement('p');
+    audience.style.cssText = 'margin:var(--s-1,4px) 0 0;color:var(--fg-muted,GrayText);overflow-wrap:anywhere';
+    const text = document.createElement('p'); text.textContent = receipt.content;
+    text.style.cssText = 'margin:var(--s-3,12px) 0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-read,serif);font-size:var(--t-base,1rem);line-height:1.6';
+    const status = document.createElement('p'); status.style.cssText = 'margin:0;color:var(--fg-muted,GrayText)';
+    const actions = document.createElement('div'); actions.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-4,16px);margin-top:var(--s-4,16px)';
     const link = document.createElement('a'); link.href = receipt.review_url; link.textContent = 'Review or delete';
-    const close = document.createElement('button'); close.textContent = 'Close'; close.style.marginLeft = '24px'; close.onclick = () => card.remove();
-    card.append(title, audience, text, status, link, close); document.body.append(card);
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'r-btn r-btn--small'; close.textContent = 'Close'; close.onclick = () => card.remove();
+    actions.append(link, close);
+    card.append(title, audience, text, status, actions); document.body.append(card);
     const showStatus = () => { status.textContent = receipt.state === 'held' ? 'Held for review.'
         : receipt.state === 'awaiting_notice' ? `Private for now. The ${receipt.delay_after_notice_ms / 60000}-minute publication countdown starts after this notice is recorded.`
         : receipt.publish_at ? 'Scheduled to publish ' + new Date(receipt.publish_at).toLocaleString(undefined, { timeZoneName: 'short' }) + '.' : 'Published.'; };

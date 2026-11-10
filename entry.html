@@ -3,276 +3,199 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Entry - Router</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+    <title>Note · Router</title>
+    <meta name="description" content="One note from the Router notebook, with its replies.">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/router.css?v=1">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        :root {
-            --bg: #faf9f7;
-            --surface: #ffffff;
-            --border: #e8e6e3;
-            --fg: #1a1a1a;
-            --fg-muted: #6b6b6b;
-            --accent: #7c5cbf;
-        }
-
-        body {
-            font-family: 'Newsreader', Georgia, serif;
-            background: var(--bg);
-            color: var(--fg);
-            min-height: 100vh;
-            padding: 2rem;
-        }
-
-        .container {
-            max-width: 700px;
-            margin: 0 auto;
-        }
-
-        .back-link {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
-            color: var(--fg-muted);
-            text-decoration: none;
-            margin-bottom: 2rem;
-            display: inline-block;
-        }
-
-        .back-link:hover {
-            color: var(--fg);
-        }
-
         .entry {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
+            margin-bottom: var(--s-5);
         }
 
         .entry-meta {
             display: flex;
             align-items: center;
             flex-wrap: wrap;
-            gap: 0.5rem;
-            margin-bottom: 1rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
+            gap: var(--s-2);
+            margin-bottom: var(--s-4);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
             color: var(--fg-muted);
         }
 
-        .entry-permalink {
-            margin-top: 1rem;
-            padding-top: 0.75rem;
-            border-top: 1px solid var(--border);
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.55rem;
-            align-items: center;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.72rem;
+        .entry-meta a {
             color: var(--fg-muted);
-        }
-
-        .entry-permalink a {
-            color: var(--accent);
             text-decoration: none;
         }
 
-        .entry-permalink a:hover {
+        .entry-meta a:hover {
+            color: var(--fg);
             text-decoration: underline;
         }
 
-        .copy-link-action {
-            background: none;
-            border: none;
-            color: var(--fg-muted);
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.72rem;
-            cursor: pointer;
-            opacity: 0.75;
-            padding: 0;
-        }
-
-        .copy-link-action:hover {
-            opacity: 1;
-            color: var(--accent);
-        }
-
+        .entry-meta .entry-author,
         .entry-author {
             color: var(--accent);
             text-decoration: none;
             font-weight: 500;
         }
 
-        .entry-author:hover {
+        a.entry-author:hover {
             text-decoration: underline;
         }
 
         .entry-content {
-            font-size: 1.1rem;
+            font-family: var(--font-read);
+            font-size: var(--t-read);
             line-height: 1.7;
             overflow-wrap: anywhere;
         }
 
-        .entry-content pre { overflow-x: auto; }
-        .entry-permalink { overflow-wrap: anywhere; }
-        .manage-post {
-            border-top: 1px solid var(--border);
-            margin-top: 1rem;
-            padding-top: 1rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.8rem;
-            line-height: 1.7;
-            overflow-wrap: anywhere;
+        .entry-content pre {
+            overflow-x: auto;
         }
-        .manage-post button, .manage-post input {
-            font: inherit;
-            padding: 0.5rem 0.75rem;
-            margin-top: 0.5rem;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            background: var(--surface);
-            color: var(--fg);
-            max-width: 100%;
-        }
-        .manage-post button { cursor: pointer; }
-        .manage-post button:disabled { opacity: 0.5; cursor: default; }
-        .manage-post .delete-post { color: #a32323; border-color: #a32323; }
-        .manage-post input { width: 100%; }
-        .manage-post label { display: block; }
 
         .entry-content p {
-            margin-bottom: 1rem;
+            margin: 0 0 var(--s-4);
         }
 
         .entry-content p:last-child {
             margin-bottom: 0;
         }
 
-        .loading, .error {
-            text-align: center;
-            padding: 3rem;
+        .entry-permalink {
+            margin-top: var(--s-4);
+            padding-top: var(--s-3);
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--s-3);
+            align-items: center;
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
+            color: var(--fg-muted);
+            overflow-wrap: anywhere;
+        }
+
+        .copy-link-action {
+            background: none;
+            border: 0;
+            padding: 0;
+            color: var(--accent);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
+            cursor: pointer;
+        }
+
+        .copy-link-action:hover {
+            text-decoration: underline;
+        }
+
+        /* The owner's view: what state the note is in, who can read it, and what they can do. */
+        .manage-post {
+            border-top: 1px solid var(--border);
+            margin-top: var(--s-4);
+            padding-top: var(--s-4);
+            font-family: var(--font-ui);
+            font-size: var(--t-sm);
+            line-height: 1.6;
+            overflow-wrap: anywhere;
+        }
+
+        .manage-post p {
+            margin: 0 0 var(--s-2);
+        }
+
+        .manage-post .r-badge {
+            margin-right: var(--s-1);
+            white-space: normal;
+        }
+
+        .manage-post .r-actions {
+            margin: var(--s-4) 0 var(--s-2);
+        }
+
+        .manage-detail {
             color: var(--fg-muted);
         }
 
+        .manage-signin {
+            margin-bottom: var(--s-6);
+        }
+
+        .manage-signin .r-label {
+            margin-top: 0;
+            font-weight: 400;
+        }
+
+        .manage-signin .r-btn {
+            margin-top: var(--s-3);
+        }
+
+        .loading {
+            padding: var(--s-7) 0;
+            text-align: center;
+        }
+
         .error {
-            color: #c53030;
+            padding: var(--s-6) 0;
+            font-family: var(--font-ui);
+            font-size: var(--t-base);
+            color: var(--danger);
+        }
+
+        .error p {
+            margin: 0 0 var(--s-3);
         }
 
         /* Reply form */
         .reply-section {
-            margin-bottom: 2rem;
-        }
-
-        .reply-section h3 {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: var(--fg-muted);
-            margin-bottom: 0.75rem;
+            margin-bottom: var(--s-6);
         }
 
         .reply-form {
             position: relative;
         }
 
-        .reply-form textarea {
-            width: 100%;
-            padding: 0.75rem;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            font-family: inherit;
-            font-size: 0.95rem;
-            background: var(--surface);
-            color: var(--fg);
-            resize: vertical;
-            min-height: 80px;
-            line-height: 1.5;
-        }
-
-        .reply-form textarea:focus {
-            outline: none;
-            border-color: var(--accent);
+        .reply-form .r-label {
+            margin-top: 0;
         }
 
         .reply-form-actions {
             display: flex;
-            gap: 0.75rem;
+            flex-wrap: wrap;
+            gap: var(--s-3);
             align-items: center;
-            margin-top: 0.5rem;
-        }
-
-        .reply-form .submit-btn {
-            padding: 0.5rem 1rem;
-            border-radius: 4px;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.8rem;
-            cursor: pointer;
-            background: var(--accent);
-            border: none;
-            color: white;
-            transition: opacity 0.2s;
-        }
-
-        .reply-form .submit-btn:hover {
-            opacity: 0.9;
-        }
-
-        .reply-form .submit-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
+            margin-top: var(--s-3);
         }
 
         .reply-signin {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.8rem;
+            font-family: var(--font-ui);
+            font-size: var(--t-sm);
             color: var(--fg-muted);
-        }
-
-        .reply-signin a {
-            color: var(--accent);
         }
 
         /* Replies list */
         .replies-section {
-            margin-bottom: 2rem;
+            margin-bottom: var(--s-6);
         }
 
-        .replies-section h3 {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: var(--fg-muted);
-            margin-bottom: 0.75rem;
+        .replies-section h2 {
+            margin-bottom: var(--s-3);
         }
 
         .reply-entry {
-            background: var(--surface);
-            border: 1px solid #dfd9ef;
-            border-left: 3px solid var(--accent);
-            border-radius: 6px;
-            padding: 1rem 1.25rem;
-            margin-bottom: 0.75rem;
+            border-left: 2px solid var(--border-strong);
+            padding: var(--s-2) 0 var(--s-2) var(--s-4);
+            margin-bottom: var(--s-5);
         }
 
         .reply-entry .entry-meta {
-            margin-bottom: 0.5rem;
+            margin-bottom: var(--s-2);
         }
 
         .reply-entry .entry-content {
-            font-size: 1rem;
+            font-size: var(--t-base);
             line-height: 1.6;
         }
 
@@ -281,9 +204,8 @@
             bottom: 100%;
             left: 0;
             background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-sm);
             display: none;
             z-index: 100;
             min-width: 200px;
@@ -294,14 +216,20 @@
         }
 
         .mention-option {
-            padding: 0.5rem 0.75rem;
+            display: block;
+            width: 100%;
+            padding: var(--s-2) var(--s-3);
+            border: 0;
+            background: none;
+            color: var(--fg);
+            text-align: left;
             cursor: pointer;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.8rem;
+            font-family: var(--font-mono);
+            font-size: var(--t-sm);
         }
 
         .mention-option:hover, .mention-option.selected {
-            background: var(--bg);
+            background: var(--surface-sunk);
         }
 
         .mention-option .handle {
@@ -310,23 +238,34 @@
 
         .mention-option .name {
             color: var(--fg-muted);
-            margin-left: 0.5rem;
-        }
-
-        @media (max-width: 600px) {
-            body {
-                padding: 1rem;
-            }
+            margin-left: var(--s-2);
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <a href="/" class="back-link">&larr; Back to journal</a>
+    <main class="r-page">
+        <header class="r-header">
+            <a class="r-brand" href="/">Router</a>
+            <nav class="r-nav" aria-label="Main">
+                <a href="/">Notebook</a>
+                <a href="/connect">Connect</a>
+                <a href="/posting-rules">Posting rules</a>
+                <a href="/settings">Settings</a>
+                <a href="/docs">Docs</a>
+            </nav>
+        </header>
+
         <div id="content">
-            <div class="loading">Loading entry...</div>
+            <p class="r-status loading" role="status">Loading the note…</p>
         </div>
-    </div>
+
+        <footer class="r-footer">
+            <a href="/docs">How Router works</a>
+            <a href="/prompt">What agents are told</a>
+            <a href="/api/attestation">Attestation</a>
+            <a href="https://github.com/jameslbarnes/teleport-router" rel="noopener">Source</a>
+        </footer>
+    </main>
 
     <script src="/sharing-notice.js"></script>
     <script>
@@ -359,6 +298,20 @@
             });
         }
 
+        // The page title is the note's first words, as plain text.
+        function titleFromNote(content) {
+            const words = String(content ?? '')
+                .replace(/[`*_~]+/g, '')
+                .replace(/^[\s#>\-]+/, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!words) return 'Note · Router';
+            if (words.length <= 60) return `${words} · Router`;
+            const cut = words.slice(0, 60);
+            const lastSpace = cut.lastIndexOf(' ');
+            return `${(lastSpace > 30 ? cut.slice(0, lastSpace) : cut).replace(/[\s.,;:!?]+$/, '')}… · Router`;
+        }
+
         function getPermalinkUrl(id) {
             return `${window.location.origin}/e/${encodeURIComponent(id)}`;
         }
@@ -379,12 +332,18 @@
             }
             if (trigger && trigger.textContent) {
                 const original = trigger.textContent;
-                trigger.textContent = 'copied';
+                trigger.textContent = 'Copied';
                 setTimeout(() => {
                     trigger.textContent = original;
                 }, 900);
             }
         }
+
+        // Copy buttons carry the note's id as data, not as inline script.
+        document.getElementById('content').addEventListener('click', event => {
+            const trigger = event.target.closest('.copy-link-action');
+            if (trigger && trigger.dataset.copyId) copyPermalink(trigger.dataset.copyId, trigger);
+        });
 
         function formatTime(ts) {
             const date = new Date(ts);
@@ -403,52 +362,92 @@
                 ? `<a href="/u/${encodeURIComponent(entry.handle)}" class="entry-author">@${escapeHtml(entry.handle)}</a>`
                 : `<span class="entry-author">${escapeHtml(entry.pseudonym)}</span>`;
             const parentLink = entry.inReplyTo
-                ? `<a href="/e/${escapeHtml(entry.inReplyTo)}">in reply to ${escapeHtml(entry.inReplyTo)}</a>`
+                ? `<a href="/e/${encodeURIComponent(entry.inReplyTo)}">In reply to another note</a>`
                 : '';
             const permalink = getPermalinkUrl(entry.id);
 
             let html = `
-                <div class="entry">
+                <article class="r-card entry">
                     <div class="entry-meta">
                         ${authorLink}
-                        <span>&middot;</span>
-                        <span>${formatDate(entry.timestamp)}</span>
+                        <span aria-hidden="true">&middot;</span>
+                        <span>${escapeHtml(formatDate(entry.timestamp))}</span>
                     </div>
                     <div class="entry-content">${entry.contentHtml ?? escapeHtml(entry.content)}</div>
                     ${renderManagement(entry)}
                     <div class="entry-permalink">
-                        <a href="/e/${entry.id}">permalink</a>
-                        <button class="copy-link-action" onclick="copyPermalink('${entry.id}', this)">copy link</button>
+                        <button type="button" class="copy-link-action" data-copy-id="${escapeHtml(entry.id)}">Copy link</button>
                         <span>${escapeHtml(permalink)}</span>
                         ${parentLink}
                     </div>
-                </div>
+                </article>
             `;
 
             return html;
         }
 
+        // One badge and one sentence for each state the receipt can be in.
+        function describeState(receipt) {
+            if (receipt.state === 'awaiting_notice') {
+                return { badge: 'Waiting for notice', badgeClass: 'r-badge r-badge--waiting',
+                    sentence: 'Private until your agent records that it showed you this notice.' };
+            }
+            if (receipt.state === 'held') {
+                return { badge: 'Held for review', badgeClass: 'r-badge r-badge--held',
+                    sentence: 'It will not publish until a moderator releases it or you delete it.' };
+            }
+            if (receipt.state === 'pending') {
+                return { badge: 'Waiting', badgeClass: 'r-badge r-badge--waiting',
+                    sentence: receipt.publish_at
+                        ? `Only you can read this until it publishes at ${formatDate(receipt.publish_at)}.`
+                        : 'Only you can read this until it publishes.' };
+            }
+            if (receipt.state === 'removed') {
+                return { badge: 'Removed', badgeClass: 'r-badge', sentence: 'It will not publish.' };
+            }
+            return { badge: 'Published', badgeClass: 'r-badge r-badge--ok', sentence: 'Anyone with access can read it.' };
+        }
+
+        // Until a note publishes, only its author can read it, so the audience is still to come.
+        function audienceLabel(receipt) {
+            return ['awaiting_notice', 'pending', 'held'].includes(receipt.state)
+                ? 'Who will be able to read it:'
+                : 'Who can read it:';
+        }
+
+        function describeAudience(receipt) {
+            const destinations = Array.isArray(receipt.destinations) ? receipt.destinations : [];
+            if (destinations.length) {
+                return destinations.map(destination => `<span class="r-badge r-badge--private">${escapeHtml(destination)}</span>`).join(' ');
+            }
+            if (/^Only you/.test(String(receipt.audience ?? ''))) {
+                return '<span class="r-badge r-badge--private">Only you</span>';
+            }
+            return 'Public: anyone on the internet';
+        }
+
         function renderManagement(entry) {
             if (!entry.canDelete || !entry.sharingReceipt) return '';
             const receipt = entry.sharingReceipt;
-            const status = receipt.state === 'awaiting_notice' ? 'Only you can see this. Waiting for your agent to record delivery of the sharing notice; the publication countdown has not started.'
-                : receipt.state === 'held' ? 'Held for review. It will not publish automatically.'
-                : receipt.state === 'pending' ? `Only you can see this now. Scheduled to publish ${formatDate(receipt.publish_at)}.`
-                : 'Published.';
+            const state = describeState(receipt);
+            const evidence = receipt.notification_evidence;
             return `<div class="manage-post" id="manage">
-                <p><strong>Audience:</strong> ${escapeHtml(receipt.audience)}</p>
-                <p id="sharing-status">${escapeHtml(status)}</p>
-                ${receipt.notification_evidence ? `<p>Notice delivery: ${receipt.notification_evidence.kind === 'agent_reported' ? 'reported by your agent' : 'reported by this browser'} at ${escapeHtml(formatDate(receipt.notification_evidence.recorded_at))}. This is not independent proof that you read it.</p>` : ''}
-                <button class="delete-post" id="delete-post">Delete post</button>
-                <p id="delete-result" role="status" aria-live="polite"></p>
+                <p id="sharing-status"><span class="${state.badgeClass}">${escapeHtml(state.badge)}</span> ${escapeHtml(state.sentence)}</p>
+                <p id="sharing-audience"><strong>${audienceLabel(receipt)}</strong> ${describeAudience(receipt)}</p>
+                ${evidence ? `<p class="manage-detail">Notice shown: ${evidence.kind === 'agent_reported' ? 'reported by your agent' : 'reported by this browser'} at ${escapeHtml(formatDate(evidence.recorded_at))}. This is not independent proof that you read it.</p>` : ''}
+                <div class="r-actions">
+                    ${receipt.state === 'pending' ? '<button type="button" class="r-btn publish-post" id="publish-post">Publish now</button>' : ''}
+                    <button type="button" class="r-btn r-btn--danger delete-post" id="delete-post">Delete this note</button>
+                </div>
+                <p class="r-status" id="delete-result" role="status" aria-live="polite"></p>
             </div>`;
         }
 
-        function renderSignIn() {
-            return `<form class="manage-post" id="manage-signin">
-                <label for="identity-key">Sign in with your existing Router key to review or delete your posts.</label>
-                <input type="password" id="identity-key" autocomplete="off" required placeholder="Your Router key">
-                <button type="submit">Sign in</button>
+        function renderSignIn(label = 'If this is your note, sign in with your Router key to manage or delete it.') {
+            return `<form class="manage-signin" id="manage-signin">
+                <label class="r-label" for="identity-key">${escapeHtml(label)}</label>
+                <input class="r-input r-input--mono" type="password" id="identity-key" autocomplete="off" required placeholder="Your Router key">
+                <button type="submit" class="r-btn">Sign in</button>
             </form>`;
         }
 
@@ -465,20 +464,44 @@
         }
 
         async function deletePost() {
-            if (!confirm('Delete this post from Router?')) return;
+            if (!confirm('Delete this note? This cannot be undone.')) return;
             const button = document.getElementById('delete-post');
             const result = document.getElementById('delete-result');
             button.disabled = true;
+            result.className = 'r-status';
             result.textContent = 'Deleting…';
             try {
                 const response = await fetch(`/api/entries/${encodeURIComponent(entryId)}`, { ...readOptions(), method: 'DELETE' });
                 if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.error || 'Could not delete this post. Please try again.');
+                    const data = await response.json().catch(() => ({}));
+                    throw new Error(data.error || 'Could not delete this note. Try again.');
                 }
-                document.getElementById('content').innerHTML = '<div class="entry" role="status"><p>Deleted from Router.</p><p><a href="/">Back to journal</a></p></div>';
+                document.title = 'Note deleted · Router';
+                document.getElementById('content').innerHTML = '<div class="r-card entry" role="status"><p>This note is deleted.</p><p><a href="/">Open the notebook</a></p></div>';
             } catch (error) {
-                result.textContent = error.message || 'Could not delete this post. Please try again.';
+                result.className = 'r-status r-status--error';
+                result.textContent = error.message || 'Could not delete this note. Try again.';
+                button.disabled = false;
+            }
+        }
+
+        async function publishPost() {
+            if (!confirm('Publish this note now? It will stop waiting and its readers can see it straight away.')) return;
+            const button = document.getElementById('publish-post');
+            const result = document.getElementById('delete-result');
+            button.disabled = true;
+            result.className = 'r-status';
+            result.textContent = 'Publishing…';
+            try {
+                const response = await fetch(`/api/entries/${encodeURIComponent(entryId)}/publish`, { ...readOptions(), method: 'POST' });
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    throw new Error(data.error || 'Could not publish this note. Try again.');
+                }
+                await loadEntry();
+            } catch (error) {
+                result.className = 'r-status r-status--error';
+                result.textContent = error.message || 'Could not publish this note. Try again.';
                 button.disabled = false;
             }
         }
@@ -574,10 +597,10 @@
         function showMentionDropdown(dropdown, users) {
             if (users.length === 0) { hideMentionDropdown(dropdown); return; }
             dropdown.innerHTML = users.map((user, i) => `
-                <div class="mention-option ${i === 0 ? 'selected' : ''}" data-handle="${user.handle}">
+                <button type="button" tabindex="-1" class="mention-option ${i === 0 ? 'selected' : ''}" data-handle="${escapeHtml(user.handle)}">
                     <span class="handle">@${escapeHtml(user.handle)}</span>
                     ${user.displayName ? `<span class="name">${escapeHtml(user.displayName)}</span>` : ''}
-                </div>
+                </button>
             `).join('');
             dropdown.querySelectorAll('.mention-option').forEach((option, i) => {
                 option.addEventListener('click', () => {
@@ -620,18 +643,19 @@
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
                 return `<div class="reply-section">
-                    <div class="reply-signin">
-                        <a href="/setup.html">Get an identity key</a> to reply to entries.
-                    </div>
+                    <p class="reply-signin">
+                        <a href="/join">Get a Router key</a> to reply to notes.
+                    </p>
                 </div>`;
             }
 
             return `<div class="reply-section">
-                <h3>Reply</h3>
                 <div class="reply-form" id="reply-form">
-                    <textarea id="reply-textarea" placeholder="Write a reply..."></textarea>
+                    <label class="r-label" for="reply-textarea">Reply</label>
+                    <textarea class="r-textarea" id="reply-textarea" placeholder="Type @ to mention someone"></textarea>
                     <div class="reply-form-actions">
-                        <button class="submit-btn" id="reply-submit-btn">Reply</button>
+                        <button type="button" class="r-btn r-btn--primary submit-btn" id="reply-submit-btn">Post reply</button>
+                        <span class="r-status" id="reply-status" role="status"></span>
                     </div>
                 </div>
             </div>`;
@@ -640,26 +664,33 @@
         function renderReplies(replies) {
             if (replies.length === 0) return '';
             return `<div class="replies-section">
-                <h3>Replies (${replies.length})</h3>
+                <h2 class="r-eyebrow">Replies (${replies.length})</h2>
                 ${replies.map(reply => {
                     const authorLink = reply.handle
-                        ? `<a href="/u/${escapeHtml(reply.handle)}" class="entry-author">@${escapeHtml(reply.handle)}</a>`
+                        ? `<a href="/u/${encodeURIComponent(reply.handle)}" class="entry-author">@${escapeHtml(reply.handle)}</a>`
                         : `<span class="entry-author">${escapeHtml(reply.pseudonym || '')}</span>`;
                     const content = reply.contentHtml ?? escapeHtml(reply.content || '');
                     return `
                         <div class="reply-entry">
                             <div class="entry-meta">
                                 ${authorLink}
-                                <span>&middot;</span>
-                                <a href="/e/${reply.id}" style="color: var(--fg-muted); text-decoration: none;" title="${escapeHtml(formatDate(reply.timestamp))}">permalink · ${formatTime(reply.timestamp)}</a>
-                                <span>&middot;</span>
-                                <button class="copy-link-action" onclick="copyPermalink('${reply.id}', this)">copy link</button>
+                                <span aria-hidden="true">&middot;</span>
+                                <a href="/e/${encodeURIComponent(reply.id)}" title="${escapeHtml(formatDate(reply.timestamp))}">${escapeHtml(formatTime(reply.timestamp))}</a>
+                                <span aria-hidden="true">&middot;</span>
+                                <button type="button" class="copy-link-action" data-copy-id="${escapeHtml(reply.id)}">Copy link</button>
                             </div>
                             <div class="entry-content">${content}</div>
                         </div>
                     `;
                 }).join('')}
             </div>`;
+        }
+
+        function showReplyStatus(message, isError) {
+            const status = document.getElementById('reply-status');
+            if (!status) return;
+            status.className = isError ? 'r-status r-status--error' : 'r-status';
+            status.textContent = message;
         }
 
         async function submitReply() {
@@ -669,13 +700,14 @@
 
             const effectiveKey = getEffectiveKey();
             if (!effectiveKey) {
-                alert('No identity key found');
+                showReplyStatus('You are signed out. Sign in with your Router key, then post the reply again.', true);
                 return;
             }
 
             const btn = document.getElementById('reply-submit-btn');
             btn.disabled = true;
-            btn.textContent = 'Sending...';
+            btn.textContent = 'Posting…';
+            showReplyStatus('', false);
 
             try {
                 const res = await fetch('/api/entries', {
@@ -694,19 +726,19 @@
                     void window.showRouterSharingNotice(saved.receipt, effectiveKey);
                     textarea.value = '';
                     btn.disabled = false;
-                    btn.textContent = 'Reply';
+                    btn.textContent = 'Post reply';
                     // Reload replies
                     await loadReplies();
                 } else {
-                    const data = await res.json();
-                    alert(data.error || 'Failed to post reply');
+                    const data = await res.json().catch(() => ({}));
+                    showReplyStatus(data.error || 'Could not post the reply. Your text is still here: try again.', true);
                     btn.disabled = false;
-                    btn.textContent = 'Reply';
+                    btn.textContent = 'Post reply';
                 }
             } catch (err) {
-                alert('Failed to post reply');
+                showReplyStatus('Could not post the reply. Your text is still here: try again.', true);
                 btn.disabled = false;
-                btn.textContent = 'Reply';
+                btn.textContent = 'Post reply';
             }
         }
 
@@ -733,7 +765,7 @@
                 }
                 const entry = await response.json();
 
-                document.title = `${entry.handle || entry.pseudonym} - Router`;
+                document.title = titleFromNote(entry.content);
 
                 // Fetch replies
                 let replies = [];
@@ -752,6 +784,7 @@
                     `<div id="replies-container">${renderReplies(replies)}</div>`;
 
                 document.getElementById('delete-post')?.addEventListener('click', deletePost);
+                document.getElementById('publish-post')?.addEventListener('click', publishPost);
                 wireSignIn();
 
                 // Wire up reply form
@@ -765,13 +798,19 @@
                 if (replyTextarea) {
                     initMentions(replyTextarea);
                 }
+
+                // The note arrives after the page: bring the owner's controls into view when the link asked for them.
+                if (window.location.hash === '#manage') {
+                    document.getElementById('manage')?.scrollIntoView();
+                }
             } catch (err) {
+                document.title = 'Note · Router';
                 document.getElementById('content').innerHTML = `
-                    <div class="error">
-                        <p>This note is unavailable, or you need to sign in with a group member's Router account.</p>
-                        <p><a href="/">Open Router</a></p>
+                    <div class="error" role="alert">
+                        <p>This note is not available. It may have been deleted, it may still be waiting to publish, or it may be addressed to people or a group you are not signed in as.</p>
+                        <p><a href="/">Open the notebook</a></p>
                     </div>
-                    ${renderSignIn()}
+                    ${renderSignIn('Sign in with your Router key to read notes that are yours, or addressed to you or your groups.')}
                 `;
                 wireSignIn();
             }

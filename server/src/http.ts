@@ -1601,14 +1601,16 @@ ${truncatedContent}`
 }
 
 const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'application/javascript',
-  '.json': 'application/json',
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.md': 'text/plain; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.txt': 'text/plain; charset=utf-8',
+  '.woff2': 'font/woff2',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -9172,7 +9174,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         filePath = '/group-setup.html';
       } else if (filePath === '/setup/cli') {
         filePath = '/join.html';
-      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/tutorial', '/cohort', '/posting-rules', '/docs'].includes(filePath)) {
+      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe'].includes(filePath)) {
         filePath = `${filePath}.html`;
       }
 

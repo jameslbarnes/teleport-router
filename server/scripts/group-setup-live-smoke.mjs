@@ -94,7 +94,6 @@ try {
   await page.locator('#save').click();
   await page.locator('#status').filter({ hasText: 'Saved' }).waitFor();
   await page.getByRole('link', { name: 'Continue group setup' }).click();
-  await page.locator('#rules-next').click();
   await page.locator('#ready').waitFor();
   console.log('PASS browser confirms the actual Discord identity and saves private-group rules through the existing editor');
   const operated = await api('/api/discord/operate', { ...actor, grant: paired.grant, action: 'save', content: 'Synthetic browser onboarding note', interactionId: '100000000000000010' }, botKey);

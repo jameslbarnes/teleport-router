@@ -6,6 +6,7 @@ const screens = ['account', 'storage', 'discord', 'rules', 'ready'];
 let groupId = params.get('group'), invite = params.get('channelinvite'), key = localStorage.getItem('router_key');
 let identity, context, storage, discord, rules, backup, envelope, step = 0, busy = false;
 let pairing;
+const retryText = 'This step did not finish. Try again.';
 function capturePairing() {
   const candidate = new URLSearchParams(location.hash.slice(1)).get('discord-pair');
   if (!candidate || !/^RD-PAIR-[A-Za-z0-9_-]{32}$/.test(candidate)) return false;
@@ -16,31 +17,32 @@ function capturePairing() {
 }
 capturePairing();
 try { const saved = JSON.parse(sessionStorage.getItem('router_setup_pair')); if (!pairing && saved?.group === groupId) pairing = saved.pairing; } catch {}
-const message = (value, error = false) => { $('status').textContent = value; $('status').classList.toggle('error', error); };
+const message = (value, error = false) => { $('status').textContent = value; $('status').classList.toggle('error', error); $('status').classList.toggle('r-status--error', error); };
 export async function request(path, body, credential = key) {
   const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', cache: 'no-store', redirect: 'error',
     headers: { ...(credential ? { Authorization: 'Bearer ' + credential } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30000) });
   const result = await response.json();
-  if (!response.ok) throw Object.assign(Error(result.error || 'This step could not finish. Please retry.'), { status: response.status });
+  if (!response.ok) throw Object.assign(Error(result.error || retryText), { status: response.status });
   return result;
 }
 function screen(index) {
   step = index; screens.forEach((id, i) => { $(id).hidden = i !== index; });
+  $('no-invite').hidden = true; $('steps').hidden = false;
   document.querySelectorAll('#steps li').forEach((li, i) => { if (i === index) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current'); });
   $('back').hidden = index < 2; $('retry').hidden = true;
 }
 async function act(operation) {
   if (busy) return; busy = true;
   const enabled = [...document.querySelectorAll('button:not(:disabled)')]; enabled.forEach(b => b.disabled = true);
-  try { await operation(); } catch (error) { message(error.message || 'This step could not finish. Please retry.', true); $('retry').hidden = false; }
+  try { await operation(); } catch (error) { message(error.message || retryText, true); $('retry').hidden = false; }
   finally { busy = false; enabled.forEach(b => b.disabled = false); $('connect-storage').disabled = !$('backup-kept').checked; $('confirm-discord').disabled = !$('discord-self').checked; }
 }
 const backupName = () => 'router_recovery:' + identity.handle;
 const receiptName = () => 'router_storage_grant:' + identity.handle;
 async function lookup(candidate) {
   const result = await request('/api/identity/lookup', { secret_key: candidate }, null);
-  if (!result.handle) throw Error('This Router account has no name yet.');
+  if (!result.handle) throw Error('This Router account has no handle yet.');
   return result;
 }
 async function groupContext() {
@@ -48,29 +50,52 @@ async function groupContext() {
     try { return await request('/api/group-onboarding?group=' + encodeURIComponent(groupId)); }
     catch (error) { if (!invite) throw error; }
   }
-  if (!invite) throw Error('Open your group’s invitation link to join.');
+  if (!invite) throw Error('To join a group, open its invitation link.');
   return request('/api/group-onboarding?channelinvite=' + encodeURIComponent(invite) + (groupId ? '&group=' + encodeURIComponent(groupId) : ''));
+}
+function showGroup() {
+  groupId = context.group.id;
+  $('group-name').textContent = context.group.name;
+  $('description').textContent = context.group.description || 'Keep useful ideas and questions with your group.'; $('description').hidden = false;
+  $('audience').textContent = 'Who can read notes: ' + context.group.audience; $('audience').hidden = false;
+  $('eyebrow').hidden = !invite;
+  // Public groups have no Discord connection, so that step never appears for them.
+  if (!context.group.private) $('step-discord').hidden = true;
+  document.title = context.group.name + ' · Router';
+}
+function accountView(signInOnly) {
+  $('account-heading').textContent = signInOnly ? 'Sign in or restore your account' : identity ? 'Join this group' : 'Pick a name';
+  $('account-intro').hidden = signInOnly; $('restore-summary').hidden = signInOnly;
+  if (signInOnly) $('restore').open = true;
 }
 async function load() {
   if (key) { try { identity = await lookup(key); } catch (error) { if (error.status !== 401 && error.status !== 404) throw error; identity = undefined; key = undefined; } }
   if (!identity && !invite) {
-    screen(0); $('create-account').hidden = true; $('signed-in').hidden = true;
-    $('account').querySelector('details').open = true;
-    message('Sign in to continue your group setup. New members need an invitation from the group host.'); return;
+    // Signed out with no invitation: the only things to do here are to sign in or to restore a recovery file.
+    screen(0); $('steps').hidden = true; $('create-account').hidden = true; $('signed-in').hidden = true;
+    $('group-name').textContent = 'Group setup'; $('description').hidden = true; $('audience').hidden = true;
+    accountView(true);
+    message((groupId ? 'Sign in to continue your group setup. ' : '') + 'To create a new account, open a group’s invitation link.'); return;
   }
-  context = await groupContext(); groupId = context.group.id;
-  $('group-name').textContent = context.group.name; $('description').textContent = context.group.description || 'Keep useful ideas and questions with your group.';
-  $('audience').textContent = 'Who can read notes: ' + context.group.audience;
-  document.title = context.group.name + ' · Router setup';
+  if (!invite && !groupId) {
+    // Signed in with nothing to join, for example straight after restoring a recovery file on a new device.
+    screens.forEach(id => { $(id).hidden = true; }); step = 0;
+    $('steps').hidden = true; $('back').hidden = true; $('retry').hidden = true;
+    $('group-name').textContent = 'Group setup'; $('description').hidden = true; $('audience').hidden = true;
+    $('no-invite-account').textContent = 'You’re signed in as @' + identity.handle + '.';
+    $('no-invite').hidden = false; message(''); return;
+  }
+  context = await groupContext(); showGroup();
   $('create-account').hidden = !!identity; $('signed-in').hidden = !identity;
   if (identity) $('account-name').textContent = 'You’re signed in as @' + identity.handle + '.';
-  if (!context.member) { screen(0); message('Join the group to continue. Your personal sharing rules will stay unchanged.'); return; }
+  accountView(false);
+  if (!context.member) { screen(0); message(identity ? 'Join the group to continue. Your posting rules stay as they are.' : 'Pick a handle to create your account and join the group.'); return; }
   invite = undefined; history.replaceState(null, '', '/group-setup?group=' + encodeURIComponent(groupId));
   await checkStorage();
   if (storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running') await showDiscord();
 }
 async function joinGroup() {
-  if (!identity) throw Error('Create or sign into your Router account first.');
+  if (!identity) throw Error('Create an account or sign in first.');
   await request('/api/channels/' + encodeURIComponent(groupId) + '/join', { secret_key: key, ...(invite ? { invite_token: invite } : {}) });
   context = await request('/api/group-onboarding?group=' + encodeURIComponent(groupId));
   if (!context.member) throw Error('Your membership could not be confirmed.');
@@ -80,17 +105,19 @@ async function joinGroup() {
 async function checkStorage() {
   screen(1);
   try { storage = await request('/api/tinycloud/status', { secret_key: key }); }
-  catch (error) { if (error.status === 404) throw Error('This Router has not enabled personal storage yet. Your account and group membership are saved; return when your host has enabled it.'); throw error; }
+  catch (error) { if (error.status === 404) throw Error('Personal storage is not turned on for this Router yet. Your account and group membership are saved. Come back when it has been turned on.'); throw error; }
   let saved; try { saved = JSON.parse(localStorage.getItem(backupName())); } catch { throw Error('The saved recovery file could not be read. Restore your downloaded file before continuing.'); }
   envelope ||= saved;
   const ready = storage.linked && storage.available && storage.encryption?.version === 2;
   $('storage-ready').hidden = !ready; $('storage-new').hidden = ready || !!envelope || !!backup;
   $('storage-unlock').hidden = ready || !envelope || !!backup;
   $('storage-connect').hidden = ready || !backup;
+  // Skipping only risks the Router key while no recovery file holds a copy of it.
+  $('skip-storage').hidden = ready; $('skip-note').hidden = ready || !!envelope;
   if (ready) { $('storage-state').textContent = 'Your encrypted storage is connected.'; message('Storage is ready.'); }
   else if (storage.job?.status === 'running') { $('storage-new').hidden = $('storage-unlock').hidden = $('storage-connect').hidden = true; message('Your storage is still being connected. Use “Check connection again” in a moment.'); }
-  else if (storage.linked) { $('storage-new').hidden = $('storage-unlock').hidden = $('storage-connect').hidden = true; throw Error('Your existing storage is unavailable. Keep your original recovery key and check the connection; this setup will not replace it.'); }
-  else message('Make a recovery file before connecting your notes.');
+  else if (storage.linked) { $('storage-new').hidden = $('storage-unlock').hidden = $('storage-connect').hidden = true; throw Error('Your existing storage cannot be reached. Keep your original recovery file and check the connection again. This setup will not replace your storage.'); }
+  else message('Make a recovery file before connecting your storage.');
 }
 function download() {
   if (!envelope) throw Error('Create or unlock your recovery file first.');
@@ -98,7 +125,7 @@ function download() {
   const a = document.createElement('a'); a.href = url; a.download = `router-${identity.handle}-recovery.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 async function acceptBackup(data, encrypted) {
-  if (data.origin !== location.origin) throw Error('This backup belongs to a different Router website.');
+  if (data.origin !== location.origin) throw Error('This recovery file belongs to a different Router website.');
   const who = await lookup(data.routerKey);
   if (who.handle !== data.handle) throw Error('The recovery file does not match this account.');
   if (identity && who.handle !== identity.handle && !confirm('Switch from @' + identity.handle + ' to @' + who.handle + '?')) return;
@@ -106,13 +133,17 @@ async function acceptBackup(data, encrypted) {
   localStorage.setItem('router_key', key); localStorage.setItem(backupName(), JSON.stringify(envelope));
   await load();
 }
-async function showDiscord() {
-  screen(2);
+async function showDiscord(back = false) {
   discord = context.group.private ? await request('/api/discord/link/status', { groupId }) : { configured: false, linked: false };
+  // A group with no Discord connection has nothing to do on this screen, so it is passed over in both directions.
+  const skip = !discord.configured && !discord.linked && !discord.pending && !discord.grantId && !pairing;
+  $('step-discord').hidden = skip;
+  if (skip) return back ? checkStorage() : showRules();
+  screen(2);
   $('discord-start').hidden = !discord.configured || !!discord.linked || !!pairing;
   $('discord-confirm').hidden = true; $('discord-next').hidden = !discord.linked; $('skip-discord').hidden = !!discord.linked;
   $('unlink-discord').hidden = !discord.grantId;
-  $('discord-explanation').textContent = !context.group.private ? 'This connection is for private groups. Continue to choose how you share with this public group.' : discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'Your host has not connected this group to Discord yet. You can finish your Router setup now and link Discord later.';
+  $('discord-explanation').textContent = discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'This group is not connected to Discord at the moment. You can finish your Router setup now and connect Discord later.';
   if (discord.configured) $('open-discord').href = discord.channelUrl;
   $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. It stays connected while you use it. Without use, it ends on ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
   if (pairing && context.group.private) {
@@ -130,7 +161,7 @@ async function showDiscord() {
     if (pair.status === 'approved') { $('discord-state').textContent = 'Confirmed. Return to Discord; the bot is finishing the connection.'; $('discord-next').hidden = true; }
     if (pair.status === 'connected') { $('discord-state').textContent = 'Discord has confirmed the connection.'; $('discord-next').hidden = false; sessionStorage.removeItem('router_setup_pair'); pairing = undefined; }
   }
-  message('You choose whether to connect Discord. Group notes stay with this group.');
+  message('Connecting Discord is optional. Group notes stay with this group.');
 }
 async function showRules() {
   screen(3); rules = await request('/api/posting-rules');
@@ -138,21 +169,22 @@ async function showRules() {
   $('rules-next').hidden = !rules.rules;
   $('rules-next').textContent = rules.rules?.mode === 'automatic' && rules.rules?.audience === 'public'
     ? 'Keep automatic public posting and continue' : 'Keep these saved rules and continue';
-  $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public — anyone on the internet' : 'choose each time') + '. Keep it or edit it below.' : context.group.private
-    ? 'Suggested for a private group: useful notes here automatically, with your approval before public publication. Review the exact wording before saving.'
-    : 'This group is public. Suggested rules: see and approve each draft before it is published. Review the exact wording before saving.';
-  message('Your saved rules apply to every connected agent.');
+  $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public (anyone on the internet can read it)' : 'chosen with you for each note') + '. Keep it or edit it below.' : context.group.private
+    ? 'Suggested for a private group: your agent posts useful notes here automatically, and asks for your approval before posting anything publicly. You review the exact wording before saving.'
+    : 'This group is public. Suggested rules: your agent shows you each draft and waits for your approval before posting. You review the exact wording before saving.';
+  message('Your posting rules apply to every agent you connect.');
 }
 async function finish() {
   // Re-read saved settings and membership: finishing a page is never evidence of a successful write.
   const fresh = await request('/api/group-onboarding?group=' + encodeURIComponent(groupId));
   rules = await request('/api/posting-rules');
-  if (!fresh.member || !rules.rules) throw Error('Confirm your membership and save your sharing rules before continuing.');
+  if (!fresh.member || !rules.rules) throw Error('Confirm your membership and save your posting rules before continuing.');
   try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch { storage = undefined; }
   try { discord = await request('/api/discord/link/status', { groupId }); } catch { discord = undefined; }
   screen(4); $('read-group').href = fresh.group_url;
-  $('ready-state').textContent = 'Your personal sharing rules are saved. You can change them at any time.' +
-    (!envelope && !storage?.linked ? ' Your account is saved only in this browser. Return to Your notes and download a recovery file before clearing browser data or moving to another device.' : '') +
+  $('step-discord').hidden = !(discord?.configured || discord?.linked);
+  $('ready-state').textContent = 'Your posting rules are saved. You can change them at any time.' +
+    (!envelope && !storage?.linked ? ' Your Router key is kept only in this browser. Go back to the storage step and download a recovery file before clearing the browser’s data or moving to another device.' : '') +
     (!storage?.linked || !storage?.available ? ' Storage setup is still pending; return here before using Discord’s private commands.' : '') +
     (!discord?.linked ? ' Discord is not connected yet.' : '');
   $('ready-discord').hidden = !discord?.linked;
@@ -163,7 +195,7 @@ $('create-account').addEventListener('submit', event => { event.preventDefault()
   const result = await request('/api/identity/register', { secret_key: candidate, handle: $('handle').value.trim() }, null);
   if (!result.handle) throw Error('Account creation could not be confirmed.');
   key = candidate; identity = result; localStorage.setItem('router_key', key);
-  $('create-account').hidden = true; $('signed-in').hidden = false; $('account-name').textContent = 'Signed in as @' + identity.handle + '.';
+  $('create-account').hidden = true; $('signed-in').hidden = false; $('account-name').textContent = 'You’re signed in as @' + identity.handle + '.'; accountView(false);
   await joinGroup();
 }); });
 $('join-group').onclick = () => act(joinGroup);
@@ -172,12 +204,13 @@ $('existing-account').addEventListener('submit', event => { event.preventDefault
 }); });
 $('restore-account').addEventListener('submit', event => { event.preventDefault(); act(async () => {
   const file = $('restore-file').files[0]; if (!file || file.size > 25000) throw Error('Choose your Router recovery file.');
-  const encrypted = JSON.parse(await file.text()), data = await decryptBackup(encrypted, $('restore-password').value);
+  let encrypted; try { encrypted = JSON.parse(await file.text()); } catch { throw Error('That file is not a Router recovery file.'); }
+  const data = await decryptBackup(encrypted, $('restore-password').value);
   $('restore-password').value = ''; await acceptBackup(data, encrypted);
 }); });
 $('prepare-backup').addEventListener('submit', event => { event.preventDefault(); act(async () => {
   if ($('backup-password').value !== $('backup-repeat').value) throw Error('The two passwords do not match.');
-  const imported = $('tinycloud-key-file').files[0]; if (imported?.size > 200) throw Error('Choose the small TinyCloud key file.');
+  const imported = $('tinycloud-key-file').files[0]; if (imported?.size > 200) throw Error('That file is too large to be a TinyCloud key file.');
   let privateKey = imported ? (await imported.text()).trim() : Wallet.createRandom().privateKey;
   if (/^[a-fA-F0-9]{64}$/.test(privateKey)) privateKey = '0x' + privateKey;
   if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) throw Error('Use the TinyCloud key file containing one 64-character hexadecimal key, with or without 0x.');
@@ -185,7 +218,7 @@ $('prepare-backup').addEventListener('submit', event => { event.preventDefault()
   backup = { format: 'router-account', version: 1, origin: location.origin, handle: identity.handle, routerKey: key, tinycloudKey: privateKey, createdAt: new Date().toISOString() };
   envelope = await encryptBackup(backup, $('backup-password').value);
   localStorage.setItem(backupName(), JSON.stringify(envelope)); $('backup-password').value = $('backup-repeat').value = '';
-  download(); await checkStorage(); message('Recovery file prepared. Save it and its password before connecting.');
+  download(); await checkStorage(); message('Your recovery file is ready. Save it and its password before connecting storage.');
 }); });
 $('unlock-backup').addEventListener('submit', event => { event.preventDefault(); act(async () => {
   const data = await decryptBackup(envelope, $('unlock-password').value); $('unlock-password').value = '';
@@ -201,9 +234,9 @@ $('connect-storage').onclick = () => act(async () => {
   storage = await connectStorage({ privateKey: backup.tinycloudKey, routerKey: key, request, onProgress: message, receipt, saveReceipt: value => localStorage.setItem(receiptName(), JSON.stringify(value)) });
   backup = undefined; await checkStorage();
 });
-$('check-storage').onclick = () => act(checkStorage); $('storage-next').onclick = () => act(showDiscord);
+$('check-storage').onclick = () => act(checkStorage); $('storage-next').onclick = () => act(() => showDiscord());
 $('skip-storage').onclick = () => act(showRules);
-$('check-discord').onclick = () => act(showDiscord);
+$('check-discord').onclick = () => act(() => showDiscord());
 $('discord-self').onchange = () => { $('confirm-discord').disabled = !$('discord-self').checked; };
 $('confirm-discord').onclick = () => act(async () => {
   if (!$('discord-self').checked) throw Error('Confirm only the Discord account you just used yourself.');
@@ -216,16 +249,22 @@ $('unlink-discord').onclick = () => act(async () => {
 });
 $('discord-next').onclick = $('skip-discord').onclick = () => act(showRules);
 $('rules-next').onclick = () => act(finish);
-$('back').onclick = () => act(() => step === 4 ? showRules() : step === 3 ? showDiscord() : checkStorage());
+$('back').onclick = () => act(() => step === 4 ? showRules() : step === 3 ? showDiscord(true) : checkStorage());
 $('retry').onclick = () => act(() => step === 0 ? load() : step === 1 ? checkStorage() : step === 2 ? showDiscord() : showRules());
 // Discord can reuse the current tab. A fragment-only navigation does not reload
 // the module, so consume that capability just as we do when opening a new tab.
 window.addEventListener('hashchange', () => { if (capturePairing()) act(load); });
 act(async () => {
-  if (params.get('rules') === 'saved' && key) {
-    identity = await lookup(key); context = await groupContext(); groupId = context.group.id;
-    $('group-name').textContent = context.group.name; $('audience').textContent = 'Who can read notes: ' + context.group.audience;
-    if (context.member) { try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch {} await showRules(); return; }
+  if (params.get('rules') === 'saved' && key && groupId) {
+    // Back from the posting rules editor. The rules were reviewed and saved there, so finish() re-reads
+    // them and goes to the last screen without asking the person to confirm them again.
+    identity = await lookup(key); context = await groupContext(); showGroup();
+    if (context.member) {
+      rules = await request('/api/posting-rules');
+      if (rules.rules) { await finish(); return; }
+      try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch {}
+      await showRules(); return;
+    }
   }
   await load();
 });
