@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { generateSecretKey } from './identity.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
 // A note can carry a repository and tags. The label feed (/api/entries?repo=…&tag=…) is public:
 // it must return only published public notes, and only the author may change a note's labels.
@@ -127,6 +129,33 @@ describe('note labels', () => {
     expect((await feed(`tag=held-${run}`)).total).toBe(0);
     expect((await api(`/api/entries/${ids.waiting}/publish`, {}, author.key)).ok).toBe(true);
     expect((await feed(`tag=held-${run}`)).names).toEqual(['waiting']);
+  });
+
+  it('labels several notes at once through the router_label_entry tool, skipping notes that are not the caller’s', async () => {
+    const client = new Client({ name: 'label-test', version: '1' });
+    await client.connect(new SSEClientTransport(new URL(`${base}/mcp/sse?key=${author.key}`)));
+    try {
+      const call = async (args: Record<string, unknown>) => {
+        const result = await client.callTool({ name: 'router_label_entry', arguments: args }) as { content: { text: string }[]; isError?: boolean };
+        return { text: result.content[0].text, isError: !!result.isError };
+      };
+      expect((await call({ entry_ids: [ids.tagged] })).text).toContain('Give repo, tags or both');
+      expect((await call({ entry_ids: [], tags: ['x'] })).isError).toBe(true);
+      expect((await call({ entry_ids: [ids.tagged], repo: 'not a repo' })).text).toContain('owner/name');
+
+      const done = await call({ entry_ids: [ids.tagged, ids.plain, ids.others, 'missing-id'], repo: `Acme/Batch-${run}` });
+      expect(done.isError).toBe(false);
+      expect(done.text).toContain('Labeled 2 of 4 notes');
+      expect(done.text).toContain(ids.others);
+      expect(done.text).toContain('missing-id');
+      const batch = await feed(`repo=acme/batch-${run}`);
+      expect(batch.names).toEqual(['plain', 'tagged']);
+      // Tags were not part of the request, so they are kept.
+      expect(batch.entries.find(e => e.id === ids.tagged).tags).toEqual([`topic-${run}`]);
+
+      expect((await call({ entry_ids: [ids.tagged, ids.plain], repo: null })).text).toContain('no repository');
+      expect((await feed(`repo=acme/batch-${run}`)).total).toBe(0);
+    } finally { await client.close(); }
   });
 
   it('leaves the ordinary feed unchanged', async () => {

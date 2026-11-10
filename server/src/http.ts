@@ -407,6 +407,34 @@ export const SYSTEM_SKILLS: Skill[] = [
     createdAt: 0,
   },
   {
+    id: 'system_router_label_entry',
+    name: 'router_label_entry',
+    description: 'Set or clear the repository and tags on notes you already posted, for example to file older notes under a project. Labels are shown to everyone who can read the note. The text, audience and publish time do not change.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'IDs of your own notes to label, up to 100. All of them get the same labels.',
+        },
+        repo: {
+          type: ['string', 'null'],
+          description: 'Repository as owner/name. Leave out to keep each note’s repository; null clears it.',
+        },
+        tags: {
+          type: ['array', 'null'],
+          items: { type: 'string' },
+          description: 'Tags to set, replacing the note’s tags. Leave out to keep them; null or an empty list clears them.',
+        },
+      },
+      required: ['entry_ids'],
+    },
+    createdAt: 0,
+  },
+  {
     id: 'system_router_get_entry',
     name: 'router_get_entry',
     description: 'Read one note or imported conversation in full, for example after a search. For your own notes it also returns the sharing receipt.',
@@ -970,6 +998,7 @@ export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> =
   router_search_matrix: ['Search Matrix rooms', 'read'],
   router_get_entry: ['Read a note', 'read'],
   router_delete_entry: ['Delete a note', 'destructive'],
+  router_label_entry: ['Label a note', 'write'],
   router_settings: ['Read or change settings', 'write'],
   router_skills: ['Manage skills', 'destructive'], // delete, and edit of built-in instructions
   router_skills_browse: ['Browse shared skills', 'read'],
@@ -1076,6 +1105,33 @@ const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
   {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
 const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
+
+type LabelPatch = { repo?: unknown; tags?: unknown };
+/** Checks a label change. A field absent from the patch is left alone; null or empty clears it. */
+function parseLabelPatch(patch: LabelPatch): { repo?: string | null; tags?: string[] | null } | { error: string } {
+  const out: { repo?: string | null; tags?: string[] | null } = {};
+  if ('repo' in patch && patch.repo !== undefined) {
+    const repo = normalizeRepo(patch.repo);
+    if (patch.repo != null && patch.repo !== '' && !repo) return { error: 'repo must look like owner/name' };
+    out.repo = repo ?? null;
+  }
+  if ('tags' in patch && patch.tags !== undefined) {
+    if (patch.tags != null && !Array.isArray(patch.tags)) return { error: 'tags must be a list' };
+    out.tags = normalizeTags(patch.tags) ?? null;
+  }
+  return out;
+}
+/** Sets or clears a note's repo and tags. Ownership is the caller's to check. */
+async function setEntryLabels(entry: JournalEntry, labels: { repo?: string | null; tags?: string[] | null }): Promise<JournalEntry> {
+  const apply = (target: JournalEntry) => {
+    if ('repo' in labels) { if (labels.repo) target.repo = labels.repo; else delete target.repo; }
+    if ('tags' in labels) { if (labels.tags?.length) target.tags = labels.tags; else delete target.tags; }
+    return target;
+  };
+  // A waiting note is still in memory: change it in place so its publish time and notice are kept.
+  if (storage.isPending(entry.id)) return apply(entry);
+  return publishedStorage.addEntry(apply({ ...entry })); // same id: replaces the stored record
+}
 const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string; recovery?: string}>();
 const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progress: string; result?: unknown; error?: string}>();
 let authorLinkQueue: Promise<unknown> = Promise.resolve();
@@ -2428,6 +2484,37 @@ function createMCPServer(secretKey: string) {
           type: 'text' as const,
           text: responseText,
         }],
+      };
+    }
+
+    // Label notes the caller already posted
+    if (name === 'router_label_entry') {
+      const rawIds = (args as { entry_ids?: unknown })?.entry_ids;
+      const entryIds = Array.isArray(rawIds) ? Array.from(new Set(rawIds.filter((id): id is string => typeof id === 'string' && !!id))) : [];
+      if (!entryIds.length || entryIds.length > 100) {
+        return { content: [{ type: 'text' as const, text: 'entry_ids must list between 1 and 100 note IDs.' }], isError: true };
+      }
+      const labels = parseLabelPatch((args || {}) as LabelPatch);
+      if ('error' in labels) return { content: [{ type: 'text' as const, text: labels.error }], isError: true };
+      if (!('repo' in labels) && !('tags' in labels)) {
+        return { content: [{ type: 'text' as const, text: 'Give repo, tags or both.' }], isError: true };
+      }
+      const labelUser = await storage.getUserByKeyHash(keyHash);
+      const done: string[] = [];
+      const skipped: string[] = [];
+      for (const id of entryIds) {
+        const entry = await storage.getEntry(id);
+        const own = entry && (entry.pseudonym === pseudonym || (!!labelUser?.handle && entry.handle === labelUser.handle));
+        if (!entry || !own) { skipped.push(id); continue; }
+        try { await setEntryLabels(entry, labels); done.push(id); }
+        catch (err) { console.error('[Labels] failed for', id, (err as Error).message); skipped.push(id); }
+      }
+      const shown = [labels.repo ? `repository ${labels.repo}` : 'repo' in labels ? 'no repository' : '',
+        labels.tags?.length ? `tags ${labels.tags.join(', ')}` : 'tags' in labels ? 'no tags' : ''].filter(Boolean).join('; ');
+      return {
+        content: [{ type: 'text' as const, text: `Labeled ${done.length} of ${entryIds.length} notes (${shown}).`
+          + (skipped.length ? `\nSkipped, not found or not yours: ${skipped.join(', ')}` : '') }],
+        isError: done.length === 0,
       };
     }
 
@@ -5879,32 +5966,13 @@ const server = createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'You can only label your own entries' }));
         return;
       }
-      const next: JournalEntry = { ...entry };
-      if ('repo' in body) {
-        const repo = normalizeRepo(body.repo);
-        if (body.repo != null && body.repo !== '' && !repo) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: 'repo must look like owner/name' }));
-          return;
-        }
-        if (repo) next.repo = repo; else delete next.repo;
+      const labels = parseLabelPatch(body);
+      if ('error' in labels) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: labels.error }));
+        return;
       }
-      if ('tags' in body) {
-        if (body.tags != null && !Array.isArray(body.tags)) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: 'tags must be a list' }));
-          return;
-        }
-        const tags = normalizeTags(body.tags);
-        if (tags) next.tags = tags; else delete next.tags;
-      }
-      if (storage instanceof StagedStorage && storage.isPending(entryId)) {
-        // A waiting note is still in memory: change it in place so its publish time and notice are kept.
-        if (next.repo) entry.repo = next.repo; else delete entry.repo;
-        if (next.tags) entry.tags = next.tags; else delete entry.tags;
-      } else {
-        await publishedStorage.addEntry(next); // same id: replaces the stored record
-      }
+      const next = await setEntryLabels(entry, labels);
       res.writeHead(200);
       res.end(JSON.stringify({ id: entryId, repo: next.repo ?? null, tags: next.tags ?? [] }));
       return;
