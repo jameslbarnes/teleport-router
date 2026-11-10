@@ -316,7 +316,7 @@
                 const count = Number(entryCount) || 0;
                 const countLabel = `<span class="user-entries${count === 0 ? ' zero' : ''}">${noteCount(count)}</span>`;
                 const preview = latestEntry
-                    ? `<span class="user-preview">${latestEntry.aiOnly ? 'AI-only note' : esc(latestEntry.content)}${latestEntry.content && latestEntry.content.length >= 120 ? '…' : ''}</span>`
+                    ? `<span class="user-preview">${latestEntry.aiOnly ? 'AI-only note' : esc(latestEntry.content.replace(/^#{1,6}\s+/gm, '').replace(/[*_`]/g, ''))}${latestEntry.content && latestEntry.content.length >= 120 ? '…' : ''}</span>`
                     : '';
                 return `
                     <li class="user-item">

@@ -9239,6 +9239,8 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     if (res.headersSent) { res.end(); return; }
     // A body that is not JSON is the caller's mistake, not the server's.
     if (error instanceof SyntaxError && /JSON/i.test(error.message)) {
+      // Logged with the path and never the body, so a parse failure on stored data cannot hide as a caller's mistake.
+      console.error(`Invalid JSON while handling ${req.method} ${url.pathname}: ${error.message}`);
       res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: 'The request body is not valid JSON.' }));
       return;
