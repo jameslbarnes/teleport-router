@@ -248,8 +248,22 @@ try {
   await soloPage.locator('#save').click();
   await soloPage.locator('#status').filter({ hasText: 'Saved' }).waitFor();
   await soloPage.getByRole('link', { name: 'Continue setup' }).click();
+  // The last step before the finish is connecting an agent: the plugin commands, and the key copied separately.
+  await soloPage.locator('#connect').waitFor();
+  assert.equal(await soloPage.locator('#step-connect').getAttribute('aria-current'), 'step');
+  assert.match(await soloPage.locator('#plugin-commands').textContent(), /\/plugin install teleport-router@teleport-router/);
+  const soloKey = await soloPage.evaluate(() => localStorage.getItem('router_key'));
+  assert.equal((await soloPage.locator('body').innerText()).includes(soloKey), false, 'The Router key is not printed on the page');
+  await soloContext.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await soloPage.locator('#copy-key').click();
+  await soloPage.locator('#copy-state').filter({ hasText: 'Router key copied' }).waitFor();
+  assert.equal(await soloPage.evaluate(() => navigator.clipboard.readText()), soloKey);
+  await soloPage.locator('#connect-later').click();
   await soloPage.locator('#ready').waitFor();
-  assert.equal(await soloPage.locator('#ready-connect').getAttribute('href'), '/connect');
+  await soloPage.locator('#back').click();
+  await soloPage.locator('#connect').waitFor();
+  await soloPage.locator('#connect-next').click();
+  await soloPage.locator('#ready').waitFor();
   assert.match(await soloPage.locator('#ready-state').textContent(), /Your recovery file is saved/);
   assert.equal(await soloPage.locator('#step-discord').isVisible(), false);
   // Coming back signed in goes on from the storage step, not to a dead end.

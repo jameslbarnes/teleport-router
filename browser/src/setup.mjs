@@ -2,7 +2,7 @@ import { Wallet } from 'ethers';
 import { b64, encryptBackup, decryptBackup } from './recovery.mjs';
 
 const $ = id => document.getElementById(id), params = new URLSearchParams(location.search);
-const screens = ['account', 'storage', 'discord', 'rules', 'ready'];
+const screens = ['account', 'storage', 'discord', 'rules', 'connect', 'ready'];
 let groupId = params.get('group'), invite = params.get('channelinvite'), key = localStorage.getItem('router_key');
 let identity, context, storage, discord, rules, backup, envelope, step = 0, busy = false;
 let pairing;
@@ -12,7 +12,7 @@ const isSolo = !invite && !groupId, solo = () => isSolo;
 function showSolo() {
   $('group-name').textContent = 'Set up Router'; document.title = 'Set up Router';
   $('description').textContent = 'Create your account, keep a recovery file, choose your posting rules, then connect your agent.'; $('description').hidden = false;
-  $('audience').hidden = true; $('eyebrow').hidden = true; $('step-discord').hidden = true;
+  $('audience').hidden = true; $('eyebrow').hidden = true; $('step-discord').hidden = true; $('step-connect').hidden = false;
   $('create-submit').textContent = 'Create account';
   $('rules-intro').textContent = 'Posting rules say when your agent may post, who can read it, and what to leave out. They are your personal rules, used wherever you connect an agent to Router.';
   $('rules-discord-hint').hidden = true;
@@ -190,6 +190,17 @@ async function showRules() {
     : 'This group is public. Suggested rules: your agent shows you each draft and waits for your approval before posting. You review the exact wording before saving.';
   message('Your posting rules apply to every agent you connect.');
 }
+// A setup with no group ends by connecting an agent. The plugin commands carry no key; the key is copied separately.
+async function showConnect() {
+  rules = await request('/api/posting-rules');
+  if (!rules.rules) throw Error('Save your posting rules before continuing.');
+  screen(4); $('copy-state').textContent = '';
+  message('Connect your agent, or do it later from the Connect page.');
+}
+async function copy(text, done) {
+  try { await navigator.clipboard.writeText(text); $('copy-state').textContent = done; }
+  catch { $('copy-state').textContent = 'Could not copy. Select the text and copy it yourself.'; }
+}
 async function finish() {
   // After the posting rules page this script has started afresh, so look again for the recovery file kept in this browser.
   try { envelope ||= JSON.parse(localStorage.getItem(backupName())) || undefined; } catch {}
@@ -198,11 +209,11 @@ async function finish() {
     rules = await request('/api/posting-rules');
     if (!rules.rules) throw Error('Save your posting rules before continuing.');
     try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch { storage = undefined; }
-    screen(4); $('step-discord').hidden = true;
+    screen(5); $('step-discord').hidden = true;
     $('ready-heading').textContent = 'Your account is set up';
-    $('ready-intro').textContent = 'The last thing to do is connect your agent. Nothing is posted until an agent you connect posts within your rules.';
-    $('ready-connect').hidden = false; $('ready-later').hidden = true; $('ready-discord').hidden = true;
-    $('read-group').href = '/'; $('read-group').textContent = 'Open the notebook'; $('read-group').classList.remove('r-btn--primary');
+    $('ready-intro').textContent = 'Nothing is posted until an agent you connected posts within your rules. When it does, it shows you the note in the conversation, with who can read it and a link to delete it.';
+    $('ready-later').hidden = true; $('ready-discord').hidden = true;
+    $('read-group').href = '/'; $('read-group').textContent = 'Open the notebook';
     $('ready-state').textContent = 'Your posting rules are saved. You can change them at any time.' +
       (!envelope && !storage?.linked ? ' Your Router key is kept only in this browser. Go back to the storage step and download a recovery file before clearing the browser’s data or moving to another device.' : '') +
       (envelope && (!storage?.linked || !storage?.available) ? ' Your recovery file is saved, but storage is not connected yet; you can finish that from the storage step.' : '');
@@ -213,7 +224,7 @@ async function finish() {
   if (!fresh.member || !rules.rules) throw Error('Confirm your membership and save your posting rules before continuing.');
   try { storage = await request('/api/tinycloud/status', { secret_key: key }); } catch { storage = undefined; }
   try { discord = await request('/api/discord/link/status', { groupId }); } catch { discord = undefined; }
-  screen(4); $('read-group').href = fresh.group_url;
+  screen(5); $('read-group').href = fresh.group_url;
   $('step-discord').hidden = !(discord?.configured || discord?.linked);
   $('ready-state').textContent = 'Your posting rules are saved. You can change them at any time.' +
     (!envelope && !storage?.linked ? ' Your Router key is kept only in this browser. Go back to the storage step and download a recovery file before clearing the browser’s data or moving to another device.' : '') +
@@ -281,9 +292,12 @@ $('unlink-discord').onclick = () => act(async () => {
   pairing = undefined; sessionStorage.removeItem('router_setup_pair'); await showDiscord();
 });
 $('discord-next').onclick = $('skip-discord').onclick = () => act(showRules);
-$('rules-next').onclick = () => act(finish);
-$('back').onclick = () => act(() => step === 4 ? showRules() : step === 3 ? showDiscord(true) : checkStorage());
-$('retry').onclick = () => act(() => step === 0 ? load() : step === 1 ? checkStorage() : step === 2 ? showDiscord() : showRules());
+$('rules-next').onclick = () => act(() => solo() ? showConnect() : finish());
+$('copy-plugin').onclick = () => copy($('plugin-commands').textContent, 'Commands copied.');
+$('copy-key').onclick = () => copy(key, 'Router key copied. Paste it when Claude Code asks, and nowhere else.');
+$('connect-next').onclick = $('connect-later').onclick = () => act(finish);
+$('back').onclick = () => act(() => step === 5 ? (solo() ? showConnect() : showRules()) : step === 4 ? showRules() : step === 3 ? showDiscord(true) : checkStorage());
+$('retry').onclick = () => act(() => step === 0 ? load() : step === 1 ? checkStorage() : step === 2 ? showDiscord() : step === 4 ? showConnect() : showRules());
 // Discord can reuse the current tab. A fragment-only navigation does not reload
 // the module, so consume that capability just as we do when opening a new tab.
 window.addEventListener('hashchange', () => { if (capturePairing()) act(load); });
@@ -293,7 +307,7 @@ act(async () => {
     identity = await lookup(key); showSolo();
     rules = await request('/api/posting-rules');
     history.replaceState(null, '', '/group-setup');
-    if (rules.rules) { await finish(); return; }
+    if (rules.rules) { await showConnect(); return; }
     await showRules(); return;
   }
   if (params.get('rules') === 'saved' && key && groupId) {
