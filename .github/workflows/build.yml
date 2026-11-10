@@ -188,6 +188,9 @@ jobs:
           npm --prefix ../browser ci
           npm --prefix ../browser run build
           npm --prefix ../browser test
+          # The browser checks below open the real home page, so build it first.
+          npm --prefix ../web install --no-audit --no-fund
+          npm --prefix ../web run build
           npm install --prefix "$RUNNER_TEMP/router-browser" --ignore-scripts --no-audit --no-fund playwright@1.59.1
           node "$RUNNER_TEMP/router-browser/node_modules/playwright/cli.js" install --with-deps chromium
           PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/untrusted-content-browser-smoke.mjs

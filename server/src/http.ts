@@ -9198,7 +9198,9 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
           : 'public, max-age=3600');
 
       try {
-        const content = await readFile(fullPath);
+        // In production every page sits in STATIC_DIR. In a checkout the home page is built by Astro into
+        // web/dist (npm --prefix web run build), so look there second. That folder does not exist in the image.
+        const content = await readFile(fullPath).catch(() => readFile(join(STATIC_DIR, 'web', 'dist', filePath)));
         if (filePath === '/group-setup.html') {
           res.setHeader('Referrer-Policy', 'no-referrer');
           res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
