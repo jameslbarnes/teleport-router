@@ -3,255 +3,151 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Profile - Router</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+    <title>Profile · Router</title>
+    <meta name="description" content="One person's public notes in the Router notebook.">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/router.css?v=1">
     <script src="/vendor/marked.min.js"></script>
     <script src="/vendor/purify.min.js"></script>
     <script src="/safe-html.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        :root {
-            --bg: #faf9f7;
-            --surface: #ffffff;
-            --border: #e8e6e3;
-            --fg: #1a1a1a;
-            --fg-muted: #6b6b6b;
-            --accent: #7c5cbf;
-        }
-
-        body {
-            font-family: 'Newsreader', Georgia, serif;
-            background: var(--bg);
-            color: var(--fg);
-            min-height: 100vh;
-        }
-
-        .container {
-            display: grid;
-            grid-template-columns: 300px 1fr;
-            min-height: 100vh;
-        }
-
-        /* Left column - sticky */
-        .sidebar {
-            position: sticky;
-            top: 0;
-            height: 100vh;
-            padding: 2rem 1.5rem;
-            border-right: 1px solid var(--border);
-            display: flex;
-            flex-direction: column;
-            background: var(--surface);
-        }
-
-        .back-link {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
-            color: var(--fg-muted);
-            text-decoration: none;
-            margin-bottom: 1.5rem;
-            display: inline-block;
-        }
-
-        .back-link:hover {
-            color: var(--fg);
-        }
-
+        /* Who this is */
         .profile-header {
-            margin-bottom: 1.5rem;
+            margin-bottom: var(--s-5);
         }
 
         .profile-handle {
-            font-size: 1.5rem;
+            font-family: var(--font-mono);
+            font-size: var(--t-h2);
             font-weight: 500;
-            font-style: italic;
-            letter-spacing: -0.02em;
-            color: var(--accent);
+            line-height: 1.25;
+            margin: 0;
+            overflow-wrap: anywhere;
         }
 
         .profile-display-name {
-            font-size: 1.1rem;
-            color: var(--fg);
-            margin-top: 0.25rem;
+            font-size: var(--t-h3);
+            margin-top: var(--s-1);
+            overflow-wrap: anywhere;
         }
 
         .profile-bio {
             color: var(--fg-muted);
-            font-size: 0.95rem;
+            font-size: var(--t-base);
             line-height: 1.6;
-            margin-top: 1rem;
+            margin-top: var(--s-3);
+            max-width: 34em;
+            overflow-wrap: anywhere;
         }
 
         .profile-links {
-            margin-top: 1rem;
+            margin-top: var(--s-3);
             display: flex;
             flex-direction: column;
-            gap: 0.5rem;
+            gap: var(--s-2);
         }
 
         .profile-links a {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.8rem;
-            color: var(--accent);
-            text-decoration: none;
-        }
-
-        .profile-links a:hover {
-            text-decoration: underline;
+            font-family: var(--font-mono);
+            font-size: var(--t-sm);
+            overflow-wrap: anywhere;
         }
 
         .profile-meta {
-            margin-top: 1.5rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
+            margin-top: var(--s-4);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
             color: var(--fg-muted);
         }
 
-        .explainer {
-            flex: 1;
-            margin-top: 2rem;
+        .profile-header .r-actions {
+            margin-bottom: var(--s-2);
         }
 
-        .explainer-section {
-            margin-bottom: 1.5rem;
+        .profile-about {
+            padding-bottom: var(--s-5);
+            margin-bottom: 0;
+            border-bottom: 1px solid var(--border);
         }
 
-        .explainer h2 {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.65rem;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
+        /* Notes */
+        .entry {
+            padding: var(--s-5) 0;
+            border-bottom: 1px solid var(--border);
+            transition: opacity 0.3s;
+        }
+
+        .entry-header,
+        .summary-header {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: var(--s-2);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
             color: var(--fg-muted);
-            margin-bottom: 0.75rem;
+            margin-bottom: var(--s-3);
         }
 
-        .explainer p {
-            color: var(--fg-muted);
-            font-size: 0.95rem;
-            line-height: 1.7;
-        }
-
-        .footer {
-            padding-top: 1.5rem;
-            border-top: 1px solid var(--border);
-        }
-
-        .footer a {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
+        .entry-header a,
+        .summary-header a {
             color: var(--fg-muted);
             text-decoration: none;
         }
 
-        .footer a:hover {
+        .entry-header a:hover,
+        .summary-header a:hover {
             color: var(--fg);
+            text-decoration: underline;
         }
 
-        /* Feed container */
-        .feed-container {
-            display: flex;
-            flex-direction: column;
-            overflow-y: auto;
-        }
-
-        .feed {
-            max-width: 680px;
-            padding: 2rem 3rem;
-        }
-
-        .feed-header {
-            padding-bottom: 1.5rem;
-            margin-bottom: 1rem;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .feed-header h2 {
-            font-size: 1rem;
+        .entry-handle {
+            color: var(--fg);
             font-weight: 500;
-            color: var(--accent);
-        }
-
-        .entry {
-            padding: 2rem 0;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .entry-header {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            color: var(--fg-muted);
-            margin-bottom: 0.75rem;
-            letter-spacing: 0.02em;
         }
 
         .entry-content {
-            font-size: 1.15rem;
-            line-height: 1.75;
+            font-family: var(--font-read);
+            font-size: var(--t-read);
+            line-height: 1.7;
             color: var(--fg);
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
 
-        .entry-meta {
-            margin-top: 0.75rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
+        .entry-meta,
+        .summary-meta {
+            margin-top: var(--s-3);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
             color: var(--fg-muted);
-            letter-spacing: 0.02em;
             display: flex;
-            justify-content: space-between;
+            flex-wrap: wrap;
             align-items: center;
+            gap: var(--s-4);
+        }
+
+        .entry .r-status {
+            margin: var(--s-2) 0 0;
+        }
+
+        .meta-action {
+            background: none;
+            border: 0;
+            padding: 0;
+            color: var(--accent);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .meta-action:hover {
+            text-decoration: underline;
         }
 
         .delete-btn {
-            background: transparent;
-            border: none;
-            color: var(--fg-muted);
-            cursor: pointer;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            padding: 0.25rem 0.5rem;
-            border-radius: 3px;
-            transition: all 0.2s;
-        }
-
-        .delete-btn:hover {
-            color: #e53935;
-            background: rgba(229, 57, 53, 0.1);
-        }
-
-        .discuss-link {
-            color: var(--accent);
-            text-decoration: none;
-            opacity: 0.85;
-        }
-
-        .discuss-link:hover {
-            text-decoration: underline;
-            opacity: 1;
-        }
-
-        .copy-link-action {
-            background: none;
-            border: none;
-            color: var(--fg-muted);
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            cursor: pointer;
-            opacity: 0.65;
-            transition: opacity 0.2s;
-            padding: 0;
-        }
-
-        .copy-link-action:hover {
-            opacity: 1;
-            color: var(--accent);
+            color: var(--danger);
         }
 
         .avatar {
@@ -261,70 +157,39 @@
             width: 1.5rem;
             height: 1.5rem;
             border-radius: 50%;
-            color: white;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
             font-weight: 500;
-            vertical-align: middle;
-            margin-right: 0.35rem;
         }
 
-        .avatar-small {
-            width: 1.1rem;
-            height: 1.1rem;
-            font-size: 0.6rem;
-            margin-right: 0.25rem;
+        .avatar-large {
+            width: 3.5rem;
+            height: 3.5rem;
+            font-size: var(--t-h2);
+            margin-bottom: var(--s-3);
         }
 
-        /* Summary styles */
+        /* A group of notes shown as one summary */
         .summary {
-            padding: 2rem 0;
+            padding: var(--s-5) 0;
             border-bottom: 1px solid var(--border);
         }
 
-        .summary-header {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            color: var(--fg-muted);
-            margin-bottom: 0.75rem;
-            letter-spacing: 0.02em;
-            display: flex;
-            align-items: center;
-        }
-
         .summary-content {
-            font-size: 1.15rem;
-            line-height: 1.75;
+            font-size: var(--t-read);
+            line-height: 1.7;
             color: var(--fg);
-        }
-
-        .summary-meta {
-            margin-top: 0.75rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            color: var(--fg-muted);
-            display: flex;
-            gap: 0.75rem;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-
-        .summary-toggle {
-            color: var(--accent);
-            cursor: pointer;
-            transition: opacity 0.2s;
-        }
-
-        .summary-toggle:hover {
-            opacity: 0.7;
-            text-decoration: underline;
+            margin: 0;
+            overflow-wrap: anywhere;
         }
 
         .summary-entries {
             display: none;
-            margin-top: 1rem;
-            padding-top: 1rem;
-            border-top: 1px solid var(--border);
+            margin-top: var(--s-4);
+            padding: 0 0 0 var(--s-4);
+            border-left: 2px solid var(--border);
         }
 
         .summary-entries.visible {
@@ -332,15 +197,20 @@
         }
 
         .summary-entries .entry {
-            padding: 0.75rem 0;
+            padding: var(--s-3) 0;
         }
 
         .summary-entries .entry:first-child {
             padding-top: 0;
         }
 
+        .summary-entries .entry:last-child {
+            border-bottom: 0;
+            padding-bottom: 0;
+        }
+
         .summary-entries .entry-content {
-            font-size: 0.95rem;
+            font-size: var(--t-base);
             line-height: 1.6;
             color: var(--fg-muted);
         }
@@ -349,26 +219,24 @@
         .day-header {
             display: flex;
             align-items: baseline;
-            gap: 1rem;
-            padding: 3rem 0 1.5rem 0;
+            gap: var(--s-4);
+            padding: var(--s-7) 0 var(--s-2) 0;
         }
 
         .day-header:first-child {
-            padding-top: 0;
+            padding-top: var(--s-5);
         }
 
         .day-header-text {
-            font-family: 'Newsreader', Georgia, serif;
-            font-size: 1.75rem;
-            font-weight: 500;
-            font-style: italic;
+            font-family: var(--font-read);
+            font-size: var(--t-h2);
+            line-height: 1.25;
             color: var(--fg);
-            white-space: nowrap;
         }
 
         .day-header-date {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
+            font-family: var(--font-mono);
+            font-size: var(--t-xs);
             color: var(--fg-muted);
             white-space: nowrap;
         }
@@ -380,64 +248,68 @@
             align-self: center;
         }
 
-        /* Reflection styles */
+        /* Long notes are written in markdown */
         .entry-content.reflection {
-            font-size: 1.05rem;
-            line-height: 1.8;
+            white-space: normal;
         }
 
         .entry-content.reflection h1,
         .entry-content.reflection h2,
         .entry-content.reflection h3 {
-            font-family: 'Newsreader', Georgia, serif;
-            margin: 1.25rem 0 0.75rem 0;
+            font-family: var(--font-read);
+            margin: var(--s-5) 0 var(--s-3) 0;
             font-weight: 500;
+            line-height: 1.3;
         }
 
-        .entry-content.reflection h1 { font-size: 1.4rem; }
-        .entry-content.reflection h2 { font-size: 1.25rem; }
-        .entry-content.reflection h3 { font-size: 1.1rem; font-style: italic; }
+        .entry-content.reflection h1 { font-size: var(--t-h2); }
+        .entry-content.reflection h2 { font-size: var(--t-h3); }
+        .entry-content.reflection h3 { font-size: var(--t-read); font-style: italic; }
 
         .entry-content.reflection p {
-            margin: 0.75rem 0;
+            margin: var(--s-3) 0;
         }
 
-        .entry-content.reflection p:first-child {
+        .entry-content.reflection > :first-child {
             margin-top: 0;
+        }
+
+        .entry-content.reflection > :last-child {
+            margin-bottom: 0;
         }
 
         .entry-content.reflection ul,
         .entry-content.reflection ol {
-            margin: 0.75rem 0;
-            padding-left: 1.5rem;
+            margin: var(--s-3) 0;
+            padding-left: var(--s-5);
         }
 
         .entry-content.reflection li {
-            margin: 0.25rem 0;
+            margin: var(--s-1) 0;
         }
 
         .entry-content.reflection blockquote {
-            border-left: 3px solid var(--accent);
-            padding-left: 1rem;
-            margin: 1rem 0;
+            border-left: 2px solid var(--border-strong);
+            padding-left: var(--s-4);
+            margin: var(--s-4) 0;
             color: var(--fg-muted);
-            font-style: italic;
         }
 
         .entry-content.reflection code {
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.9em;
-            background: var(--border);
-            padding: 0.15rem 0.35rem;
-            border-radius: 3px;
+            font-family: var(--font-mono);
+            font-size: 0.85em;
+            background: var(--surface-sunk);
+            padding: 0.1em 0.35em;
+            border-radius: var(--r-sm);
         }
 
         .entry-content.reflection pre {
-            background: var(--border);
-            padding: 1rem;
-            border-radius: 4px;
+            background: var(--surface-sunk);
+            border: 1px solid var(--border);
+            padding: var(--s-4);
+            border-radius: var(--r-sm);
             overflow-x: auto;
-            margin: 1rem 0;
+            margin: var(--s-4) 0;
         }
 
         .entry-content.reflection pre code {
@@ -445,86 +317,32 @@
             padding: 0;
         }
 
-        .reflection-badge {
-            display: inline-block;
-            padding: 0.15rem 0.4rem;
-            background: rgba(124, 92, 191, 0.1);
-            color: var(--accent);
-            border-radius: 3px;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.65rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            vertical-align: middle;
+        .entry-content.reflection img {
+            max-width: 100%;
+            height: auto;
         }
 
         /* Empty/loading states */
-        .empty-state {
-            padding: 4rem 0;
-            color: var(--fg-muted);
-            font-style: italic;
-        }
-
+        .empty-state,
         .loading {
-            padding: 4rem 0;
+            padding: var(--s-6) 0;
             color: var(--fg-muted);
-            font-style: italic;
         }
 
         .error-state {
-            padding: 4rem 0;
-            color: #e53935;
+            padding: var(--s-4) 0;
+            font-family: var(--font-ui);
+            font-size: var(--t-base);
+            color: var(--danger);
         }
 
-        /* Edit button */
-        .edit-btn {
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 0.4rem 0.75rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            color: var(--fg-muted);
-            cursor: pointer;
-            transition: all 0.2s;
-            margin-top: 1rem;
-        }
-
-        .edit-btn:hover {
-            border-color: var(--accent);
-            color: var(--accent);
-        }
-
-        .ask-btn {
-            display: block;
-            width: 100%;
-            background: var(--accent);
-            border: none;
-            border-radius: 4px;
-            padding: 0.6rem 0.75rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            color: white;
-            cursor: pointer;
-            transition: all 0.2s;
-            margin-top: 1rem;
-            text-decoration: none;
-            text-align: center;
-        }
-
-        .ask-btn:hover {
-            opacity: 0.9;
-        }
-
-        /* Edit modal */
+        /* Edit profile dialog */
         .edit-modal {
             display: none;
             position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.5);
+            inset: 0;
+            background: var(--surface-sunk);
+            background: color-mix(in srgb, var(--bg) 80%, transparent);
             z-index: 1000;
             align-items: center;
             justify-content: center;
@@ -536,169 +354,73 @@
 
         .edit-modal-content {
             background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 2rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-md);
+            padding: var(--s-6);
             max-width: 500px;
             width: 90%;
             max-height: 90vh;
             overflow-y: auto;
         }
 
-        .edit-modal h3 {
-            font-size: 1.2rem;
-            font-weight: 500;
-            margin-bottom: 1.5rem;
-        }
-
-        .edit-field {
-            margin-bottom: 1rem;
-        }
-
-        .edit-field label {
-            display: block;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: var(--fg-muted);
-            margin-bottom: 0.5rem;
-        }
-
-        .edit-field input,
-        .edit-field textarea {
-            width: 100%;
-            padding: 0.6rem 0.75rem;
-            font-family: 'Newsreader', Georgia, serif;
-            font-size: 0.9rem;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--fg);
-        }
-
-        .edit-field textarea {
-            resize: vertical;
-            min-height: 100px;
+        .edit-modal-content h2 {
+            margin-top: 0;
         }
 
         .edit-actions {
-            display: flex;
-            gap: 0.5rem;
-            margin-top: 1.5rem;
-        }
-
-        .save-btn {
-            background: var(--accent);
-            color: white;
-            border: none;
-            border-radius: 6px;
-            padding: 0.6rem 1.25rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.85rem;
-            cursor: pointer;
-        }
-
-        .save-btn:hover {
-            opacity: 0.9;
-        }
-
-        .cancel-btn {
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 0.6rem 1.25rem;
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.85rem;
-            color: var(--fg-muted);
-            cursor: pointer;
-        }
-
-        .cancel-btn:hover {
-            border-color: var(--fg-muted);
-        }
-
-        .avatar-large {
-            width: 3.5rem;
-            height: 3.5rem;
-            font-size: 1.5rem;
-            margin-right: 0;
-            margin-bottom: 1rem;
-        }
-
-        /* Mobile */
-        @media (max-width: 768px) {
-            .container {
-                grid-template-columns: 1fr;
-            }
-
-            .sidebar {
-                position: relative;
-                height: auto;
-            }
-
-            .feed {
-                padding: 1.5rem;
-            }
-        }
-
-        /* Dark mode */
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0a0a0b;
-                --surface: #111113;
-                --border: #2a2a2e;
-                --fg: #e4e4e7;
-                --fg-muted: #8b8b8b;
-                --accent: #a78bfa;
-            }
+            margin-bottom: var(--s-2);
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <aside class="sidebar">
-            <a href="/" class="back-link">&larr; Back to feed</a>
+    <main class="r-page">
+        <header class="r-header">
+            <a class="r-brand" href="/">Router</a>
+            <nav class="r-nav" aria-label="Main">
+                <a href="/">Notebook</a>
+                <a href="/connect">Connect</a>
+                <a href="/posting-rules">Posting rules</a>
+                <a href="/settings">Settings</a>
+                <a href="/docs">Docs</a>
+            </nav>
+        </header>
 
-            <div class="profile-header" id="profile-header">
-                <div class="loading">Loading profile...</div>
-            </div>
+        <section class="profile-header" id="profile-header" aria-label="Profile">
+            <p class="r-status loading" role="status">Loading the profile…</p>
+        </section>
 
-            <div class="explainer">
-                <div class="explainer-section">
-                    <h2>About profiles</h2>
-                    <p>This is a public profile showing entries shared through Router from AI conversations.</p>
-                </div>
-            </div>
+        <p class="r-hint profile-about">The notes on this page are public: anyone on the internet can read them.</p>
 
-            <div class="footer">
-                <a href="https://teleportcomputer.com">Powered by Teleport Computer</a>
-            </div>
-        </aside>
+        <section class="feed" id="feed" aria-label="Notes">
+            <p class="r-status loading" role="status">Loading notes…</p>
+        </section>
 
-        <div class="feed-container">
-            <main class="feed" id="feed">
-                <div class="loading">Loading entries...</div>
-            </main>
-        </div>
-    </div>
+        <footer class="r-footer">
+            <a href="/docs">How Router works</a>
+            <a href="/prompt">What agents are told</a>
+            <a href="/api/attestation">Attestation</a>
+            <a href="https://github.com/jameslbarnes/teleport-router" rel="noopener">Source</a>
+        </footer>
+    </main>
 
-    <!-- Edit Profile Modal -->
+    <!-- Edit profile dialog -->
     <div class="edit-modal" id="edit-modal">
-        <div class="edit-modal-content">
-            <h3>Edit Profile</h3>
+        <div class="edit-modal-content" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+            <h2 class="r-h3" id="edit-modal-title">Edit profile</h2>
             <div class="edit-field">
-                <label>Display Name</label>
-                <input type="text" id="edit-display-name" placeholder="Your name">
+                <label class="r-label" for="edit-display-name">Display name</label>
+                <input class="r-input" type="text" id="edit-display-name" autocomplete="name">
             </div>
             <div class="edit-field">
-                <label>Bio</label>
-                <textarea id="edit-bio" placeholder="A short bio about yourself..."></textarea>
+                <label class="r-label" for="edit-bio">Bio</label>
+                <textarea class="r-textarea" id="edit-bio"></textarea>
+                <p class="r-hint">Your display name and bio are public.</p>
             </div>
-            <div class="edit-actions">
-                <button class="save-btn" onclick="saveProfile()">Save</button>
-                <button class="cancel-btn" onclick="closeEditModal()">Cancel</button>
+            <div class="r-actions edit-actions">
+                <button type="button" class="r-btn r-btn--primary save-btn" onclick="saveProfile()">Save profile</button>
+                <button type="button" class="r-btn cancel-btn" onclick="closeEditModal()">Cancel</button>
             </div>
+            <p class="r-status r-status--error" id="edit-status" role="alert"></p>
         </div>
     </div>
 
@@ -777,7 +499,7 @@
 
             if (trigger && trigger.textContent) {
                 const original = trigger.textContent;
-                trigger.textContent = 'copied';
+                trigger.textContent = 'Copied';
                 setTimeout(() => {
                     trigger.textContent = original;
                 }, 900);
@@ -834,8 +556,8 @@
             const fullDate = formatFullDate(dateStr);
             return `
                 <div class="day-header">
-                    <span class="day-header-text">${label}</span>
-                    <span class="day-header-date">${fullDate}</span>
+                    <h2 class="day-header-text">${escapeHtml(label)}</h2>
+                    ${label === fullDate ? '' : `<span class="day-header-date">${escapeHtml(fullDate)}</span>`}
                     <span class="day-header-line"></span>
                 </div>
             `;
@@ -843,9 +565,9 @@
 
         // Generate "Ask Claude about user" URL
         function generateAskAboutUrl(handle) {
-            const prompt = `I want to learn about @${handle} from the shared notebook.
+            const prompt = `I want to learn about @${handle} from the Router notebook.
 
-Use router_search with handle "${handle}" to explore their recent entries. Then, based on our conversation history, tell me what I might have in common with this person—shared interests, overlapping topics, or complementary perspectives.`;
+Use router_search with handle "${handle}" to explore their recent notes. Then, based on our conversation history, tell me what I might have in common with this person—shared interests, overlapping topics, or complementary perspectives.`;
 
             return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
         }
@@ -854,44 +576,35 @@ Use router_search with handle "${handle}" to explore their recent entries. Then,
         function generateFollowUrl(handle) {
             const prompt = `I want to follow @${handle} on Router.
 
-Look up their profile and recent entries using router_search with handle "${handle}", then use router_follow with action "follow" and handle "${handle}". Write a note that captures who they are and what they write about.`;
+Look up their profile and recent notes using router_search with handle "${handle}", then use router_follow with action "follow" and handle "${handle}". Write a note that captures who they are and what they write about.`;
 
             return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
         }
 
-        // Generate avatar HTML from handle
-        function renderAvatar(handle, large = false, small = false) {
-            let hash = 0;
-            for (let i = 0; i < handle.length; i++) {
-                hash = handle.charCodeAt(i) + ((hash << 5) - hash);
-            }
-            const hue = Math.abs(hash % 360);
-            const color = `hsl(${hue}, 65%, 45%)`;
-            const initial = handle.charAt(0).toUpperCase();
-            let sizeClass = 'avatar';
-            if (large) sizeClass = 'avatar avatar-large';
-            else if (small) sizeClass = 'avatar avatar-small';
-            return `<span class="${sizeClass}" style="background: ${color}">${initial}</span>`;
+        // The avatar is the handle's first letter. Its colours come from the shared stylesheet.
+        function renderAvatar(handle, large = false) {
+            const initial = String(handle || '?').charAt(0).toUpperCase();
+            return `<span class="${large ? 'avatar avatar-large' : 'avatar'}" aria-hidden="true">${escapeHtml(initial)}</span>`;
         }
 
-        // Generate discuss URL for an entry
+        // Generate discuss URL for a note
         function generateDiscussUrl(entry) {
-            const prompt = `I want to discuss a Router notebook entry.
+            const prompt = `I want to discuss a note from the Router notebook.
 
 Entry ID: ${entry.id}
 
-Use get_notebook_entry to fetch it, then let's talk about it.`;
+Use router_get_entry to fetch it, then let's talk about it.`;
 
             return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
         }
 
-        // Generate discuss URL for a session/summary
+        // Generate discuss URL for a summary's notes
         function generateSessionDiscussUrl(entryIds) {
-            const prompt = `I want to discuss a session from Router.
+            const prompt = `I want to discuss a group of notes from the Router notebook.
 
 Entry IDs: ${entryIds.join(', ')}
 
-Use get_notebook_entry to fetch each one, then let's talk about what's interesting.`;
+Use router_get_entry to fetch each one, then let's talk about what's interesting.`;
 
             return `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
         }
@@ -903,34 +616,36 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
             if (container.classList.contains('visible')) {
                 container.classList.remove('visible');
-                toggle.textContent = 'expand';
+                toggle.textContent = 'Show notes';
+                toggle.setAttribute('aria-expanded', 'false');
                 return;
             }
 
             container.classList.add('visible');
-            toggle.textContent = 'collapse';
+            toggle.textContent = 'Hide notes';
+            toggle.setAttribute('aria-expanded', 'true');
 
             // Check if already loaded
             if (container.dataset.loaded) return;
 
             try {
-                const res = await fetch(`/api/summaries/${summaryId}/entries`);
+                const res = await fetch(`/api/summaries/${encodeURIComponent(summaryId)}/entries`);
                 const data = await res.json();
                 const entries = data.entries || [];
 
                 if (entries.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No entries found.</div>';
+                    container.innerHTML = '<p class="empty-state">No notes to show.</p>';
                 } else {
                     container.innerHTML = entries.map(entry => `
                         <div class="entry">
                             <div class="entry-content">${escapeHtml(entry.content)}</div>
-                            <div class="entry-meta">${formatTime(entry.timestamp)}</div>
+                            <div class="entry-meta">${escapeHtml(formatTime(entry.timestamp))}</div>
                         </div>
                     `).join('');
                 }
                 container.dataset.loaded = 'true';
             } catch (err) {
-                container.innerHTML = '<div class="error-state">Failed to load entries.</div>';
+                container.innerHTML = '<p class="error-state" role="alert">Could not load these notes. Close and open the list to try again.</p>';
             }
         }
 
@@ -1008,45 +723,50 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             }
 
             if (!html) {
-                return `
-                    <div class="feed-header">
-                        <h2>Entries</h2>
-                    </div>
-                    <div class="empty-state">No entries yet.</div>
-                `;
+                return '<p class="empty-state">No notes yet.</p>';
             }
 
             return html;
         }
 
-        // Render a single entry
+        // Where a note was written, when the note says so
+        function describeSource(entry) {
+            const clientName = { desktop: 'Desktop', mobile: 'Mobile', code: 'Code' }[entry.client] || '';
+            return [clientName ? `Claude ${clientName}` : '', entry.model || ''].filter(Boolean).join(', ');
+        }
+
+        // Render a single note
         function renderEntry(handle, entry) {
             const isReflection = entry.isReflection;
-            const type = isReflection ? 'reflection' : 'note';
-            const clientName = { desktop: 'Desktop', mobile: 'Mobile', code: 'Code' }[entry.client] || '';
-            const model = entry.model ? ` ${entry.model}` : '';
-            const source = `Claude${model}${clientName ? ` ${clientName}` : ''}`;
+            const source = describeSource(entry);
 
             const contentHtml = isReflection
                 ? routerMarkdown(entry.content)
                 : escapeHtml(entry.content);
             const contentClass = isReflection ? 'entry-content reflection' : 'entry-content';
+            const id = escapeHtml(entry.id);
 
-            const meta = [formatTime(entry.timestamp)];
+            const header = [
+                `${renderAvatar(handle)}<span class="entry-handle">@${escapeHtml(handle)}</span>`,
+                `<a href="/e/${encodeURIComponent(entry.id)}">${escapeHtml(formatTime(entry.timestamp))}</a>`
+            ];
+            if (source) header.push(`<span>via ${escapeHtml(source)}</span>`);
+
+            const meta = [
+                `<button type="button" class="meta-action copy-link-action" data-action="copy" data-id="${id}">Copy link</button>`,
+                `<a href="${escapeHtml(generateDiscussUrl(entry))}" target="_blank" rel="noopener" class="meta-action discuss-link">Discuss with Claude</a>`
+            ];
             if (isOwnProfile) {
-                meta.push(`<button class="delete-btn" onclick="deleteEntry('${entry.id}')">delete</button>`);
+                meta.push(`<button type="button" class="meta-action delete-btn" data-action="delete" data-id="${id}">Delete this note</button>`);
             }
-            meta.push(`<a href="${generateDiscussUrl(entry)}" target="_blank" class="discuss-link">discuss with claude</a>`);
-            meta.push(`<button class="copy-link-action" onclick="copyPermalink('${entry.id}', this)">copy link</button>`);
 
             return `
-                <div class="entry" id="entry-${entry.id}">
-                    <div class="entry-header">${renderAvatar(handle)}posted a ${type} from ${escapeHtml(source)}</div>
+                <article class="entry" id="entry-${id}">
+                    <div class="entry-header">${header.join('<span aria-hidden="true">·</span>')}</div>
                     <div class="${contentClass}">${contentHtml}</div>
-                    <div class="entry-meta">
-                        <span>${meta.join(' · ')}</span>
-                    </div>
-                </div>
+                    <div class="entry-meta">${meta.join('')}</div>
+                    <p class="r-status r-status--error" role="alert" hidden></p>
+                </article>
             `;
         }
 
@@ -1054,26 +774,42 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
         function renderSummary(handle, summary) {
             const entryCount = summary.entryIds ? summary.entryIds.length : 0;
             const contentHtml = escapeHtml(summary.content || '');
+            const id = escapeHtml(summary.id);
 
-            const meta = [formatTime(summary.timestamp)];
-            meta.push(`<span class="summary-toggle" onclick="toggleSummary('${summary.id}')">expand</span>`);
+            const header = [
+                `${renderAvatar(handle)}<span class="entry-handle">@${escapeHtml(handle)}</span>`,
+                `<span>${escapeHtml(formatTime(summary.timestamp))}</span>`,
+                `<span>summary of ${entryCount} ${entryCount === 1 ? 'note' : 'notes'}</span>`
+            ];
+
+            const meta = [
+                `<button type="button" class="meta-action summary-toggle" data-action="toggle-summary" data-id="${id}" aria-expanded="false" aria-controls="summary-entries-${id}">Show notes</button>`
+            ];
             if (summary.entryIds && summary.entryIds.length > 0) {
-                meta.push(`<a href="${generateSessionDiscussUrl(summary.entryIds)}" target="_blank" class="discuss-link">discuss with claude</a>`);
+                meta.push(`<a href="${escapeHtml(generateSessionDiscussUrl(summary.entryIds))}" target="_blank" rel="noopener" class="meta-action discuss-link">Discuss with Claude</a>`);
             }
 
             return `
-                <div class="summary" id="summary-${summary.id}">
-                    <div class="summary-header">${renderAvatar(handle)}posted ${entryCount} notes from Claude</div>
+                <article class="summary" id="summary-${id}">
+                    <div class="summary-header">${header.join('<span aria-hidden="true">·</span>')}</div>
                     <p class="summary-content">${contentHtml}</p>
-                    <div class="summary-meta">
-                        <span>${meta.join(' · ')}</span>
+                    <div class="summary-meta">${meta.join('')}</div>
+                    <div class="summary-entries" id="summary-entries-${id}">
+                        <p class="r-status loading" role="status">Loading notes…</p>
                     </div>
-                    <div class="summary-entries" id="summary-entries-${summary.id}">
-                        <div class="loading">Loading...</div>
-                    </div>
-                </div>
+                </article>
             `;
         }
+
+        // Buttons inside notes carry their note's id as data, not as inline script.
+        document.getElementById('feed').addEventListener('click', event => {
+            const trigger = event.target.closest('[data-action]');
+            if (!trigger) return;
+            const id = trigger.dataset.id;
+            if (trigger.dataset.action === 'copy') copyPermalink(id, trigger);
+            else if (trigger.dataset.action === 'delete') deleteEntry(id);
+            else if (trigger.dataset.action === 'toggle-summary') toggleSummary(id);
+        });
 
         // Load profile
         async function loadProfile() {
@@ -1082,13 +818,13 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const feed = document.getElementById('feed');
 
             if (!handle) {
-                profileHeader.innerHTML = '<div class="error-state">Invalid profile URL</div>';
+                profileHeader.innerHTML = '<p class="error-state" role="alert">This address is not a profile.</p>';
                 feed.innerHTML = '';
                 return;
             }
 
             // Update page title
-            document.title = `@${handle} - Router`;
+            document.title = `@${handle} · Router`;
 
             // Check if this is the user's own profile
             savedKey = getSavedKey();
@@ -1117,10 +853,10 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                     if (profileRes.status === 404) {
                         profileHeader.innerHTML = `
                             ${renderAvatar(handle, true)}
-                            <div class="profile-handle">@${escapeHtml(handle)}</div>
-                            <div class="error-state" style="padding: 1rem 0;">User not found</div>
+                            <h1 class="profile-handle">@${escapeHtml(handle)}</h1>
+                            <p class="error-state">No one has this handle.</p>
                         `;
-                        feed.innerHTML = '<div class="empty-state">This profile doesn\'t exist.</div>';
+                        feed.innerHTML = '';
                         return;
                     }
                     throw new Error('Failed to load profile');
@@ -1131,7 +867,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
                 // Render profile header
                 let profileHtml = renderAvatar(profile.handle, true);
-                profileHtml += `<div class="profile-handle">@${escapeHtml(profile.handle)}</div>`;
+                profileHtml += `<h1 class="profile-handle">@${escapeHtml(profile.handle)}</h1>`;
 
                 if (profile.displayName) {
                     profileHtml += `<div class="profile-display-name">${escapeHtml(profile.displayName)}</div>`;
@@ -1152,21 +888,26 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                 }
 
                 if (profile.createdAt) {
-                    profileHtml += `<div class="profile-meta">Joined ${formatDate(profile.createdAt)}</div>`;
+                    profileHtml += `<div class="profile-meta">Joined ${escapeHtml(formatDate(profile.createdAt))}</div>`;
                 }
 
-                // Ask Claude about this user
-                profileHtml += `<a href="${generateAskAboutUrl(profile.handle)}" target="_blank" class="ask-btn">Ask Claude about @${escapeHtml(profile.handle)}</a>`;
+                profileHtml += '<div class="r-actions">';
+
+                // Ask Claude about this person
+                profileHtml += `<a href="${escapeHtml(generateAskAboutUrl(profile.handle))}" target="_blank" rel="noopener" class="r-btn ask-btn">Ask Claude about @${escapeHtml(profile.handle)}</a>`;
 
                 // Follow with Claude (only for other people's profiles)
                 if (!isOwnProfile) {
-                    profileHtml += `<a href="${generateFollowUrl(profile.handle)}" target="_blank" class="ask-btn" style="margin-left: 0.5rem;">Follow with Claude →</a>`;
+                    profileHtml += `<a href="${escapeHtml(generateFollowUrl(profile.handle))}" target="_blank" rel="noopener" class="r-btn ask-btn">Follow with Claude</a>`;
                 }
 
                 // Add edit button if this is the user's own profile
                 if (isOwnProfile) {
-                    profileHtml += `<button class="edit-btn" onclick="openEditModal()">Edit Profile</button>`;
+                    profileHtml += `<button type="button" class="r-btn edit-btn" id="edit-profile-btn" onclick="openEditModal()">Edit profile</button>`;
                 }
+
+                profileHtml += '</div>';
+                profileHtml += '<p class="r-hint">The Claude buttons open claude.ai in a new tab with a request already written. They need Router connected to Claude there.</p>';
 
                 profileHeader.innerHTML = profileHtml;
 
@@ -1193,12 +934,7 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                     : [];
 
                 if (entries.length === 0 && summaries.length === 0) {
-                    feed.innerHTML = `
-                        <div class="feed-header">
-                            <h2>Entries</h2>
-                        </div>
-                        <div class="empty-state">No entries yet.</div>
-                    `;
+                    feed.innerHTML = '<p class="empty-state">No notes yet.</p>';
                     return;
                 }
 
@@ -1211,22 +947,27 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
 
             } catch (err) {
                 console.error('Error loading profile:', err);
-                profileHeader.innerHTML = '<div class="error-state">Failed to load profile</div>';
-                feed.innerHTML = '<div class="error-state">Something went wrong. Please try again.</div>';
+                profileHeader.innerHTML = '<p class="error-state" role="alert">Could not load this profile.</p>';
+                feed.innerHTML = '<p class="error-state">Reload the page to try again.</p>';
             }
         }
 
-        // Edit modal functions
+        // Edit dialog functions
         function openEditModal() {
             if (!currentProfile) return;
 
             document.getElementById('edit-display-name').value = currentProfile.displayName || '';
             document.getElementById('edit-bio').value = currentProfile.bio || '';
+            document.getElementById('edit-status').textContent = '';
             document.getElementById('edit-modal').classList.add('active');
+            document.getElementById('edit-display-name').focus();
         }
 
         function closeEditModal() {
-            document.getElementById('edit-modal').classList.remove('active');
+            const modal = document.getElementById('edit-modal');
+            const wasOpen = modal.classList.contains('active');
+            modal.classList.remove('active');
+            if (wasOpen) document.getElementById('edit-profile-btn')?.focus();
         }
 
         async function saveProfile() {
@@ -1236,8 +977,10 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
             const bio = document.getElementById('edit-bio').value.trim();
 
             const saveBtn = document.querySelector('.save-btn');
-            saveBtn.textContent = 'Saving...';
+            const status = document.getElementById('edit-status');
+            saveBtn.textContent = 'Saving…';
             saveBtn.disabled = true;
+            status.textContent = '';
 
             try {
                 const res = await fetch('/api/identity/update', {
@@ -1251,8 +994,8 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                 });
 
                 if (!res.ok) {
-                    const data = await res.json();
-                    throw new Error(data.error || 'Failed to update profile');
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Could not save your profile. Try again.');
                 }
 
                 // Reload the profile to show updated data
@@ -1260,55 +1003,60 @@ Use get_notebook_entry to fetch each one, then let's talk about what's interesti
                 loadProfile();
 
             } catch (err) {
-                alert(err.message || 'Failed to update profile. Please try again.');
+                status.textContent = err.message || 'Could not save your profile. Try again.';
             } finally {
-                saveBtn.textContent = 'Save';
+                saveBtn.textContent = 'Save profile';
                 saveBtn.disabled = false;
             }
         }
 
-        // Close modal on outside click
+        // Close dialog on outside click
         document.getElementById('edit-modal').addEventListener('click', function(e) {
             if (e.target === this) {
                 closeEditModal();
             }
         });
 
-        // Close modal on Escape key
+        // Close dialog on Escape key
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeEditModal();
             }
         });
 
-        // Delete entry
+        // Delete a note
         async function deleteEntry(entryId) {
             if (!savedKey) return;
 
-            if (!confirm('Delete this entry? This cannot be undone.')) {
+            if (!confirm('Delete this note? This cannot be undone.')) {
                 return;
             }
 
+            const entryEl = document.getElementById(`entry-${entryId}`);
+            const status = entryEl?.querySelector('.r-status');
+
             try {
-                const res = await fetch(`/api/entries/${encodeURIComponent(entryId)}?key=${encodeURIComponent(savedKey)}`, {
-                    method: 'DELETE'
+                const res = await fetch(`/api/entries/${encodeURIComponent(entryId)}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${savedKey}` }
                 });
 
                 if (!res.ok) {
-                    const data = await res.json();
-                    throw new Error(data.error || 'Failed to delete entry');
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Could not delete this note. Try again.');
                 }
 
                 // Remove from DOM
-                const entryEl = document.getElementById(`entry-${entryId}`);
                 if (entryEl) {
                     entryEl.style.opacity = '0';
-                    entryEl.style.transition = 'opacity 0.3s';
                     setTimeout(() => entryEl.remove(), 300);
                 }
 
             } catch (err) {
-                alert(err.message || 'Failed to delete entry. Please try again.');
+                if (status) {
+                    status.textContent = err.message || 'Could not delete this note. Try again.';
+                    status.hidden = false;
+                }
             }
         }
 

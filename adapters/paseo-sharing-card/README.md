@@ -13,8 +13,9 @@ does not prove viewport visibility, attention, reading or approval.
 
 ## Connect a conversation
 
-Requires the Router sharing-notice API from PR #42. Before deploying that server
-version, production `add-post` fails rather than fabricating a receipt.
+Requires a Router server that returns sharing notices and has the
+`router_record_sharing_notice` tool. Against a server without them, `add-post`
+fails; it does not make up a receipt.
 
 1. Install dependencies in this directory and run `npm run typecheck` and `npm test`.
 2. Install this directory as a trusted local Paseo plugin, ID `router-sharing-card`.

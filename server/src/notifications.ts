@@ -250,7 +250,7 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
 
   <p>Click below to verify your email. This lets you receive messages from other people on Router.</p>
 
-  <p><a href="${baseUrl}/api/verify-email?token=${verificationToken}" class="btn">Verify email</a></p>
+  <p><a href="${baseUrl}/verify-email?token=${verificationToken}" class="btn">Verify email</a></p>
 
   <p style="font-size: 14px; color: #666;">This link expires in 24 hours.</p>
 

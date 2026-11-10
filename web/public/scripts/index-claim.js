@@ -1,14 +1,20 @@
 
-        // Claim handle modal
+        // Claim handle dialog. showModal, hideModal, showSignedIn and renderSignedIn live in index-main.js.
         let claimCheckTimeout;
 
+        // One place sets the look of a status line: '' (plain), 'error' or 'success'.
+        function setClaimStatus(el, text, kind = '') {
+            el.textContent = text;
+            el.classList.toggle('r-status--error', kind === 'error');
+            el.classList.toggle('r-status--ok', kind === 'success');
+        }
+
         function openClaimModal() {
-            document.getElementById('claim-modal').classList.remove('hidden');
-            document.getElementById('claim-handle-input').focus();
+            showModal('claim-modal', 'claim-handle-input');
         }
 
         function closeClaimModal() {
-            document.getElementById('claim-modal').classList.add('hidden');
+            hideModal('claim-modal');
             document.getElementById('claim-handle-input').value = '';
             document.getElementById('claim-display-name').value = '';
             document.getElementById('claim-bio').value = '';
@@ -26,21 +32,18 @@
             input.value = handle;
 
             if (handle.length < 3) {
-                status.textContent = handle.length > 0 ? 'Handle must be at least 3 characters' : '';
-                status.style.color = 'var(--fg-muted)';
+                setClaimStatus(status, handle.length > 0 ? 'A handle needs at least 3 characters.' : '');
                 btn.disabled = true;
                 return;
             }
 
             if (!/^[a-z]/.test(handle)) {
-                status.textContent = 'Handle must start with a letter';
-                status.style.color = '#e57373';
+                setClaimStatus(status, 'A handle must start with a letter.', 'error');
                 btn.disabled = true;
                 return;
             }
 
-            status.textContent = 'Checking...';
-            status.style.color = 'var(--fg-muted)';
+            setClaimStatus(status, 'Checking…');
 
             claimCheckTimeout = setTimeout(async () => {
                 try {
@@ -48,17 +51,14 @@
                     const data = await res.json();
 
                     if (data.available) {
-                        status.textContent = `@${handle} is available`;
-                        status.style.color = '#81c784';
+                        setClaimStatus(status, `@${handle} is available.`, 'success');
                         btn.disabled = false;
                     } else {
-                        status.textContent = `@${handle} is taken`;
-                        status.style.color = '#e57373';
+                        setClaimStatus(status, `@${handle} is taken. Try another.`, 'error');
                         btn.disabled = true;
                     }
                 } catch (err) {
-                    status.textContent = 'Error checking availability';
-                    status.style.color = '#e57373';
+                    setClaimStatus(status, 'Could not check that handle. Check your connection and try again.', 'error');
                     btn.disabled = true;
                 }
             }, 300);
@@ -73,14 +73,13 @@
             const effectiveKey = getEffectiveKey();
 
             if (!effectiveKey) {
-                status.textContent = 'No identity key found';
+                setClaimStatus(status, 'You are not signed in. Open Settings and enter your Router key.', 'error');
                 status.style.display = 'block';
-                status.style.color = '#e57373';
                 return;
             }
 
             btn.disabled = true;
-            btn.textContent = 'Claiming...';
+            btn.textContent = 'Claiming…';
 
             try {
                 const res = await fetch('/api/identity/claim', {
@@ -97,35 +96,24 @@
                 const data = await res.json();
 
                 if (res.ok) {
-                    status.textContent = `Success! You are now @${data.handle}`;
+                    setClaimStatus(status, `You are now @${data.handle}.`, 'success');
                     status.style.display = 'block';
-                    status.style.color = '#81c784';
 
                     // Update sidebar
-                    const identityLink = document.getElementById('identity-link');
-                    if (identityLink) {
-                        identityLink.innerHTML = `
-                            <span class="identity-label">Logged in as</span>
-                            <a href="/u/${escapeHtml(data.handle)}" class="identity-handle">@${escapeHtml(data.handle)}</a>
-                            <a href="/settings" class="sidebar-btn">Settings</a>
-                            <a href="#" onclick="signOut(); return false;" style="display:block;font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:var(--fg-muted);margin-top:0.5rem;">Sign out</a>
-                        `;
-                    }
+                    showSignedIn(renderSignedIn(data.handle));
 
                     setTimeout(() => closeClaimModal(), 1500);
                 } else {
-                    status.textContent = data.error || 'Failed to claim handle';
+                    setClaimStatus(status, data.error || 'Could not claim that handle. Try again.', 'error');
                     status.style.display = 'block';
-                    status.style.color = '#e57373';
                     btn.disabled = false;
-                    btn.textContent = 'Claim Handle';
+                    btn.textContent = 'Claim handle';
                 }
             } catch (err) {
-                status.textContent = 'Network error';
+                setClaimStatus(status, 'Could not reach Router. Check your connection and try again.', 'error');
                 status.style.display = 'block';
-                status.style.color = '#e57373';
                 btn.disabled = false;
-                btn.textContent = 'Claim Handle';
+                btn.textContent = 'Claim handle';
             }
         }
     

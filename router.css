@@ -1,0 +1,465 @@
+/*
+ * Router's shared look. Every page links this file before its own styles.
+ *
+ * Three typefaces, each with one job:
+ *   --font-read  Newsreader: notes, headings and running text.
+ *   --font-ui    the system sans: buttons, inputs, labels, navigation.
+ *   --font-mono  IBM Plex Mono: handles, times, keys and code.
+ * Both webfonts are served from this origin. No page loads anything from another site.
+ *
+ * Colour says one thing each: purple is something you can act on, amber is a note that is
+ * still waiting, red removes something. Pages take colours from these variables only.
+ */
+
+@font-face {
+  font-family: 'Newsreader';
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('/assets/fonts/newsreader-latin-opsz-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Newsreader';
+  font-style: italic;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('/assets/fonts/newsreader-latin-opsz-italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/assets/fonts/ibm-plex-mono-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/assets/fonts/ibm-plex-mono-latin-500-normal.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces and text */
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --surface-sunk: #f3f1ed;
+  --border: #e8e6e3;
+  --border-strong: #8b8882;      /* edges of things you type into or click: 3.5:1 on white */
+  --fg: #1a1a1a;
+  --fg-muted: #636363;           /* 5.6:1 on --bg */
+
+  /* Meaning */
+  --accent: #6f4fb5;             /* 5.6:1 on --bg */
+  --on-accent: #ffffff;
+  --accent-soft: rgba(111, 79, 181, 0.10);
+  --waiting: #7a5600;            /* a note that has not published yet */
+  --waiting-soft: rgba(210, 167, 52, 0.18);
+  --danger: #b3261e;
+  --danger-soft: rgba(179, 38, 30, 0.08);
+  --success: #2a6b2e;
+  --success-soft: rgba(42, 107, 46, 0.10);
+
+  /* Type */
+  --font-read: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --t-xs: 0.75rem;               /* nothing smaller than 12px */
+  --t-sm: 0.875rem;
+  --t-base: 1rem;
+  --t-read: 1.125rem;
+  --t-h3: 1.25rem;
+  --t-h2: 1.5rem;
+  --t-h1: clamp(2rem, 5vw, 2.75rem);
+
+  /* Space, on a 4px step */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+  --s-7: 3rem;
+  --s-8: 4rem;
+
+  --r-sm: 4px;
+  --r-md: 8px;
+  --measure: 680px;
+  --focus-ring: 2px solid var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0e10;
+    --surface: #151517;
+    --surface-sunk: #1c1c1f;
+    --border: #2a2a2e;
+    --border-strong: #6a6a72;
+    --fg: #e6e6e9;
+    --fg-muted: #9a9aa2;
+    --accent: #b39dfa;
+    --on-accent: #17122b;
+    --accent-soft: rgba(179, 157, 250, 0.14);
+    --waiting: #e3bd55;
+    --waiting-soft: rgba(227, 189, 85, 0.14);
+    --danger: #f2a09a;
+    --danger-soft: rgba(242, 160, 154, 0.12);
+    --success: #8fcf93;
+    --success-soft: rgba(143, 207, 147, 0.12);
+  }
+}
+
+/* ── Ground rules ─────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-read);
+  font-size: var(--t-read);
+  line-height: 1.6;
+  font-optical-sizing: auto;
+}
+
+a { color: var(--accent); text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+
+code, kbd, pre, samp { font-family: var(--font-mono); font-size: 0.9em; }
+
+::selection { background: var(--accent-soft); }
+
+[hidden] { display: none !important; }
+
+:focus-visible { outline: var(--focus-ring); outline-offset: 3px; border-radius: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Page frame: the same header on every page ────────────────── */
+
+.r-page { max-width: var(--measure); margin: 0 auto; padding: var(--s-5) var(--s-5) var(--s-8); }
+.r-page--wide { max-width: 860px; }
+
+.r-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-4);
+  padding-bottom: var(--s-4);
+  margin-bottom: var(--s-7);
+  border-bottom: 1px solid var(--border);
+}
+.r-brand {
+  font-family: var(--font-read);
+  font-size: var(--t-h3);
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  text-decoration: none;
+}
+.r-nav { display: flex; flex-wrap: wrap; gap: var(--s-5); font-family: var(--font-ui); font-size: var(--t-sm); }
+.r-nav a { color: var(--fg-muted); text-decoration: none; padding: var(--s-1) 0; }
+.r-nav a:hover { color: var(--fg); }
+.r-nav a[aria-current='page'] { color: var(--fg); box-shadow: 0 1px 0 var(--fg); }
+
+.r-footer {
+  margin-top: var(--s-8);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-5);
+  font-family: var(--font-ui);
+  font-size: var(--t-sm);
+}
+.r-footer a { color: var(--fg-muted); text-decoration: none; }
+.r-footer a:hover { color: var(--fg); }
+
+/* ── Text ─────────────────────────────────────────────────────── */
+
+.r-h1 { font-family: var(--font-read); font-size: var(--t-h1); font-weight: 400; line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 var(--s-4); overflow-wrap: anywhere; }
+.r-h2 { font-family: var(--font-read); font-size: var(--t-h2); font-weight: 400; line-height: 1.25; margin: var(--s-7) 0 var(--s-3); }
+.r-h3 { font-family: var(--font-read); font-size: var(--t-h3); font-weight: 500; line-height: 1.3; margin: var(--s-5) 0 var(--s-2); }
+.r-lede { font-size: var(--t-h3); line-height: 1.5; color: var(--fg-muted); margin: 0 0 var(--s-6); max-width: 34em; }
+.r-eyebrow { font-family: var(--font-mono); font-size: var(--t-xs); font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-muted); margin: 0 0 var(--s-2); }
+.r-hint { font-family: var(--font-ui); font-size: var(--t-sm); line-height: 1.5; color: var(--fg-muted); margin: var(--s-2) 0 var(--s-4); }
+.r-meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-muted); }
+
+/* ── Buttons: one solid, one outlined, one plain ──────────────── */
+
+.r-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: var(--s-2) var(--s-5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--t-base);
+  font-weight: 550;
+  line-height: 1.3;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.r-btn:hover { border-color: var(--fg); }
+.r-btn:disabled, .r-btn[aria-disabled='true'] { opacity: 0.5; cursor: not-allowed; }
+.r-btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.r-btn--primary:hover { border-color: var(--accent); filter: brightness(1.08); }
+.r-btn--danger { color: var(--danger); border-color: currentColor; }
+.r-btn--danger:hover { background: var(--danger-soft); border-color: currentColor; }
+.r-btn--plain { border-color: transparent; color: var(--accent); padding-left: 0; padding-right: 0; min-height: 0; }
+.r-btn--plain:hover { border-color: transparent; text-decoration: underline; }
+.r-btn--small { min-height: 32px; padding: var(--s-1) var(--s-3); font-size: var(--t-sm); }
+.r-actions { display: flex; flex-wrap: wrap; gap: var(--s-3); margin: var(--s-5) 0; }
+
+/* ── Things you type into ─────────────────────────────────────── */
+
+.r-label { display: block; font-family: var(--font-ui); font-size: var(--t-sm); font-weight: 600; margin: var(--s-5) 0 var(--s-2); }
+.r-input, .r-textarea, .r-select {
+  display: block;
+  width: 100%;
+  padding: var(--s-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--t-base);
+  line-height: 1.4;
+}
+.r-textarea { min-height: 6em; resize: vertical; }
+.r-input:focus-visible, .r-textarea:focus-visible, .r-select:focus-visible { outline: var(--focus-ring); outline-offset: 1px; border-color: var(--accent); }
+.r-input--mono { font-family: var(--font-mono); font-size: var(--t-sm); }
+.r-prefix { display: flex; align-items: center; gap: var(--s-2); }
+.r-prefix > span { font-family: var(--font-mono); color: var(--fg-muted); }
+
+/* ── Surfaces ─────────────────────────────────────────────────── */
+
+.r-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-5); }
+.r-rule { border: 0; border-top: 1px solid var(--border); margin: var(--s-6) 0; }
+.r-code {
+  display: block;
+  padding: var(--s-4);
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Status: what state a note is in, and who can read it ─────── */
+
+.r-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.1em 0.55em;
+  border-radius: 999px;
+  background: var(--surface-sunk);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.r-badge--waiting { background: var(--waiting-soft); color: var(--waiting); }
+.r-badge--held { background: var(--danger-soft); color: var(--danger); }
+.r-badge--private { background: var(--accent-soft); color: var(--accent); }
+.r-badge--ok { background: var(--success-soft); color: var(--success); }
+
+/* A line of status text that scripts update. Give the element role="status". */
+.r-status { font-family: var(--font-ui); font-size: var(--t-sm); color: var(--fg-muted); min-height: 1.5em; overflow-wrap: anywhere; }
+.r-status--error { color: var(--danger); }
+.r-status--ok { color: var(--success); }
+
+.r-notice { border-left: 2px solid var(--accent); padding: var(--s-2) var(--s-4); margin: var(--s-4) 0; font-family: var(--font-ui); font-size: var(--t-sm); line-height: 1.5; }
+.r-notice--warning { border-color: var(--waiting); }
+.r-notice--danger { border-color: var(--danger); }
+
+/* ── Rendered documents (markdown) ────────────────────────────── */
+
+/* Running text keeps a readable measure; tables, code and pictures may be wider. */
+.r-prose {
+  font-family: var(--font-read);
+  font-size: var(--t-read);
+  line-height: 1.65;
+  overflow-wrap: break-word;
+}
+
+.r-prose > * {
+  max-width: 70ch;
+}
+
+.r-prose > table,
+.r-prose > pre,
+.r-prose > p:has(img) {
+  max-width: 100%;
+}
+
+.r-prose h1,
+.r-prose h2,
+.r-prose h3,
+.r-prose h4 {
+  font-family: var(--font-read);
+  scroll-margin-top: var(--s-4);
+}
+
+.r-prose h1 {
+  font-size: var(--t-h1);
+  font-weight: 400;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  margin: 0 0 var(--s-4);
+}
+
+.r-prose h1:not(:first-child) {
+  margin-top: var(--s-8);
+  padding-top: var(--s-7);
+  border-top: 1px solid var(--border);
+}
+
+.r-prose h2 {
+  font-size: var(--t-h2);
+  font-weight: 400;
+  line-height: 1.25;
+  margin: var(--s-7) 0 var(--s-3);
+}
+
+.r-prose h3,
+.r-prose h4 {
+  font-size: var(--t-h3);
+  font-weight: 500;
+  line-height: 1.3;
+  margin: var(--s-6) 0 var(--s-2);
+}
+
+.r-prose h4 {
+  font-size: var(--t-read);
+}
+
+.r-prose p {
+  margin: 0 0 var(--s-4);
+}
+
+.r-prose blockquote {
+  border-left: 2px solid var(--border-strong);
+  padding-left: var(--s-4);
+  margin: var(--s-5) 0;
+  color: var(--fg-muted);
+}
+
+.r-prose blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+.r-prose ul,
+.r-prose ol {
+  margin: 0 0 var(--s-4);
+  padding-left: var(--s-5);
+}
+
+.r-prose li {
+  margin-bottom: var(--s-2);
+}
+
+.r-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--surface-sunk);
+  padding: 0.1em 0.35em;
+  border-radius: var(--r-sm);
+}
+
+.r-prose pre {
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: var(--s-4);
+  overflow-x: auto;
+  margin: var(--s-5) 0;
+}
+
+.r-prose pre code {
+  background: none;
+  padding: 0;
+  font-size: var(--t-sm);
+  line-height: 1.6;
+}
+
+.r-prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: var(--s-5) 0;
+  font-size: var(--t-base);
+}
+
+.r-prose th,
+.r-prose td {
+  border: 1px solid var(--border);
+  padding: var(--s-2) var(--s-3);
+  text-align: left;
+  vertical-align: top;
+}
+
+.r-prose th {
+  background: var(--surface-sunk);
+  font-family: var(--font-ui);
+  font-size: var(--t-sm);
+  font-weight: 600;
+}
+
+.r-prose strong {
+  font-weight: 600;
+}
+
+.r-prose hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: var(--s-6) 0;
+}
+
+.r-prose a {
+  color: var(--accent);
+}
+
+.r-prose img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin: var(--s-4) 0;
+}
+
+.r-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 480px) {
+  .r-page { padding: var(--s-4) var(--s-4) var(--s-7); }
+  /* The name on its own line, the links in one row beneath it. */
+  .r-header { flex-direction: column; align-items: flex-start; gap: var(--s-2); margin-bottom: var(--s-6); }
+  .r-nav { gap: var(--s-1) var(--s-4); }
+  .r-actions .r-btn { width: 100%; }
+}

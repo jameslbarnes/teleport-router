@@ -8,7 +8,7 @@
     const resume = document.createElement('a');
     resume.href = '/group-setup?group=' + encodeURIComponent(groupId) + '&rules=saved';
     resume.textContent = 'Continue group setup';
-    resume.className = 'button';
+    resume.className = 'r-btn r-btn--primary';
     $('after-save').prepend(resume);
   }
   let groupContext;
@@ -17,15 +17,20 @@
   let guide;
   let reviewed = '';
   let dirty = false;
+  // The unsaved draft is kept in this tab's sessionStorage so a refresh does not lose it. It is filed under
+  // the account's handle; the Router key is never part of the storage key or of what is stored.
+  let draftKey = null;
   const selected = name => form.elements.namedItem(name).value;
-  const status = (text, error = false) => { $('status').textContent = text; $('status').classList.toggle('error', error); $('save-status').textContent = text; };
+  const status = (text, error = false) => {
+    for (const id of ['status', 'save-status']) { $(id).textContent = text; $(id).classList.toggle('error', error); $(id).classList.toggle('r-status--error', error); }
+  };
   if (groupId) $('join-link').href = '/join?next=' + encodeURIComponent('/posting-rules?group=' + encodeURIComponent(groupId));
   function draft() {
     return { mode: selected('mode'), audience: selected('audience'), destinations: selected('audience') === 'selected' ? $('destinations').value.split(',').map(s => s.trim()).filter(Boolean) : [], ...Object.fromEntries(textFields.map(f => [f, $(f).value])) };
   }
   function summary(rules) {
     const mode = { automatic: 'Post automatically within these rules.', review: 'Show me the text and audience first. Wait for approval.', manual: 'Only post when I ask. Do not proactively suggest posting.' }[rules.mode];
-    const audience = rules.audience === 'public' ? 'Public: anyone on the internet' : rules.audience === 'ask' ? 'Choose with me for each post' : rules.destinations.join(', ');
+    const audience = rules.audience === 'public' ? 'Public: anyone on the internet' : rules.audience === 'ask' ? 'Choose with me for each note' : rules.destinations.join(', ');
     const publicRule = rules.audience === 'selected' ? '\nRouter’s public notebook: only after your approval of the draft and audience, or your explicit request to publish. Open groups are already public; your posting mode above applies there.' : '';
     return `${mode}\nAudience: ${audience}${publicRule}\n\n` + textFields.map((f, i) => rules[f] ? `${['What I want', 'What to share', 'What to leave out', 'How to write', 'In my own words'][i]}:\n${rules[f]}` : '').filter(Boolean).join('\n\n');
   }
@@ -39,7 +44,37 @@
     $('save-status').textContent = '';
     reviewed = '';
   }
-  form.addEventListener('input', event => { if (event.target !== $('confirmed')) changed(); });
+  function fill(rules) {
+    form.elements.namedItem('mode').value = rules.mode;
+    form.elements.namedItem('audience').value = rules.audience;
+    $('destinations').value = rules.destinations.join(', ');
+    textFields.forEach(f => { $(f).value = rules[f]; });
+  }
+  function rememberDraft() {
+    if (!draftKey) return;
+    try { sessionStorage.setItem(draftKey, JSON.stringify({ revision, rules: draft(), destinationsText: $('destinations').value })); } catch {}
+  }
+  function forgetDraft() {
+    $('draft-restored').hidden = true;
+    if (draftKey) try { sessionStorage.removeItem(draftKey); } catch {}
+  }
+  function readDraft() {
+    if (!draftKey) return null;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(draftKey)), rules = saved?.rules;
+      if (!rules || typeof rules.mode !== 'string' || typeof rules.audience !== 'string' || !Array.isArray(rules.destinations)
+          || rules.destinations.some(d => typeof d !== 'string') || textFields.some(f => typeof rules[f] !== 'string')) return null;
+      return saved;
+    } catch { return null; }
+  }
+  async function accountHandle() {
+    try {
+      const res = await fetch('/api/identity/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret_key: key }), cache: 'no-store' });
+      const who = res.ok ? await res.json() : null;
+      return typeof who?.handle === 'string' && who.handle ? who.handle : null;
+    } catch { return null; }
+  }
+  form.addEventListener('input', event => { if (event.target !== $('confirmed')) { changed(); rememberDraft(); } });
   async function request(body) {
     const res = await fetch('/api/posting-rules', { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${key}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), cache: 'no-store' });
     const data = await res.json();
@@ -61,12 +96,12 @@
           if (!response.ok) throw Object.assign(new Error(context.error || 'Could not load this group.'), { status: response.status });
           groupContext = context;
           $('page-title').textContent = `What will you share with ${context.group.name}?`;
-          $('page-intro').textContent = 'Your own AI agent can share useful ideas and questions from your conversations with this group. Choose what belongs here and what stays with you.';
+          $('page-intro').textContent = 'Your agent can post useful ideas and questions from your conversations to this group. Choose what belongs here and what stays with you.';
           $('group-description').textContent = context.group.description;
           $('group-audience').textContent = 'Who can read group notes: ' + context.group.audience;
           $('group-suggestion').textContent = context.group.private
-            ? 'Suggested rules: share useful group notes automatically; ask for your approval before publishing on Router’s public notebook, where anyone can read them. Keep an existing “draft first” or “only when I ask” choice.'
-            : 'This group is public. Suggested rules: show you a draft and wait for your approval before each post, unless you explicitly ask to publish it. Keep an existing “only when I ask” choice.';
+            ? 'Suggested rules: post useful group notes automatically; ask for your approval before posting on Router’s public notebook, where anyone can read them. Keep an existing “draft first” or “only when I ask” choice.'
+            : 'This group is public. Suggested rules: show you a draft and wait for your approval before each note is posted, unless you explicitly ask to post it. Keep an existing “only when I ask” choice.';
           $('open-group').href = context.group_url;
           $('open-group').textContent = `Read #${context.group.id}’s notes`;
           $('group-start').hidden = false;
@@ -74,7 +109,7 @@
         } catch (err) {
           $('group-start').hidden = true;
           $('page-title').textContent = 'What should your agent share?';
-          $('page-intro').textContent = 'Choose when it can post, who can read it, and what to leave out. Write the rules in your own words. You can change them anytime.';
+          $('page-intro').textContent = 'Choose when it can post, who can read it, and what to leave out. Write the rules in your own words. You can change them at any time.';
           $('group-error').textContent = err.message + ' Your personal rules are still available below; you can choose a different audience.';
           $('group-error').hidden = false;
         }
@@ -82,17 +117,24 @@
       revision = data.revision;
       guide = data;
       form.reset();
-      if (data.rules) {
-        form.elements.namedItem('mode').value = data.rules.mode;
-        form.elements.namedItem('audience').value = data.rules.audience;
-        $('destinations').value = data.rules.destinations.join(', ');
-        textFields.forEach(f => { $(f).value = data.rules[f]; });
-      }
+      if (data.rules) fill(data.rules);
       changed(); dirty = false;
+      // Bring back what the person had written but not saved before a refresh, if it differs from what is saved.
+      if (!draftKey) { const handle = await accountHandle(); draftKey = handle ? 'router_rules_draft:' + handle : null; }
+      const unsaved = readDraft();
+      const restored = !!unsaved && JSON.stringify(unsaved.rules) !== JSON.stringify(draft());
+      if (restored) {
+        fill(unsaved.rules);
+        if (typeof unsaved.destinationsText === 'string') $('destinations').value = unsaved.destinationsText;
+        changed();
+        $('draft-restored-text').textContent = 'Restored your unsaved draft.' + (unsaved.revision !== revision ? ' Your saved rules have changed since you wrote it.' : '');
+        $('draft-restored').hidden = false;
+      } else forgetDraft();
       $('editor').disabled = false;
       $('coach').disabled = false;
-      $('after-save').hidden = !data.rules;
-      status(data.rules ? `Saved rules · revision ${revision}. Your wording is kept exactly as you wrote it.` : 'No rules saved yet. Choose what works for you below, or start with your agent.');
+      $('after-save').hidden = restored || !data.rules;
+      status(restored ? (data.rules ? `The draft below is not saved. Your saved rules are still revision ${revision}.` : 'The draft below is not saved.')
+        : data.rules ? `Saved rules · revision ${revision}. Your wording is kept exactly as you wrote it.` : 'No rules saved yet. Choose what works for you below, or start with your agent.');
     } catch (err) {
       status(err.message, true);
       $('sign-in').hidden = err.status !== 401;
@@ -108,13 +150,14 @@
     $('destinations').value = suggested.destinations.join(', ');
     // Keep the person's own words. The review makes any old conflicting instructions visible.
     textFields.forEach(f => { if (!$(f).value) $(f).value = suggested[f]; });
-    changed();
+    changed(); rememberDraft();
     status('Group rules drafted below. Your existing wording is kept. Check any earlier audience instructions, then review and save. Nothing has changed yet.');
     $('rules-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
   $('reload').addEventListener('click', () => {
-    if (!dirty || window.confirm('Loading replaces the draft on this page. Copy any edits you want to keep first. Load the saved rules?')) load();
+    if (!dirty || window.confirm('Loading replaces the draft on this page. Copy any edits you want to keep first. Load the saved rules?')) { forgetDraft(); load(); }
   });
+  $('discard-draft').addEventListener('click', () => { forgetDraft(); load(); });
   $('preview').addEventListener('click', () => {
     // The approval checkbox is for saving, not for generating this local preview.
     $('confirmed').required = false;
@@ -127,8 +170,8 @@
     $('draft').textContent = summary(rules);
     const audience = rules.audience === 'public' ? 'the public notebook' : rules.audience === 'ask' ? 'the audience you choose together' : rules.destinations.join(', ');
     const usefulNote = 'Related observations lead to a useful finding. The agent combines them into one note with the takeaway, context and what is still uncertain, following your chosen style.';
-    $('post-example').textContent = rules.mode === 'manual' ? `You explicitly ask to share an idea that fits your rules. The agent can draft it for ${audience}; it clarifies any missing audience before posting.` : rules.mode === 'review' ? `${usefulNote} It shows you the draft for ${audience}, then waits for approval.` : `${usefulNote} ${rules.audience === 'ask' ? 'It asks who should receive it before posting.' : `It can post it to ${audience}.`}`;
-    $('ask-example').textContent = rules.mode === 'manual' ? 'You ask to post something, but who should read it is unclear. The agent asks you before posting. Without your request, it stays quiet.' : 'A possible post may reveal something you meant to leave out. The agent does not publish it; it asks for clarification when useful.';
+    $('post-example').textContent = rules.mode === 'manual' ? `You explicitly ask to share an idea that fits your rules. The agent can draft it for ${audience}; it clarifies any missing audience before posting.` : rules.mode === 'review' ? `${usefulNote} It shows you the draft for ${audience}, then waits for approval.` : `${usefulNote} ${rules.audience === 'ask' ? 'It asks who should read it before posting.' : `It can post it to ${audience}.`}`;
+    $('ask-example').textContent = rules.mode === 'manual' ? 'You ask to post something, but who should read it is unclear. The agent asks you before posting. Without your request, it stays quiet.' : 'A possible note may reveal something you meant to leave out. The agent does not post it; it asks you when that would help.';
     if (rules.audience === 'selected' && rules.mode !== 'manual') $('ask-example').textContent = 'Your own idea might be useful outside the group. The agent shows you a public draft and waits for your approval. It leaves out other people’s private contributions.';
     $('review').hidden = false;
     status('Review the rules and examples. Nothing has been posted.');
@@ -141,7 +184,7 @@
     $('editor').disabled = true;
     try {
       const data = await request({ rules, expected_revision: revision, confirmed: true });
-      revision = data.revision; guide = data; dirty = false;
+      revision = data.revision; guide = data; dirty = false; forgetDraft();
       $('after-save').hidden = false;
       status(`Saved · revision ${revision}. Nothing was posted to the notebook.`);
     } catch (err) {
@@ -155,8 +198,8 @@
   }
   $('coach').addEventListener('click', () => copy((groupContext?.prompt || guide.coach) + (dirty ? '\n\nHere is my unfinished draft. Help me fill gaps and correct it:\n' + JSON.stringify(draft(), null, 2) : '')));
   $('copy-install').addEventListener('click', () => copy(guide.installation));
-  $('copy-check').addEventListener('click', () => copy('Read my saved Router posting rules with router_posting_rules. Tell me the revision, when you may post, who can read it, and what to leave out. Use invented related observations to show one coherent note in my voice, plus a routine check you would skip if my rules call for that. Say whether you would post, ask first, or skip, and show the exact audience. Include a clearly labelled preview of the sharing notice with the text, audience, timing and how I would delete it. Explain whether this app supports an actual card or a text notice. Do not publish anything or record delivery for the demonstration. Then help me find one useful existing post within my authorized access.' + (groupContext ? ` Start in #${groupContext.group.id}: ${groupContext.group_url}. Keep material from my other groups out of this conversation.` : '')));
+  $('copy-check').addEventListener('click', () => copy('Read my saved Router posting rules with router_posting_rules. Tell me the revision, when you may post, who can read it, and what to leave out. Use invented related observations to show one coherent note in my voice, plus a routine check you would skip if my rules call for that. Say whether you would post, ask first, or skip, and show the exact audience. Include a clearly labelled preview of the sharing notice with the text, audience, timing and how I would delete it. Explain whether this app supports an actual card or a text notice. Do not publish anything or record delivery for the demonstration. Then help me find one useful existing note within my authorized access.' + (groupContext ? ` Start in #${groupContext.group.id}: ${groupContext.group_url}. Keep material from my other groups out of this conversation.` : '')));
   window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
-  fetch('/api/posting-rules-guide').then(res => { if (!res.ok) throw new Error(); return res.json(); }).then(data => { if (!guide) guide = data; $('coach').disabled = false; }).catch(() => { if (!key) status('Could not load the setup prompt. Please reload the page.', true); });
+  fetch('/api/posting-rules-guide').then(res => { if (!res.ok) throw new Error(); return res.json(); }).then(data => { if (!guide) guide = data; $('coach').disabled = false; }).catch(() => { if (!key) status('Could not load the setup prompt. Reload the page to try again.', true); });
   if (key) load(); else { $('sign-in').hidden = false; status('Sign in to save your rules. You can still copy the prompt and think them through with your agent.'); }
 })();
