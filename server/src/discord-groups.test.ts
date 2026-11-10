@@ -1,7 +1,7 @@
 import {describe, it, expect} from 'vitest';
 import {MemoryStorage, type JournalEntry} from './storage.js';
 import {authorStorage, recordCodec} from './author-store.js';
-import {discordGroups} from './discord-groups.js';
+import {discordGroups, rankNotes, GRANT_IDLE_MS, GRANT_MAX_MS} from './discord-groups.js';
 import {derivePseudonym, hashSecretKey} from './identity.js';
 import type {GroupStore} from './group-store.js';
 import {testWallet,versionedMemoryStore} from './author-test-fixtures.js';
@@ -262,5 +262,53 @@ describe('Scoped private Discord group access',()=>{
     await expect(f.operate(alice.grant,{action:'read',entryId:second.entry.id})).rejects.toMatchObject({status:404});
     await expect(f.operate(bob.grant,{discordUserId:'100000000000000004',action:'save',content:'After revoke',interactionId:'100000000000000012'})).rejects.toMatchObject({status:503});
     expect(f.data.get('bob')!.has(`posts/${second.entry.id}`)).toBe(true);
+  });
+});
+
+describe('Discord permission lifetime and recall order',()=>{
+  it('keeps a permission alive while it is used, ends it after 30 idle days, and never past a year',async()=>{
+    const f = await fixture('guild');
+    const linked = await f.link();
+    const day = 86400_000;
+    f.advance(20 * day);
+    const renewed = (await f.operate(linked.grant,{action:'status'})).expiresAt;
+    expect(renewed).toBe(linked.expiresAt + 20 * day);
+    // Used again within the idle window: still active well past the original 30 days.
+    f.advance(25 * day);
+    expect((await f.save(linked.grant,'Still linked after 45 days')).saved).toBe(true);
+    // Left unused for more than 30 days: it ends, with a way back.
+    f.advance(GRANT_IDLE_MS + day);
+    await expect(f.operate(linked.grant,{action:'status'})).rejects.toMatchObject({status:403,message:expect.stringContaining('/router-link')});
+
+    const g = await fixture('guild');
+    const long = await g.link();
+    let last = long.expiresAt;
+    for (let elapsed = 0; elapsed + 20 * day < GRANT_MAX_MS; elapsed += 20 * day) {
+      g.advance(20 * day);
+      last = (await g.operate(long.grant,{action:'status'})).expiresAt;
+    }
+    expect(last).toBeLessThanOrEqual(long.expiresAt - GRANT_IDLE_MS + GRANT_MAX_MS);
+    g.advance(20 * day);
+    await expect(g.operate(long.grant,{action:'status'})).rejects.toMatchObject({status:403});
+  });
+
+  it('does not renew a permission that was withdrawn, and unlinking never extends it',async()=>{
+    const f = await fixture('guild');
+    const linked = await f.link();
+    f.advance(5 * 86400_000);
+    await f.operate(linked.grant,{action:'unlink'});
+    await expect(f.operate(linked.grant,{action:'status'})).rejects.toMatchObject({status:403});
+    expect((await f.base.getUser('alice'))!.discordGrants![0].expiresAt).toBe(linked.expiresAt);
+  });
+
+  it('puts notes that match more of the question first and ignores common words',()=>{
+    const notes = ['We met on Tuesday and the weather was fine.', 'Deletion receipts: the design we prefer.', 'A design sketch for storage.',
+      'Notes about deletion.', 'Ünïcode café plans'].map(content=>({content}));
+    expect(rankNotes(notes,'what did we say about the deletion design?').map(n=>n.content)).toEqual([
+      'Deletion receipts: the design we prefer.', 'A design sketch for storage.', 'Notes about deletion.']);
+    expect(rankNotes(notes,'')).toBe(notes);
+    expect(rankNotes(notes,'café').map(n=>n.content)).toEqual(['Ünïcode café plans']);
+    expect(rankNotes(notes,'the and')).toHaveLength(2); // only common words: fall back to matching them
+    expect(rankNotes(notes,'zebra')).toEqual([]);
   });
 });

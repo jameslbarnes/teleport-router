@@ -1,6 +1,7 @@
 /** Narrow, revocable Discord permissions. Bot credentials never stand in for an author's key. */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashSecretKey, isValidSecretKey } from './identity.js';
+import { tokenize } from './storage.js';
 import type { Channel, JournalEntry, Storage, User } from './storage.js';
 
 export interface DiscordGroupBinding {
@@ -34,6 +35,19 @@ const member = (group: Channel, handle: string) => group.subscribers.some(s => s
 const privateGroup = (group: Channel) => (group.joinRule || (group.visibility === 'private' ? 'invite' : 'open')) === 'invite';
 type Body = Record<string, unknown>;
 type AuthorStatus = (handle: string) => Promise<{linked: boolean; available?: boolean}>;
+/** A permission lasts while it is used: 30 days after the last command, and never more than a year without relinking. */
+export const GRANT_IDLE_MS = 30 * 86400_000, GRANT_MAX_MS = 365 * 86400_000, GRANT_RENEW_EVERY_MS = 86400_000;
+
+/** Notes matching more of the question come first; ties keep the newest first. Common words alone never match. */
+export function rankNotes<T extends {content: string}>(notes: T[], query: string): T[] {
+  const words = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [])];
+  if (!words.length) return notes;
+  const meaningful = words.filter(w => tokenize(w).length || /[^\x00-\x7f]/.test(w));
+  const terms = meaningful.length ? meaningful : words;
+  return notes.map((note, index) => { const text = note.content.toLowerCase();
+      return {note, index, score: terms.filter(term => text.includes(term)).length}; })
+    .filter(x => x.score > 0).sort((a, b) => b.score - a.score || a.index - b.index).map(x => x.note);
+}
 
 export function discordGroups(storage: Storage, published: Storage, authorStatus: AuthorStatus,
   { baseUrl, now = Date.now }: {baseUrl: string; now?: () => number}) {
@@ -88,7 +102,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     const owner = await storage.getUser(match[1]);
     const grant = owner?.discordGrants?.find(g => g.id === match[2]);
     if (!owner || !grant || grant.revokedAt || grant.expiresAt <= now() || !sameHash(grant.tokenHash, digest(token))
-      || grant.botHandle !== bot.handle || (grant.deliveryPending && !allowPending)) return fail(403, 'This Discord permission is no longer active.');
+      || grant.botHandle !== bot.handle || (grant.deliveryPending && !allowPending)) return fail(403, 'This Discord permission is no longer active. Use /router-link to connect again.');
     checkContext(body, grant, grant.discordUserId);
     const group = await groupFor(grant.groupId);
     if (!group.discord || !sameBinding(grant, group.discord) || !member(group, owner.handle) || !member(group, bot.handle))
@@ -114,7 +128,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     const token = `rdg1.${owner.handle}.${id}.${randomBytes(32).toString('base64url')}`;
     const grant: DiscordGroupGrant = {...binding, id, groupId: group.id, discordUserId,
       ...(pairing ? {deliveryPending: true, discordUsername: pairing.username} : {}),
-      tokenHash: digest(token), createdAt: now(), expiresAt: now() + 30 * 86400_000};
+      tokenHash: digest(token), createdAt: now(), expiresAt: now() + GRANT_IDLE_MS};
     const grants = (owner.discordGrants || []).filter(g => g.expiresAt > now() && !g.revokedAt
       && !(g.groupId === group.id && g.botHandle === binding.botHandle));
     if (grants.length >= 25) return fail(409, 'Too many active Discord group permissions.');
@@ -261,7 +275,18 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     }
     if (path !== '/api/discord/operate') return fail(404, 'Not found.');
     const {owner, group, grant} = await authorize(user, body);
-    if (body.action === 'status') return {handle: owner.handle, groupId: group.id, expiresAt: grant.expiresAt,
+    let expiresAt = grant.expiresAt;
+    const renewed = Math.min(now() + GRANT_IDLE_MS, grant.createdAt + GRANT_MAX_MS);
+    if (body.action !== 'unlink' && renewed - expiresAt >= GRANT_RENEW_EVERY_MS) {
+      expiresAt = await exclusive('links', async () => {
+        const current = (await storage.getUser(owner.handle))!;
+        const active = current.discordGrants?.find(g => g.id === grant.id && !g.revokedAt && g.expiresAt > now());
+        if (!active) return fail(403, 'This Discord permission is no longer active. Use /router-link to connect again.');
+        await storage.updateUser(owner.handle, {discordGrants: current.discordGrants!.map(g => g.id === grant.id ? {...g, expiresAt: renewed} : g)});
+        return renewed;
+      });
+    }
+    if (body.action === 'status') return {handle: owner.handle, groupId: group.id, expiresAt,
       storage: await authorStatus(owner.handle)};
     if (body.action === 'unlink') {
       return exclusive('links', async () => {
@@ -306,9 +331,8 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     }
     if (body.action === 'search') {
       if (body.query !== undefined && (typeof body.query !== 'string' || body.query.length > 500)) return fail(400, 'Search text is too long.');
-      const words = String(body.query || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
-      const entries = (await published.getChannelEntries(group.id, 500)).filter(e => e.to?.includes(`#${group.id}`))
-        .filter(e => !words.length || words.some(w => e.content.toLowerCase().includes(w))).slice(0, 8);
+      const entries = rankNotes((await published.getChannelEntries(group.id, 500)).filter(e => e.to?.includes(`#${group.id}`)),
+        String(body.query || '')).slice(0, 8);
       await authorize(user, body);
       return {groupId: group.id, entries: entries.map(view)};
     }

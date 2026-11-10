@@ -1031,16 +1031,18 @@ Generated: ${new Date().toISOString()}
                 container.innerHTML = '<p style="color: var(--fg-muted); font-size: 0.9rem; font-style: italic;">Not following anyone yet.</p>';
                 return;
             }
+            // Names and notes come from other accounts; escape them for text and attributes.
+            const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
             container.innerHTML = list.map(f => `
                 <div style="display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.75rem 0; border-top: 1px solid var(--border);">
                     <div style="flex: 1; min-width: 0;">
                         <div style="font-family: 'IBM Plex Mono', monospace; font-size: 0.85rem; font-weight: 500;">
-                            <a href="/u/${f.handle}" style="color: var(--accent); text-decoration: none;">@${f.handle}</a>
-                            ${f.displayName ? `<span style="color: var(--fg-muted); font-weight: 400;"> · ${f.displayName}</span>` : ''}
+                            <a href="/u/${encodeURIComponent(f.handle)}" style="color: var(--accent); text-decoration: none;">@${esc(f.handle)}</a>
+                            ${f.displayName ? `<span style="color: var(--fg-muted); font-weight: 400;"> · ${esc(f.displayName)}</span>` : ''}
                         </div>
                         <div style="margin-top: 0.35rem;">
                             <textarea class="text-input" style="width: 100%; font-size: 0.85rem; resize: vertical; min-height: 2.5rem; padding: 0.4rem 0.6rem;"
-                                onchange="updateFollowNote('${f.handle}', this.value)">${f.note}</textarea>
+                                onchange="updateFollowNote('${f.handle}', this.value)">${esc(f.note)}</textarea>
                         </div>
                     </div>
                     <button class="btn" style="font-size: 0.75rem; padding: 0.3rem 0.6rem; color: var(--error); border-color: var(--error);"

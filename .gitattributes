@@ -1,1 +1,2 @@
 entrypoint.sh eol=lf
+vendor/*.js -text

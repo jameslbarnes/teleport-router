@@ -21,7 +21,10 @@ teleport-router/
 │       ├── http.ts      # Main server: MCP SSE, REST API, static files
 │       ├── storage.ts   # Storage layer (Memory, Firestore, Staged)
 │       └── identity.ts  # Pseudonym generation from secret keys
-├── index.html        # Main journal feed
+├── index.html        # Journal feed for local development only (production serves web/)
+├── web/              # Production journal feed (Astro): web/src/pages/index.astro, web/public/scripts/
+├── safe-html.js      # The only two ways other people's text may reach a page as HTML
+├── vendor/           # Pinned local copies of marked and DOMPurify
 ├── setup.html        # User onboarding / key generation
 ├── prompt.html       # Shows the Claude memory prompt
 └── .github/workflows/build.yml  # CI/CD pipeline
@@ -82,7 +85,10 @@ Edit `server/src/http.ts`, find `createMCPServer()`, add to:
 2. `CallToolRequestSchema` handler (tool implementation)
 
 ### Change the journal UI
-Edit `index.html` - it's a single-file app with inline CSS/JS.
+Production serves the Astro build of `web/` (`web/src/pages/index.astro` and `web/public/scripts/index-main.js`). The root `index.html` is an older copy that only local development serves. A change made only there does not ship; make it in `web/`, and mirror it in `index.html` only if local development needs it.
+
+### Showing other people's text
+Posts, names, bios, links and group descriptions are untrusted. Put them in a page with `textContent`, with `routerEscapeHtml` (text and quoted attributes), or, for long notes, with `routerMarkdown` from `safe-html.js`, which renders markdown through DOMPurify. Never pass them to `innerHTML` or `marked.parse` directly, and never load scripts from another origin. `server/scripts/untrusted-content-browser-smoke.mjs` posts a hostile note and checks that it cannot run on the feed, profile, settings or dashboard pages.
 
 ### Update setup instructions
 Edit `setup.html` - URLs are dynamic via `window.location.origin`.

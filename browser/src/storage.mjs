@@ -18,6 +18,9 @@ export async function connectStorage({ privateKey, routerKey, request, onProgres
   const router = await request('/api/tinycloud/router');
   if (router.mode !== 'authors' || router.folder !== 'router/' || router.ownerRecovery !== 'secp256k1-v1'
       || router.recordEncryption !== 'aes-256-gcm-v2' || !router.recoveryConfirmationRequired) throw Error('This Router does not support the required storage and recovery setup.');
+  // Router may only ask for these four operations on its own folder, whatever the server says.
+  const allowed = ['tinycloud.kv/get', 'tinycloud.kv/put', 'tinycloud.kv/list', 'tinycloud.kv/del'];
+  if (!Array.isArray(router.actions) || !router.actions.length || router.actions.some(action => !allowed.includes(action))) throw Error('This Router asked for storage permissions this setup does not grant.');
   const url = new URL(router.host);
   if (url.protocol !== 'https:') throw Error('Storage must use HTTPS.');
   const owner = new TinyCloudWeb({ provider: localProvider(privateKey), tinycloudHosts: [router.host],

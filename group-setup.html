@@ -60,7 +60,8 @@
         <p class="hint">Join the Discord server using your host’s invitation first. Discord membership and Router group membership are managed separately.</p></div>
       <div id="discord-confirm" hidden><p id="discord-account"></p>
         <label class="check"><input type="checkbox" id="discord-self">I just ran /router-link myself from the Discord account shown above.</label>
-        <p>The bot will be able to save notes you submit, retrieve this group’s notes for you, and check your connection. Replies to private commands are shown only to you; saved notes are shared with the whole Router group.</p>
+        <p>The bot will be able to save notes you submit, retrieve this group’s notes for you, and check your connection. Replies to private commands are shown only to you; saved notes are shared with the whole Router group, whichever Discord channel you save from.</p>
+        <p class="hint">Discord can see what you type into its commands and what the bot replies. Summaries from <code>/router-recall</code> are written by an AI model service, which receives the notes being summarized.</p>
         <button id="confirm-discord" disabled>Connect these accounts</button></div>
       <p id="discord-state"></p><button id="check-discord" class="secondary">Check connection</button>
       <button id="unlink-discord" class="secondary" hidden>Withdraw this group’s Discord permission</button>
