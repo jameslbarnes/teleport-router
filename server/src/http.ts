@@ -36,6 +36,7 @@ import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
+import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -282,6 +283,15 @@ export const SYSTEM_SKILLS: Skill[] = [
           items: { type: 'string' },
           description: 'Optional, for ai_only notes: a few topic words shown on the stub, for example ["authentication", "enclaves"].',
         },
+        repo: {
+          type: 'string',
+          description: 'The git repository this note is about, as owner/name from its remote (for example the output of `git remote get-url origin`). Use the repository whose files the work was in, which is not always the folder the session started in. Leave out when the conversation was not about a repository. It is shown with the note to everyone who can read it, so leave it out if the person’s rules say not to name their repositories.',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional. Up to eight short lowercase topic tags, for example ["latency", "speech-recognition"], plus any tags the person’s rules ask for. Shown with the note to everyone who can read it.',
+        },
         search_keywords: {
           type: 'array',
           items: { type: 'string' },
@@ -393,6 +403,34 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
       },
       required: ['entry_id'],
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_label_entry',
+    name: 'router_label_entry',
+    description: 'Set or clear the repository and tags on notes you already posted, for example to file older notes under a project. Labels are shown to everyone who can read the note. The text, audience and publish time do not change.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'IDs of your own notes to label, up to 100. All of them get the same labels.',
+        },
+        repo: {
+          type: ['string', 'null'],
+          description: 'Repository as owner/name. Leave out to keep each note’s repository; null clears it.',
+        },
+        tags: {
+          type: ['array', 'null'],
+          items: { type: 'string' },
+          description: 'Tags to set, replacing the note’s tags. Leave out to keep them; null or an empty list clears them.',
+        },
+      },
+      required: ['entry_ids'],
     },
     createdAt: 0,
   },
@@ -960,6 +998,7 @@ export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> =
   router_search_matrix: ['Search Matrix rooms', 'read'],
   router_get_entry: ['Read a note', 'read'],
   router_delete_entry: ['Delete a note', 'destructive'],
+  router_label_entry: ['Label a note', 'write'],
   router_settings: ['Read or change settings', 'write'],
   router_skills: ['Manage skills', 'destructive'], // delete, and edit of built-in instructions
   router_skills_browse: ['Browse shared skills', 'read'],
@@ -1066,6 +1105,33 @@ const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
   {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
 const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
+
+type LabelPatch = { repo?: unknown; tags?: unknown };
+/** Checks a label change. A field absent from the patch is left alone; null or empty clears it. */
+function parseLabelPatch(patch: LabelPatch): { repo?: string | null; tags?: string[] | null } | { error: string } {
+  const out: { repo?: string | null; tags?: string[] | null } = {};
+  if ('repo' in patch && patch.repo !== undefined) {
+    const repo = normalizeRepo(patch.repo);
+    if (patch.repo != null && patch.repo !== '' && !repo) return { error: 'repo must look like owner/name' };
+    out.repo = repo ?? null;
+  }
+  if ('tags' in patch && patch.tags !== undefined) {
+    if (patch.tags != null && !Array.isArray(patch.tags)) return { error: 'tags must be a list' };
+    out.tags = normalizeTags(patch.tags) ?? null;
+  }
+  return out;
+}
+/** Sets or clears a note's repo and tags. Ownership is the caller's to check. */
+async function setEntryLabels(entry: JournalEntry, labels: { repo?: string | null; tags?: string[] | null }): Promise<JournalEntry> {
+  const apply = (target: JournalEntry) => {
+    if ('repo' in labels) { if (labels.repo) target.repo = labels.repo; else delete target.repo; }
+    if ('tags' in labels) { if (labels.tags?.length) target.tags = labels.tags; else delete target.tags; }
+    return target;
+  };
+  // A waiting note is still in memory: change it in place so its publish time and notice are kept.
+  if (storage.isPending(entry.id)) return apply(entry);
+  return publishedStorage.addEntry(apply({ ...entry })); // same id: replaces the stored record
+}
 const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string; recovery?: string}>();
 const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progress: string; result?: unknown; error?: string}>();
 let authorLinkQueue: Promise<unknown> = Promise.resolve();
@@ -2224,6 +2290,8 @@ function createMCPServer(secretKey: string) {
       const aiOnlyOverride = (args as { ai_only?: boolean })?.ai_only;
       const humanVisibleOverride = (args as { human_visible?: boolean })?.human_visible; // legacy
       const topicHints = (args as { topic_hints?: string[] })?.topic_hints;
+      const repo = normalizeRepo((args as { repo?: unknown })?.repo);
+      const tags = normalizeTags((args as { tags?: unknown })?.tags);
       const rawSearchKeywords = (args as { search_keywords?: string[] })?.search_keywords;
       // Addressing parameters
       let toAddresses = (args as { to?: string[] })?.to;
@@ -2296,6 +2364,8 @@ function createMCPServer(secretKey: string) {
         aiOnly: aiOnly || undefined, // only store if true
         isReflection: isReflection || undefined,
         topicHints: topicHints && topicHints.length > 0 ? topicHints : undefined,
+        repo,
+        tags,
         // Addressing fields
         to: toAddresses && toAddresses.length > 0 ? toAddresses : undefined,
         inReplyTo: inReplyTo || undefined,
@@ -2389,6 +2459,10 @@ function createMCPServer(secretKey: string) {
         responseText += `\n\nIn reply to: ${inReplyTo}`;
       }
 
+      if (repo || tags) {
+        responseText += `\n\nShown with the note:${repo ? ` repository ${repo}` : ''}${repo && tags ? ';' : ''}${tags ? ` tags ${tags.join(', ')}` : ''}`;
+      }
+
       if (visibility !== 'public') {
         responseText += `\n\nVisibility: ${visibility}`;
       }
@@ -2410,6 +2484,37 @@ function createMCPServer(secretKey: string) {
           type: 'text' as const,
           text: responseText,
         }],
+      };
+    }
+
+    // Label notes the caller already posted
+    if (name === 'router_label_entry') {
+      const rawIds = (args as { entry_ids?: unknown })?.entry_ids;
+      const entryIds = Array.isArray(rawIds) ? Array.from(new Set(rawIds.filter((id): id is string => typeof id === 'string' && !!id))) : [];
+      if (!entryIds.length || entryIds.length > 100) {
+        return { content: [{ type: 'text' as const, text: 'entry_ids must list between 1 and 100 note IDs.' }], isError: true };
+      }
+      const labels = parseLabelPatch((args || {}) as LabelPatch);
+      if ('error' in labels) return { content: [{ type: 'text' as const, text: labels.error }], isError: true };
+      if (!('repo' in labels) && !('tags' in labels)) {
+        return { content: [{ type: 'text' as const, text: 'Give repo, tags or both.' }], isError: true };
+      }
+      const labelUser = await storage.getUserByKeyHash(keyHash);
+      const done: string[] = [];
+      const skipped: string[] = [];
+      for (const id of entryIds) {
+        const entry = await storage.getEntry(id);
+        const own = entry && (entry.pseudonym === pseudonym || (!!labelUser?.handle && entry.handle === labelUser.handle));
+        if (!entry || !own) { skipped.push(id); continue; }
+        try { await setEntryLabels(entry, labels); done.push(id); }
+        catch (err) { console.error('[Labels] failed for', id, (err as Error).message); skipped.push(id); }
+      }
+      const shown = [labels.repo ? `repository ${labels.repo}` : 'repo' in labels ? 'no repository' : '',
+        labels.tags?.length ? `tags ${labels.tags.join(', ')}` : 'tags' in labels ? 'no tags' : ''].filter(Boolean).join('; ');
+      return {
+        content: [{ type: 'text' as const, text: `Labeled ${done.length} of ${entryIds.length} notes (${shown}).`
+          + (skipped.length ? `\nSkipped, not found or not yours: ${skipped.join(', ')}` : '') }],
+        isError: done.length === 0,
       };
     }
 
@@ -5124,6 +5229,9 @@ async function getEntryCountCached(storage: Storage): Promise<number> {
   return value;
 }
 
+const LABEL_FEED_MAX = 500;    // most notes one label-feed request returns
+const LABEL_FEED_SCAN = 5000;  // most recent notes a label-feed request looks through
+
 function buildAnonEntriesCacheKey(limit: number, offset: number, cursor?: string): string {
   return `${limit}|${offset}|${cursor || ''}`;
 }
@@ -5403,6 +5511,25 @@ const server = createServer(async (req, res) => {
       const secretKey = url.searchParams.get('key');
       const followingOnly = url.searchParams.get('following') === 'true';
       const isAnonymous = !secretKey;
+
+      // Label feed: ?repo=owner/name,name2&tag=a,b[&author=handle]. Public published notes only, whoever asks,
+      // so a site can embed it without a key. Notes matching any listed repo or tag are returned, newest first.
+      if (url.searchParams.has('repo') || url.searchParams.has('tag')) {
+        const labels = labelFilter(url.searchParams);
+        const pageLimit = Math.min(Math.max(Number.isFinite(limit) ? limit : 50, 1), LABEL_FEED_MAX);
+        const start = Math.max(Number.isFinite(offset) ? offset : 0, 0);
+        const author = normalizeHandle(url.searchParams.get('author') || '');
+        const candidates = !labels.repos.length && !labels.tags.length ? []
+          : author ? await storage.getEntriesByHandle(author, LABEL_FEED_SCAN)
+          : await storage.getEntries(LABEL_FEED_SCAN);
+        const matched = candidates.map(normalizeEntry)
+          .filter(e => hasPublicAudience(e) && matchesLabels(e, labels))
+          .sort((a, b) => b.timestamp - a.timestamp);
+        const page = matched.slice(start, start + pageLimit).map(e => stripHiddenContent(e, false));
+        res.writeHead(200);
+        res.end(JSON.stringify({ entries: page, total: matched.length, limit: pageLimit, offset: start, nextCursor: null }));
+        return;
+      }
 
       // Hot path optimization: cache anonymous feed responses briefly.
       if (isAnonymous && !followingOnly && !authorLayer) {
@@ -5812,6 +5939,46 @@ const server = createServer(async (req, res) => {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // POST /api/entries/:id/labels - The author sets or clears a note's repo and tags
+    // Body: { repo?: string | null, tags?: string[] | null }. A missing field is left as it is; null or empty clears it.
+    // ─────────────────────────────────────────────────────────────
+    if (req.method === 'POST' && url.pathname.match(/^\/api\/entries\/[^/]+\/labels$/)) {
+      const entryId = decodeURIComponent(url.pathname.slice('/api/entries/'.length, -'/labels'.length));
+      const secretKey = req.headers.authorization?.replace(/^Bearer /i, '') || url.searchParams.get('key');
+      if (!secretKey || !isValidSecretKey(secretKey)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Valid key required' }));
+        return;
+      }
+      let body: { repo?: unknown; tags?: unknown };
+      try { body = JSON.parse(await readBody(req) || '{}'); }
+      catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Body must be JSON' })); return; }
+      const entry = await storage.getEntry(entryId);
+      if (!entry) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Entry not found' }));
+        return;
+      }
+      const labelUser = await storage.getUserByKeyHash(hashSecretKey(secretKey));
+      const ownsEntry = entry.pseudonym === derivePseudonym(secretKey) || (!!labelUser?.handle && entry.handle === labelUser.handle);
+      if (!ownsEntry) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: 'You can only label your own entries' }));
+        return;
+      }
+      const labels = parseLabelPatch(body);
+      if ('error' in labels) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: labels.error }));
+        return;
+      }
+      const next = await setEntryLabels(entry, labels);
+      res.writeHead(200);
+      res.end(JSON.stringify({ id: entryId, repo: next.repo ?? null, tags: next.tags ?? [] }));
+      return;
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // POST /api/entries/:id/publish - Publish pending entry immediately
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname.match(/^\/api\/entries\/[^/]+\/publish$/)) {
@@ -5910,7 +6077,7 @@ const server = createServer(async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/api/entries') {
       const body = await readBody(req);
-      const { content, secret_key, inReplyTo, to, posting_intent } = JSON.parse(body);
+      const { content, secret_key, inReplyTo, to, posting_intent, repo: rawRepo, tags: rawTags } = JSON.parse(body);
 
       if (!isValidSecretKey(secret_key)) {
         res.writeHead(400);
@@ -5958,6 +6125,8 @@ const server = createServer(async (req, res) => {
         timestamp: Date.now(),
         isReflection: isReflection || undefined,
         to: destinations?.length ? destinations : undefined,
+        repo: normalizeRepo(rawRepo),
+        tags: normalizeTags(rawTags),
       };
 
       if (parentEntry) {

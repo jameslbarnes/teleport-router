@@ -29,6 +29,8 @@ export interface JournalEntry {
   humanVisible?: boolean; // @deprecated Use aiOnly. Show full content in human feed? Default true. False = AI-only (stub shown)
   aiOnly?: boolean; // Humans see stub, full content only via AI search. Orthogonal to access control.
   topicHints?: string[]; // For AI-only entries: topics covered (e.g., ["auth", "TEE"])
+  repo?: string;      // Repository the work happened in, as "owner/name" (see note-labels.ts). Shown with the note.
+  tags?: string[];    // Topic tags, lowercase slugs. Shown with the note.
 
   // Unified addressing system
   to?: string[];             // Destinations: @handles, #channels, emails, webhook URLs. Empty = public.
@@ -929,6 +931,9 @@ export class FirestoreStorage implements Storage {
     if (newEntry.topicHints && newEntry.topicHints.length > 0) {
       docData.topicHints = newEntry.topicHints;
     }
+
+    if (newEntry.repo) docData.repo = newEntry.repo;
+    if (newEntry.tags && newEntry.tags.length > 0) docData.tags = newEntry.tags;
 
     // Unified addressing fields
     if (newEntry.to && newEntry.to.length > 0) {
