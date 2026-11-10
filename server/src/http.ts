@@ -36,6 +36,7 @@ import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
+import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -281,6 +282,15 @@ export const SYSTEM_SKILLS: Skill[] = [
           type: 'array',
           items: { type: 'string' },
           description: 'Optional, for ai_only notes: a few topic words shown on the stub, for example ["authentication", "enclaves"].',
+        },
+        repo: {
+          type: 'string',
+          description: 'The git repository this note is about, as owner/name from its remote (for example the output of `git remote get-url origin`). Use the repository whose files the work was in, which is not always the folder the session started in. Leave out when the conversation was not about a repository. It is shown with the note to everyone who can read it, so leave it out if the person’s rules say not to name their repositories.',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional. Up to eight short lowercase topic tags, for example ["latency", "speech-recognition"], plus any tags the person’s rules ask for. Shown with the note to everyone who can read it.',
         },
         search_keywords: {
           type: 'array',
@@ -2224,6 +2234,8 @@ function createMCPServer(secretKey: string) {
       const aiOnlyOverride = (args as { ai_only?: boolean })?.ai_only;
       const humanVisibleOverride = (args as { human_visible?: boolean })?.human_visible; // legacy
       const topicHints = (args as { topic_hints?: string[] })?.topic_hints;
+      const repo = normalizeRepo((args as { repo?: unknown })?.repo);
+      const tags = normalizeTags((args as { tags?: unknown })?.tags);
       const rawSearchKeywords = (args as { search_keywords?: string[] })?.search_keywords;
       // Addressing parameters
       let toAddresses = (args as { to?: string[] })?.to;
@@ -2296,6 +2308,8 @@ function createMCPServer(secretKey: string) {
         aiOnly: aiOnly || undefined, // only store if true
         isReflection: isReflection || undefined,
         topicHints: topicHints && topicHints.length > 0 ? topicHints : undefined,
+        repo,
+        tags,
         // Addressing fields
         to: toAddresses && toAddresses.length > 0 ? toAddresses : undefined,
         inReplyTo: inReplyTo || undefined,
@@ -2387,6 +2401,10 @@ function createMCPServer(secretKey: string) {
 
       if (inReplyTo) {
         responseText += `\n\nIn reply to: ${inReplyTo}`;
+      }
+
+      if (repo || tags) {
+        responseText += `\n\nShown with the note:${repo ? ` repository ${repo}` : ''}${repo && tags ? ';' : ''}${tags ? ` tags ${tags.join(', ')}` : ''}`;
       }
 
       if (visibility !== 'public') {
@@ -5124,6 +5142,9 @@ async function getEntryCountCached(storage: Storage): Promise<number> {
   return value;
 }
 
+const LABEL_FEED_MAX = 500;    // most notes one label-feed request returns
+const LABEL_FEED_SCAN = 5000;  // most recent notes a label-feed request looks through
+
 function buildAnonEntriesCacheKey(limit: number, offset: number, cursor?: string): string {
   return `${limit}|${offset}|${cursor || ''}`;
 }
@@ -5403,6 +5424,25 @@ const server = createServer(async (req, res) => {
       const secretKey = url.searchParams.get('key');
       const followingOnly = url.searchParams.get('following') === 'true';
       const isAnonymous = !secretKey;
+
+      // Label feed: ?repo=owner/name,name2&tag=a,b[&author=handle]. Public published notes only, whoever asks,
+      // so a site can embed it without a key. Notes matching any listed repo or tag are returned, newest first.
+      if (url.searchParams.has('repo') || url.searchParams.has('tag')) {
+        const labels = labelFilter(url.searchParams);
+        const pageLimit = Math.min(Math.max(Number.isFinite(limit) ? limit : 50, 1), LABEL_FEED_MAX);
+        const start = Math.max(Number.isFinite(offset) ? offset : 0, 0);
+        const author = normalizeHandle(url.searchParams.get('author') || '');
+        const candidates = !labels.repos.length && !labels.tags.length ? []
+          : author ? await storage.getEntriesByHandle(author, LABEL_FEED_SCAN)
+          : await storage.getEntries(LABEL_FEED_SCAN);
+        const matched = candidates.map(normalizeEntry)
+          .filter(e => hasPublicAudience(e) && matchesLabels(e, labels))
+          .sort((a, b) => b.timestamp - a.timestamp);
+        const page = matched.slice(start, start + pageLimit).map(e => stripHiddenContent(e, false));
+        res.writeHead(200);
+        res.end(JSON.stringify({ entries: page, total: matched.length, limit: pageLimit, offset: start, nextCursor: null }));
+        return;
+      }
 
       // Hot path optimization: cache anonymous feed responses briefly.
       if (isAnonymous && !followingOnly && !authorLayer) {
@@ -5812,6 +5852,65 @@ const server = createServer(async (req, res) => {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // POST /api/entries/:id/labels - The author sets or clears a note's repo and tags
+    // Body: { repo?: string | null, tags?: string[] | null }. A missing field is left as it is; null or empty clears it.
+    // ─────────────────────────────────────────────────────────────
+    if (req.method === 'POST' && url.pathname.match(/^\/api\/entries\/[^/]+\/labels$/)) {
+      const entryId = decodeURIComponent(url.pathname.slice('/api/entries/'.length, -'/labels'.length));
+      const secretKey = req.headers.authorization?.replace(/^Bearer /i, '') || url.searchParams.get('key');
+      if (!secretKey || !isValidSecretKey(secretKey)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Valid key required' }));
+        return;
+      }
+      let body: { repo?: unknown; tags?: unknown };
+      try { body = JSON.parse(await readBody(req) || '{}'); }
+      catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Body must be JSON' })); return; }
+      const entry = await storage.getEntry(entryId);
+      if (!entry) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Entry not found' }));
+        return;
+      }
+      const labelUser = await storage.getUserByKeyHash(hashSecretKey(secretKey));
+      const ownsEntry = entry.pseudonym === derivePseudonym(secretKey) || (!!labelUser?.handle && entry.handle === labelUser.handle);
+      if (!ownsEntry) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: 'You can only label your own entries' }));
+        return;
+      }
+      const next: JournalEntry = { ...entry };
+      if ('repo' in body) {
+        const repo = normalizeRepo(body.repo);
+        if (body.repo != null && body.repo !== '' && !repo) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'repo must look like owner/name' }));
+          return;
+        }
+        if (repo) next.repo = repo; else delete next.repo;
+      }
+      if ('tags' in body) {
+        if (body.tags != null && !Array.isArray(body.tags)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'tags must be a list' }));
+          return;
+        }
+        const tags = normalizeTags(body.tags);
+        if (tags) next.tags = tags; else delete next.tags;
+      }
+      if (storage instanceof StagedStorage && storage.isPending(entryId)) {
+        // A waiting note is still in memory: change it in place so its publish time and notice are kept.
+        if (next.repo) entry.repo = next.repo; else delete entry.repo;
+        if (next.tags) entry.tags = next.tags; else delete entry.tags;
+      } else {
+        await publishedStorage.addEntry(next); // same id: replaces the stored record
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify({ id: entryId, repo: next.repo ?? null, tags: next.tags ?? [] }));
+      return;
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // POST /api/entries/:id/publish - Publish pending entry immediately
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname.match(/^\/api\/entries\/[^/]+\/publish$/)) {
@@ -5910,7 +6009,7 @@ const server = createServer(async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/api/entries') {
       const body = await readBody(req);
-      const { content, secret_key, inReplyTo, to, posting_intent } = JSON.parse(body);
+      const { content, secret_key, inReplyTo, to, posting_intent, repo: rawRepo, tags: rawTags } = JSON.parse(body);
 
       if (!isValidSecretKey(secret_key)) {
         res.writeHead(400);
@@ -5958,6 +6057,8 @@ const server = createServer(async (req, res) => {
         timestamp: Date.now(),
         isReflection: isReflection || undefined,
         to: destinations?.length ? destinations : undefined,
+        repo: normalizeRepo(rawRepo),
+        tags: normalizeTags(rawTags),
       };
 
       if (parentEntry) {
