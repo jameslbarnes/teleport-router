@@ -183,6 +183,8 @@
             font-family: var(--font-mono);
             font-size: var(--t-sm);
         }
+        .other-way { margin-top: var(--s-5); }
+        .other-way > summary { cursor: pointer; font-family: var(--font-ui); font-size: var(--t-sm); color: var(--accent); }
     </style>
 </head>
 <body>
@@ -331,7 +333,19 @@
                 </div>
 
                 <div class="client-panel active" id="client-code" role="tabpanel" aria-labelledby="client-tab-code">
-                    <p>Run this in your terminal:</p>
+                    <p>Install the Router plugin. Run these two commands inside Claude Code, and paste your Router key when it asks.</p>
+                    <div class="connect-code">
+                        <pre class="r-code"><code id="plugin-cmd-text">/plugin marketplace add jameslbarnes/teleport-router
+/plugin install teleport-router@teleport-router</code></pre>
+                        <div class="code-actions">
+                            <button type="button" class="r-btn r-btn--small code-copy-btn" onclick="copyText('plugin-cmd-text', this)">Copy commands</button>
+                            <button type="button" class="r-btn r-btn--small" onclick="copyRouterKey(this)">Copy my Router key</button>
+                        </div>
+                    </div>
+                    <p class="r-hint">The plugin connects Router and tells Claude Code to read your posting rules when each session starts.</p>
+                    <details class="other-way">
+                    <summary>Without the plugin</summary>
+                    <p>Use this only if you cannot install plugins. Run it in your terminal, then follow the instructions step on the <a href="/connect">Connect page</a>. Do not do both.</p>
                     <div class="connect-code">
                         <pre class="r-code"><code id="mcp-cmd-text">Loading</code></pre>
                         <div class="code-actions">
@@ -339,6 +353,7 @@
                             <button type="button" class="r-btn r-btn--small" data-show-key="mcp-cmd-text" aria-pressed="false" onclick="toggleKey(this)" hidden>Show key</button>
                         </div>
                     </div>
+                    </details>
                 </div>
 
                 <div class="client-panel" id="client-desktop" role="tabpanel" aria-labelledby="client-tab-desktop">
@@ -358,7 +373,7 @@
                 </div>
 
                 <div class="r-status" id="copy-status" role="status"></div>
-                <p class="r-hint">The plugin for Claude Code, Codex and the other ways to connect are on the <a href="/connect">Connect page</a>. You need only one of them.</p>
+                <p class="r-hint">Codex and other agents are on the <a href="/connect">Connect page</a>.</p>
 
                 <div class="r-actions">
                     <button type="button" class="r-btn r-btn--primary" onclick="advanceToStep2()" id="step-connect-next-btn">
