@@ -38,29 +38,36 @@ const wrapAAD = (c, part, role, recipient, ephemeral) =>
   Buffer.from(JSON.stringify(['teleport-router/trace-wrap/v1', c.ownerDid.toLowerCase(), c.entryId, part, role, recipient, ephemeral]));
 const kek = (secret, aad) => Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(32), aad, 32));
 
-/** Encrypt the full record for its owner alone. Returns the record Router stores and the ciphertext. */
-export function sealFull(plaintext, context, ownerPublicKey) {
-  const recipient = compressPublicKey(ownerPublicKey);
+/** Encrypt one part of a trace and wrap its key for each recipient. Returns the record Router stores and the ciphertext. */
+function sealFor(plaintext, context, part, recipients) {
   const contentKey = randomBytes(32), nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', contentKey, nonce, { authTagLength: 16 });
-  cipher.setAAD(partAAD(context, 'full'));
+  cipher.setAAD(partAAD(context, part));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
-
-  const ephemeral = createECDH('secp256k1'); ephemeral.generateKeys();
-  const ephemeralPublicKey = '0x' + ephemeral.getPublicKey('hex', 'compressed');
-  const aad = wrapAAD(context, 'full', 'owner', recipient, ephemeralPublicKey);
-  const wrapNonce = randomBytes(12);
-  const wrapper = createCipheriv('aes-256-gcm', kek(ephemeral.computeSecret(Buffer.from(recipient.slice(2), 'hex')), aad), wrapNonce, { authTagLength: 16 });
-  wrapper.setAAD(aad);
-  const wrapped = Buffer.concat([wrapper.update(contentKey), wrapper.final()]);
+  const wraps = {};
+  for (const [role, publicKey] of Object.entries(recipients)) {
+    const recipient = compressPublicKey(publicKey);
+    const ephemeral = createECDH('secp256k1'); ephemeral.generateKeys();
+    const ephemeralPublicKey = '0x' + ephemeral.getPublicKey('hex', 'compressed');
+    const aad = wrapAAD(context, part, role, recipient, ephemeralPublicKey);
+    const wrapNonce = randomBytes(12);
+    const wrapper = createCipheriv('aes-256-gcm', kek(ephemeral.computeSecret(Buffer.from(recipient.slice(2), 'hex')), aad), wrapNonce, { authTagLength: 16 });
+    wrapper.setAAD(aad);
+    const wrapped = Buffer.concat([wrapper.update(contentKey), wrapper.final()]);
+    wraps[role] = { ephemeralPublicKey, nonce: b64(wrapNonce), ciphertext: b64(wrapped), tag: b64(wrapper.getAuthTag()) };
+  }
   contentKey.fill(0);
-  return {
-    meta: { nonce: b64(nonce), tag: b64(tag), sha256: sha256Hex(ciphertext), bytes: ciphertext.length,
-      wraps: { owner: { ephemeralPublicKey, nonce: b64(wrapNonce), ciphertext: b64(wrapped), tag: b64(wrapper.getAuthTag()) } } },
-    ciphertext,
-  };
+  return { meta: { nonce: b64(nonce), tag: b64(tag), sha256: sha256Hex(ciphertext), bytes: ciphertext.length, wraps }, ciphertext };
 }
+
+/** Encrypt the full record for its owner alone. */
+export const sealFull = (plaintext, context, ownerPublicKey) => sealFor(plaintext, context, 'full', { owner: ownerPublicKey });
+
+/** Encrypt the shorter extraction copy for its owner and for the insights enclave's release key. The enclave
+ * opens it only in a run its owner authorizes, and the owner should wrap only to a key they checked. */
+export const sealDerived = (plaintext, context, ownerPublicKey, releasePublicKey) =>
+  sealFor(plaintext, context, 'derived', { owner: ownerPublicKey, release: releasePublicKey });
 
 /** The owner opens their own record. Throws if the key, the post or the ciphertext does not match. */
 export function openFull(meta, ciphertext, context, ownerPrivateKey) {

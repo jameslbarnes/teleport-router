@@ -13,7 +13,8 @@
  */
 import { createCipheriv, createDecipheriv, createECDH, createHash, hkdfSync, randomBytes, ECDH } from 'node:crypto';
 
-export type TracePart = 'full' | 'derived';
+/** `preview`: what the insights enclave returns to one owner (their answers, the draft result), sealed to them alone. */
+export type TracePart = 'full' | 'derived' | 'preview';
 export type WrapRole = 'owner' | 'release';
 export interface TraceContext { ownerDid: string; entryId: string }
 export interface KeyWrap { ephemeralPublicKey: string; nonce: string; ciphertext: string; tag: string }

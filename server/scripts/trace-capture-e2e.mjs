@@ -54,7 +54,7 @@ try {
 
   // This server has no release key: it can keep owner-only traces and nothing else.
   assert.equal((await fetch(`${base}/api/insights/release`)).status,404);
-  for(const path of ['/api/insights/runs','/api/insights/consent/draft','/api/insights/consent/status']) assert.equal(await status(path,{secret_key:secretKey}),404,path);
+  for(const path of ['/api/insights/requests','/api/insights/consent/draft','/api/insights/consent/status']) assert.equal(await status(path,{secret_key:secretKey}),404,path);
   console.log('PASS insights runs and consents are not offered by this server');
 
   // Two posts, written through the same API an agent uses.

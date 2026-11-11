@@ -1,0 +1,70 @@
+name: Deploy the insights enclave
+
+# The insights enclave is its own Phala app, separate from Router's CVM, so Router's deploys never reach its
+# release key. This runs only by hand, with an image that master's build already pushed. The first run creates
+# the app (save its id as the INSIGHTS_ENCLAVE_CVM_ID secret); later runs update it. Its secrets never leave
+# GitHub's encrypted settings and Phala's encrypted environment.
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: 'teleport-router image digest from a master build (sha256:...)'
+        required: true
+      git_sha:
+        description: 'The commit that image was built from'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: insights-enclave
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Phala CLI
+        run: npm install -g phala@1.2.6
+
+      - name: Fill in the compose file
+        env:
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          GIT_SHA: ${{ inputs.git_sha }}
+        run: |
+          digest="${IMAGE_DIGEST#sha256:}"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "image_digest must be sha256:<64 hex>"; exit 1; }
+          [[ "$GIT_SHA" =~ ^[0-9a-f]{7,40}$ ]] || { echo "git_sha must be a commit hash"; exit 1; }
+          sed -e "s/__IMAGE_DIGEST__/$digest/g" -e "s/__GIT_SHA__/$GIT_SHA/g" docker-compose.insights-enclave.yml > /tmp/insights-enclave.yml
+          ! grep -qE '__IMAGE_DIGEST__|__GIT_SHA__' /tmp/insights-enclave.yml
+          sha256sum /tmp/insights-enclave.yml
+
+      - name: Write the encrypted environment
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          INSIGHTS_LINK_SECRET: ${{ secrets.INSIGHTS_LINK_SECRET }}
+        run: |
+          [ ${#INSIGHTS_LINK_SECRET} -ge 32 ] || { echo "INSIGHTS_LINK_SECRET (32+ characters) must be set"; exit 1; }
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "ANTHROPIC_API_KEY must be set"; exit 1; }
+          umask 077
+          printf 'ANTHROPIC_API_KEY=%s\nINSIGHTS_LINK_SECRET=%s\n' "$ANTHROPIC_API_KEY" "$INSIGHTS_LINK_SECRET" > /tmp/insights-enclave.env
+
+      - name: Deploy
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          CVM_ID: ${{ secrets.INSIGHTS_ENCLAVE_CVM_ID }}
+        run: |
+          if [ -n "$CVM_ID" ]; then
+            phala deploy --wait --cvm-id "$CVM_ID" -c /tmp/insights-enclave.yml -e /tmp/insights-enclave.env --no-public-logs
+          else
+            phala deploy --wait --name router-insights-enclave --kms phala -c /tmp/insights-enclave.yml -e /tmp/insights-enclave.env --no-public-logs
+            echo "New enclave app created. Save its app id as the INSIGHTS_ENCLAVE_CVM_ID secret before the next run."
+          fi
+
+      - name: Remove the environment file
+        if: always()
+        run: rm -f /tmp/insights-enclave.env

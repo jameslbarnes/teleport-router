@@ -7,7 +7,7 @@ import type { JournalEntry, User } from './storage.js';
 import type { GroupStore } from './group-store.js';
 // The capture client ships with the plugin as plain JavaScript.
 // @ts-ignore
-import { findPosts, buildTrace, sourceOf, cleanRecords, scrubText, sealFull, openFull, readTrace } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
+import { findPosts, buildTrace, sourceOf, cleanRecords, scrubText, sealFull, sealDerived, openFull, readTrace } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
 // Synthetic session logs only, in the shape Claude Code writes them.
 const SESSION = 'synthetic-session';
@@ -237,7 +237,7 @@ describe('Cleaning a trace', () => {
   });
 });
 
-describe('Owner-only traces on a server with no release key', () => {
+describe('Owner-only traces on a server with no insights enclave', () => {
   const world = (wrap: (store: GroupStore) => GroupStore = s => s) => {
     const users = new Map<string, any>(), entries = new Map<string, JournalEntry>(), stores = new Map<string, Map<string, string>>();
     const person = (handle: string) => {
@@ -248,10 +248,9 @@ describe('Owner-only traces on a server with no release key', () => {
       return { wallet, user: users.get(handle) as User };
     };
     const release = insightsRelease({
-      releasePrivateKey: null, appId: 'production', baseUrl: 'https://router.example', build: { gitSha: null, imageDigest: null }, model: 'unused',
+      enclave: null, baseUrl: 'https://router.example', model: 'unused',
       getUser: async h => users.get(h) || null, updateUser: async () => null, getEntry: async id => entries.get(id) || null,
       storeFor: async b => { if (!stores.has(b.delegation)) stores.set(b.delegation, new Map()); return wrap(versionedMemoryStore(stores.get(b.delegation)!)); },
-      complete: null,
     });
     const post = (id: string, handle: string) => entries.set(id, { id, handle, pseudonym: handle, client: 'code', content: 'note', timestamp: 1, to: ['#group'] });
     return { release, person, post, stores };
@@ -362,7 +361,7 @@ describe('Owner-only traces on a server with no release key', () => {
     await expect(w.release.putTrace(alice.user, { entry_id: 'p1', full: { meta: full.meta, data: full.ciphertext.toString('base64') },
       derived: { meta: derived.meta, data: derived.ciphertext.toString('base64'), policy_id: 'any' } })).rejects.toThrow('runs_not_enabled');
     await expect(w.release.draftPolicy(alice.user, { triggers: ['alice'] })).rejects.toThrow('not enabled');
-    await expect(w.release.run(alice.user, { template: 'skill-check', params: {}, entry_ids: ['p1'] })).rejects.toThrow('not enabled');
+    await expect(w.release.createRequest(alice.user, { template: 'skill-check', params: {}, entry_ids: ['p1'] })).rejects.toThrow('not enabled');
     expect(w.release.consentStatus(alice.user)).toMatchObject({ active: false, reason: 'runs_not_enabled', release_key: null });
   });
 });
@@ -376,5 +375,14 @@ describe('The client and server envelopes are the same format', () => {
     expect(openPart(fromClient.meta, fromClient.ciphertext, c, 'full', 'owner', wallet.privateKey).toString()).toBe('sealed by the capture client');
     const fromServer = sealPart(Buffer.from('sealed by the server code'), c, 'full', { owner: wallet.signingKey.compressedPublicKey });
     expect(openFull(fromServer.meta, fromServer.ciphertext, c, wallet.privateKey).toString()).toBe('sealed by the server code');
+  });
+  it('seals an extraction copy that the owner and the enclave key each open, and nobody else', () => {
+    const enclave = testWallet('enclave-format-check'), other = testWallet('someone-else');
+    const copy = sealDerived(Buffer.from('extraction copy'), c, wallet.signingKey.publicKey, enclave.signingKey.publicKey);
+    expect(checkPartMeta(copy.meta, ['owner', 'release'])).toEqual(copy.meta);
+    expect(openPart(copy.meta, copy.ciphertext, c, 'derived', 'owner', wallet.privateKey).toString()).toBe('extraction copy');
+    expect(openPart(copy.meta, copy.ciphertext, c, 'derived', 'release', enclave.privateKey).toString()).toBe('extraction copy');
+    expect(() => openPart(copy.meta, copy.ciphertext, c, 'derived', 'release', other.privateKey)).toThrow();
+    expect(() => openPart(copy.meta, copy.ciphertext, c, 'full', 'release', enclave.privateKey)).toThrow();
   });
 });

@@ -23,6 +23,9 @@ services:
       - DISCORD_BOT_TOKEN
       - MODERATOR_URL=https://8f20c29f45571bade4b63d0f704faa926af53e7c-3000.dstack-pha-prod5.phala.network
       - MODERATOR_API_KEY
+      # The insights enclave, its own CVM (docker-compose.insights-enclave.yml). Unset: insights runs stay off.
+      - INSIGHTS_ENCLAVE_URL
+      - INSIGHTS_LINK_SECRET
       - SENDGRID_API_KEY
       - SENDGRID_FROM_EMAIL
     volumes:
