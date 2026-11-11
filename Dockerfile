@@ -48,7 +48,7 @@ COPY prompt.html setup.html profile.html entry.html dashboard.html join.html set
 COPY posting-rules.html posting-rules.js sharing-notice.js safe-html.js /app/
 # Pinned local copies of the markdown renderer and HTML sanitizer: pages load no third-party script.
 COPY vendor/ /app/vendor/
-COPY group-setup.html group-setup.css /app/
+COPY group-setup.html group-setup.css agent-setup.mjs /app/
 # The shared stylesheet, the icon and the self-hosted fonts every page uses.
 COPY router.css favicon.svg verify-email.html unsubscribe.html /app/
 COPY assets/ /app/assets/

@@ -32,7 +32,7 @@ import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { discordAudience } from './discord-audience.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
-import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
+import { resolveOnboardingGroup, groupOnboardingView, agentInvitePrompt, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
@@ -1693,6 +1693,7 @@ const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
@@ -3725,7 +3726,13 @@ function createMCPServer(secretKey: string) {
 
         const inviteUrl = `${BASE_URL}/join?channelinvite=${encodeURIComponent(token)}`;
         return {
-          content: [{ type: 'text' as const, text: `Invite created for #${channelId}. Anyone with this link can join until ${new Date(limits.expiresAt).toISOString().slice(0, 10)}, for up to ${limits.maxUses} ${limits.maxUses === 1 ? 'person' : 'people'}. Share it only with the people you mean to invite.\n\nJoin link: ${inviteUrl}\nToken: ${token}\n\nUsers can click the link to join. They can also join manually with: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"` }],
+          content: [{ type: 'text' as const, text: `Invite created for #${channelId}. Anyone with this link can join until ${new Date(limits.expiresAt).toISOString().slice(0, 10)}, for up to ${limits.maxUses} ${limits.maxUses === 1 ? 'person' : 'people'}. Share it only with the people you mean to invite.\n\nJoin link: ${inviteUrl}\nToken: ${token}\n\nUsers can click the link to join. They can also join manually with: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"
+
+For someone who would rather have their own agent set everything up, send them this message to paste into Claude Code or Codex. It carries the same invitation, so treat it like the link:
+
+-----
+${agentInvitePrompt(channel, BASE_URL, token)}
+-----` }],
         };
       }
 
@@ -7146,7 +7153,8 @@ const server = createServer(async (req, res) => {
 
       await storage.createInvite(invite);
       res.writeHead(201);
-      res.end(JSON.stringify(invite));
+      // The same invitation in two forms: a link for the setup page, and a prompt for the person's own agent.
+      res.end(JSON.stringify({ ...invite, agent_prompt: agentInvitePrompt(channel, BASE_URL, token) }));
       return;
     }
 
@@ -9476,7 +9484,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
       // setup.js names its lazily loaded parts by content hash, so it must always be current while the
       // parts themselves never change.
-      const cacheControl = ext === '.html' || filePath === '/onboarding-assets/setup.js'
+      const cacheControl = ext === '.html' || filePath === '/onboarding-assets/setup.js' || filePath === '/agent-setup.mjs'
         ? 'no-cache'
         : (filePath.startsWith('/assets/') || filePath.startsWith('/onboarding-assets/chunks/')
           ? 'public, max-age=31536000, immutable'
