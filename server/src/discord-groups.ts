@@ -12,7 +12,7 @@ export interface DiscordGroupBinding {
   channelId?: string;
   botHandle: string;
   version: string;
-  /** Shared replies are opt-in and checked against every current Discord server member. */
+  /** Shared replies are opt-in and checked against everyone who can currently see the channel. */
   conversationChannelIds?: string[];
 }
 export interface DiscordGroupGrant extends DiscordGroupBinding {
@@ -127,7 +127,10 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     const auth = await authorize(bot, body), {group, grant} = auth;
     if (!group.discord?.conversationChannelIds?.includes(String(body.channelId)))
       return fail(403, 'Shared group replies are not enabled in this channel. Private /router-recall still works.');
-    if (!viewers.memberIds.includes(grant.discordUserId)) return fail(403, 'The requesting Discord account is no longer in this server.');
+    // A channel that anyone joining the server can see has no fixed audience: a newcomer could read the
+    // reply before linking. The server must hide its group channels until a person has linked.
+    if (viewers.open) return fail(403, 'I cannot use group notes here while this channel is visible to everyone who joins the Discord server. Private /router-recall still works.');
+    if (!viewers.viewerIds.includes(grant.discordUserId)) return fail(403, 'The requesting Discord account cannot see this channel.');
     const linked = new Set<string>();
     for (const subscriber of group.subscribers) {
       const person = await storage.getUser(subscriber.handle);
@@ -138,10 +141,10 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           linked.add(permission.discordUserId);
       }
     }
-    if (viewers.memberIds.some(id => id !== viewers.botId && !linked.has(id)))
-      return fail(403, 'I cannot use group notes here until everyone in this Discord server has linked their account and joined the Router group. Private /router-recall still works.');
+    if (viewers.viewerIds.some(id => id !== viewers.botId && !linked.has(id)))
+      return fail(403, 'I cannot use group notes here until everyone who can see this channel has linked their account and joined the Router group. Private /router-recall still works.');
     // No claims about who saw a reply, and no trust in a member list supplied by the bot process.
-    return {...auth, audienceVersion: digest(JSON.stringify([grant.guildId, body.channelId, viewers.botId, viewers.memberIds]))};
+    return {...auth, audienceVersion: digest(JSON.stringify([grant.guildId, body.channelId, viewers.botId, viewers.viewerIds]))};
   }
   const conversationView = (entry: JournalEntry) => ({...view(entry), version: digest(JSON.stringify(view(entry)))});
 
@@ -369,7 +372,10 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     }
     if (path !== '/api/discord/operate') return fail(404, 'Not found.');
     const {owner, group, grant} = await authorize(user, body);
-    const expiresAt = body.action === 'unlink' ? grant.expiresAt : await renewGrant(owner, grant);
+    // "member" is the bot's periodic question "is this person still linked and in the group?". It is not
+    // the person using their permission, so it does not extend it.
+    const expiresAt = body.action === 'unlink' || body.action === 'member' ? grant.expiresAt : await renewGrant(owner, grant);
+    if (body.action === 'member') return {handle: owner.handle, groupId: group.id, expiresAt};
     if (body.action === 'status') return {handle: owner.handle, groupId: group.id, expiresAt,
       storage: await authorStatus(owner.handle)};
     if (body.action === 'unlink') {

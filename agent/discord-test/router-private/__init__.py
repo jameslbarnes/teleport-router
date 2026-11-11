@@ -31,6 +31,55 @@ def register(ctx):
         adapter.router_private = router
         guild = discord.Object(id=int(settings["guild_id"]))
 
+        # The door: with a member role and a welcome channel configured, the rest of the server is shown
+        # only to people linked to the group. See gate.py.
+        gate = None
+        role_id, welcome_id = settings.get("member_role_id"), settings.get("welcome_channel_id")
+        if router.scope == "guild" and role_id and welcome_id:
+            from .gate import Gate
+            role_id, welcome_id = int(role_id), int(welcome_id)
+
+            async def list_members():
+                # Over REST, like Router's own check: the gateway does not send this bot the member list.
+                found, after = [], None
+                while True:
+                    page = await native.http.get_members(guild.id, 1000, after)
+                    found += page
+                    if len(page) < 1000:
+                        return found
+                    after = max(int(m["user"]["id"]) for m in page)
+
+            async def greet(user_id):
+                channel = native.get_channel(welcome_id) or await native.fetch_channel(welcome_id)
+                await channel.send(
+                    f"Welcome <@{user_id}>. This server belongs to the #{settings['group_id']} group on Router. "
+                    "Type /router-link here to connect your Router account. The other channels open once you have.",
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, replied_user=False,
+                                                             users=[discord.Object(id=int(user_id))]),
+                    suppress_embeds=True)
+
+            gate = Gate(role_id, lambda user_id: router.membership(user_id, welcome_id), list_members,
+                lambda user_id: native.http.add_role(guild.id, int(user_id), role_id, reason="Linked to the Router group"),
+                lambda user_id: native.http.remove_role(guild.id, int(user_id), role_id, reason="No longer linked to the Router group"),
+                greet)
+
+            async def keep_gate():
+                try:
+                    await native.wait_until_ready()
+                except Exception:
+                    return
+                while True:
+                    try:
+                        await gate.sweep()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("The server door could not be checked (%s); no details logged.", type(exc).__name__)
+                    await asyncio.sleep(60)
+            adapter.router_gate = gate
+            asyncio.create_task(keep_gate())
+        opened = " The other channels are now open to you." if gate else ""
+
         async def run(interaction, operation):
             try:
                 router.actor(interaction)  # check the real Discord interaction before any network or model call
@@ -67,7 +116,9 @@ def register(ctx):
                     async def finish_pair():
                         try:
                             result = await router.wait_pair(interaction, started["pairing"])
-                            message = f"Connected @{result['handle']} to #{result['groupId']}. Use /router-save for a selected note or /router-recall to read group notes."
+                            if gate:
+                                await gate.admit(actor["discordUserId"])
+                            message = f"Connected @{result['handle']} to #{result['groupId']}.{opened} Use /router-save for a selected note or /router-recall to read group notes."
                         except asyncio.CancelledError:
                             return
                         except PrivateError as exc:
@@ -88,7 +139,9 @@ def register(ctx):
                 return
             async def operation():
                 result = await router.link(interaction, code)
-                return f"Linked @{result['handle']} to #{result['groupId']}. Use /router-save to save a selected note to your own TinyCloud storage."
+                if gate:
+                    await gate.admit(interaction.user.id)
+                return f"Linked @{result['handle']} to #{result['groupId']}.{opened} Use /router-save to save a selected note to your own TinyCloud storage."
             await run(interaction, operation)
 
         save_description = (f"Save selected text to the private #{settings['group_id']} Router group"
@@ -135,6 +188,9 @@ def register(ctx):
         async def unlink(interaction):
             async def operation():
                 await router.operate(interaction, "unlink")
+                if gate:
+                    await gate.dismiss(interaction.user.id)
+                    return "Discord access withdrawn. Your notes remain in your TinyCloud storage. You now see only the welcome channel here; /router-link opens the server again."
                 return "Discord access withdrawn. Your notes remain in your TinyCloud storage."
             await run(interaction, operation)
 
