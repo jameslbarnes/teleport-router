@@ -90,7 +90,7 @@ describe('Withholding across related sessions', () => {
     const lines = [user('summarise what the diary said'), say('It said: DIARY TEXT'), use('w1', WRITE, { entry: 'x' }), result('w1', receipt('child-post'))];
     const asChild = { fileName: 'agent-abc123.jsonl', excludedSessions: new Set([SESSION]) };
     expect(findPosts(lines, asChild)).toMatchObject({ parentSessionId: SESSION });
-    expect(findPosts(lines, asChild).posts[0].withheld).toContain('started this one');
+    expect(findPosts(lines, asChild).posts[0].withheld).toContain('descends from');
     expect(JSON.stringify(readTrace(buildTrace({ post: findPosts(lines, asChild).posts[0], lines }).plaintext))).not.toContain('DIARY');
     // The same log is not withheld when its parent is not excluded, or when it is the parent's own log.
     expect(findPosts(lines, { fileName: 'agent-abc123.jsonl' }).posts[0].withheld).toBeNull();
@@ -170,7 +170,7 @@ describe('Codex session logs', () => {
     const child = [line('session_meta', { id: 'child-thread', session_id: 'child-thread', parent_thread_id: THREAD, cwd: 'C:/work' }), ...log().slice(1, 2), mcp('hermes', 'router_write_entry', receipt('codex-child'))];
     expect(findPosts(child)).toMatchObject({ sessionId: 'child-thread', parentSessionId: THREAD });
     expect(findPosts(child).posts[0].withheld).toBeNull();
-    expect(findPosts(child, { excludedSessions: new Set([THREAD]) }).posts[0].withheld).toContain('started this one');
+    expect(findPosts(child, { excludedSessions: new Set([THREAD]) }).posts[0].withheld).toContain('descends from');
     // A log whose first model record is carried-over history cannot be checked.
     const resumed = [line('session_meta', { id: 'resumed', session_id: 'resumed' }), compacted, mcp('hermes', 'router_write_entry', receipt('codex-resumed'))];
     expect(findPosts(resumed).posts[0].withheld).toContain('summary of an earlier session');

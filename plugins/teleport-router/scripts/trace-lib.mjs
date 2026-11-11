@@ -132,7 +132,7 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
   const origin = sessionOrigin(lines, fileName);
   const posts = [], pending = new Map();
   let withheld = origin.startsFromSummary ? 'the session log opens with a summary of an earlier session that cannot be checked'
-    : origin.parentSessionId && excludedSessions.has(origin.parentSessionId) ? 'the session that started this one called a tool whose results are never uploaded' : null;
+    : origin.parentSessionId && excludedSessions.has(origin.parentSessionId) ? 'a session this one descends from called a tool whose results are never uploaded, or its log has not been read so that cannot be ruled out' : null;
   let first = 0, previous = null, failed = 0, unrecognized = 0, calledNeverUpload = false;
   const never = name => { const hit = neverUpload.find(p => name.includes(p)); if (hit) { calledNeverUpload = true; withheld ||= `the session called ${hit}, whose results are never uploaded`; } };
   for (let i = 0; i < lines.length; i++) {
