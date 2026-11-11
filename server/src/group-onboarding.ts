@@ -221,3 +221,10 @@ ${channel.discord ? '7' : '6'}. Connect yourself, so that later conversations ca
 
 Finish by telling me, in a few lines: my handle, the group I joined, where my keys are, what you posted and how to delete it, and anything that is still to do.`;
 }
+
+/** What a new member is told about the group's Discord server right after joining. */
+export function joinDiscordNote(channel: { discordInviteUrl?: string }): string {
+  return channel.discordInviteUrl
+    ? ` This group also has a Discord server: join at ${channel.discordInviteUrl}, then run /router-link there to connect your Router account for private saves and recall.`
+    : '';
+}

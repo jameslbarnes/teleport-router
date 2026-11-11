@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MemoryStorage, type Channel } from './storage.js';
-import { agentInvitePrompt, agentInviteText, discordInvite, inviteForms, groupOnboardingView, resolveOnboardingGroup } from './group-onboarding.js';
+import { agentInvitePrompt, agentInviteText, discordInvite, joinDiscordNote, inviteForms, groupOnboardingView, resolveOnboardingGroup } from './group-onboarding.js';
 
 const channel: Channel = { id: 'reading-club', name: 'Reading club', description: 'Questions we want to explore together.', visibility: 'private', joinRule: 'invite', createdBy: 'alice', createdAt: 1, skills: [], subscribers: [{ handle: 'alice', role: 'admin', joinedAt: 1 }] };
 const base = 'https://router.example';
@@ -124,5 +124,12 @@ describe('Invitation limits and removing a member', () => {
     expect(text).toContain('only if this link came from the person you are working for');
     expect(text).toContain(forms.agent_prompt);
     expect(groupOnboardingView({ ...channel, discordInviteUrl: 'https://discord.gg/abc123' }, true, base)).toMatchObject({ discord_invite: 'https://discord.gg/abc123' });
+  });
+});
+
+describe("Join confirmation mentions the Discord server", () => {
+  it("gives the saved invitation and /router-link, and says nothing when none is saved", () => {
+    expect(joinDiscordNote({ discordInviteUrl: "https://discord.gg/abc123" })).toMatch(/https:\/\/discord\.gg\/abc123.*\/router-link/);
+    expect(joinDiscordNote({})).toBe("");
   });
 });
