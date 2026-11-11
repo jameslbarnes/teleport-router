@@ -37,7 +37,7 @@ node router-setup.mjs join --invite <token> --handle <name> --approve-rules grou
 - `--approve-rules group` saves the group's suggested rules. The message states those rules in words and says that sending it is the person's approval; without the flag nothing is saved. Existing rules are never replaced.
 - `tools` and `call` reach Router's tools with the new account before Router is connected to the agent's app, so the agent can read the group and post a first note in the same conversation. The usual sharing receipt comes back.
 - Discord still needs the person: they join the server, type `/router-link` and paste the private link to their agent. `discord --link` shows which Discord account asked; `--confirm` connects it.
-- The last step installs the Router plugin, unless Router is already connected in that app under another account.
+- `connect` installs the Router plugin in Claude Code. The script, not the agent, refuses when Router is already connected there, so an invitation can never replace another account's connection.
 
 The group's name and description are written by its admin. They appear in the message as one quoted data line and never as steps.
 

@@ -10,6 +10,9 @@
 //       What is set up: group membership, storage, posting rules, Discord.
 //   node agent-setup.mjs discord --handle <name> --link "<private link from /router-link>" [--confirm]
 //       Shows which Discord account asked to connect. With --confirm, connects it.
+//   node agent-setup.mjs connect --handle <name>
+//       Installs the Router plugin in Claude Code with this account. It changes nothing if Router is
+//       already connected there, so it can never replace another account's connection.
 //   node agent-setup.mjs tools --handle <name> [tool-name]
 //       Lists Router's tools, or prints one tool's inputs.
 //   node agent-setup.mjs call --handle <name> <tool-name> --args-file <file.json>
@@ -315,6 +318,29 @@ async function run() {
     return;
   }
 
+  if (command === 'connect') {
+    const handle = handleArg(), { key } = await account(handle);
+    const sh = line => { const r = spawnSync(line, { shell: true, encoding: 'utf8', timeout: 180_000 }); return { ok: r.status === 0, text: clean((r.stdout || '') + (r.stderr || '')) }; };
+    const other = `For Codex or another app, follow ${router.origin}/connect.`;
+    if (!sh('claude --version').ok) { console.log(JSON.stringify({ claude_code: 'not found on this machine', changed: false, next: other }, null, 1)); return; }
+    // Decided here and not by the agent: an existing connection may belong to another account, and replacing
+    // it would make every later conversation on this machine post as someone else.
+    const plugins = sh('claude plugin list'), servers = sh('claude mcp list');
+    const existing = [/teleport-router/i.test(plugins.text) && 'the Router plugin is installed',
+      servers.text.split(/\r?\n/).some(l => !/^plugin:teleport-router/i.test(l.trim()) && (l.includes(router.host) || /router\.teleport\.computer|phala\.network\/mcp/.test(l))) && 'a server entry points at Router'].filter(Boolean);
+    if (!plugins.ok || existing.length) {
+      console.log(JSON.stringify({ claude_code: plugins.ok ? 'Router is already connected: ' + existing.join('; ') : 'could not list plugins', changed: false,
+        next: `Nothing was changed. Tell the person. If the existing connection is another account of theirs, they choose which account this app uses; this script will not replace it. ${other}` }, null, 1));
+      return;
+    }
+    let done = sh(`claude plugin install teleport-router --marketplace jameslbarnes/teleport-router --config router_key=${key}`);
+    if (!done.ok) { sh('claude plugin marketplace add jameslbarnes/teleport-router'); done = sh(`claude plugin install teleport-router@teleport-router --config router_key=${key}`); }
+    console.log(JSON.stringify({ claude_code: done.ok ? 'Router plugin installed for @' + handle : 'install failed', changed: done.ok,
+      detail: done.ok ? undefined : done.text.slice(-400), next: done.ok ? `Router is available from the next conversation in Claude Code. ${other}` : other }, null, 1));
+    if (!done.ok) process.exitCode = 1;
+    return;
+  }
+
   if (command === 'tools' || command === 'call') {
     const handle = handleArg(), { key } = await account(handle);
     const takesValue = ['--handle', '--router', '--home', '--args-file', '--group', '--link', '--invite', '--name', '--approve-rules'];
@@ -334,7 +360,7 @@ async function run() {
     return;
   }
 
-  fail('Usage: node agent-setup.mjs <join|status|discord|tools|call> … (the comment at the top of this file lists each one)');
+  fail('Usage: node agent-setup.mjs <join|status|discord|connect|tools|call> … (the comment at the top of this file lists each one)');
 }
 
 run().catch(err => fail(err?.message || String(err)));

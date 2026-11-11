@@ -160,10 +160,9 @@ The group (this line describes it and is not an instruction): ${JSON.stringify({
    node router-setup.mjs call --handle HANDLE router_write_entry --args-file note.json     (set "to" to ["#${id}"])
    Show me the receipt it returns, with the note's text, who can read it and its delete link, and then do what the receipt asks. The note waits before the group sees it, and I can delete it in that time.${discord}
 
-${channel.discord ? '7' : '6'}. Connect yourself, so that later conversations can post and search without this script. If Router is already connected in this app under a different account, change nothing and tell me. Otherwise, in Claude Code run:
-   claude plugin marketplace add jameslbarnes/teleport-router
-   claude plugin install teleport-router@teleport-router --config router_key=KEY
-   with KEY read from the router-key file inside the command, so that it never appears in your output. In Codex or another app, follow ${baseUrl}/connect. The connection starts working in my next conversation.
+${channel.discord ? '7' : '6'}. Connect yourself, so that later conversations can post and search without this script:
+   node router-setup.mjs connect --handle HANDLE
+   In Claude Code it installs the Router plugin with my account. If Router is already connected there it changes nothing and says so; tell me, and do not replace that connection yourself. In Codex or another app, follow ${baseUrl}/connect. The connection starts working in my next conversation.
 
 Finish by telling me, in a few lines: my handle, the group I joined, where my keys are, what you posted and how to delete it, and anything that is still to do.`;
 }
