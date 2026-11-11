@@ -44,13 +44,13 @@ try {
   console.log('PASS creating an invitation also returns a prompt for the guest’s agent');
 
   // One link for both readers: a browser gets the setup page, anything else gets the steps as text.
-  assert.equal(invite.invite_url,`${base}/join?channelinvite=${invite.token}`); assert(invite.message.includes(invite.invite_url));
+  assert.equal(invite.invite_url,`${base}/join?channelinvite=${invite.token}`); assert(invite.message.includes(invite.invite_url)&&invite.message.includes(invite.agent_message)&&invite.agent_message.includes(invite.agent_url));
   const asAgent=await fetch(invite.invite_url), agentText=await asAgent.text();
   assert.equal(asAgent.status,200); assert.match(asAgent.headers.get('content-type')||'',/^text\/plain/);
   assert(agentText.startsWith('Router invitation: setup steps for an AI agent.')&&agentText.includes(prompt));
   assert.equal(await (await fetch(invite.agent_url)).text(),agentText);
   const asBrowser=await fetch(invite.invite_url,{headers:{Accept:'text/html,application/xhtml+xml,*/*;q=0.8'}}), page=await asBrowser.text();
-  assert.match(asBrowser.headers.get('content-type')||'',/^text\/html/); assert(page.includes('id="agent-hint"')&&!page.includes('--approve-rules'));
+  assert.match(asBrowser.headers.get('content-type')||'',/^text\/html/); assert(page.includes('Give this to your agent')&&page.includes('id="agent-message"')&&!page.includes('--approve-rules'));
   const dead=await fetch(`${base}/agent-invite/not-a-real-token`); assert.equal(dead.status,410); assert.match(await dead.text(),/invitation is unavailable/i);
   // A Discord invitation is saved on the group once; a look-alike address is refused and changes nothing.
   const refused=await fetch(`${base}/api/channels/${group}/invite`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({secret_key:adminKey,discord_invite:'https://discord.gg.example.com/abc123'})});

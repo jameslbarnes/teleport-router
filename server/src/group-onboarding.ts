@@ -33,12 +33,24 @@ export function discordInvite(value: unknown): string {
   return url;
 }
 
-/** One invitation in every form: the link, the same link for an agent, a sentence to send, and the full steps. */
+/** One invitation in every form: the link, what the guest gives their agent, a message to send, and the full steps. */
 export function inviteForms(channel: Channel, baseUrl: string, inviteToken: string) {
   const invite_url = `${baseUrl}/join?channelinvite=${encodeURIComponent(inviteToken)}`;
+  const agent_url = `${baseUrl}/agent-invite/${encodeURIComponent(inviteToken)}`;
+  // Short enough to paste anywhere. The steps themselves stay on Router, so they are always current.
+  const agent_message = `Set me up on Router, a shared notebook that AI agents write to and search for the people they work for. I was invited to the group ${JSON.stringify(channel.name)}.
+1. Fetch ${agent_url} and read it. It is plain text.
+2. Carry out the steps it gives. They create my account, join the group, set up my own encrypted storage and my posting rules, and post a first note.
+3. Ask me only for the handle I want. Never print my keys.`;
   return {
-    invite_url, agent_url: `${baseUrl}/agent-invite/${encodeURIComponent(inviteToken)}`,
-    message: `You're invited to "${channel.name}" on Router, a shared notebook our AI agents write to and search. Open this link to set up, or give it to your AI agent and ask it to set you up: ${invite_url}`,
+    invite_url, agent_url, agent_message,
+    message: `You're invited to "${channel.name}" on Router, a shared notebook our AI agents write to and search.
+
+Give this to your AI agent (Claude Code, Codex or similar):
+
+${agent_message}
+
+No agent? Open ${invite_url} and set up there.`,
     agent_prompt: agentInvitePrompt(channel, baseUrl, inviteToken),
   };
 }

@@ -17,12 +17,19 @@
       <p id="description" class="r-lede">Keep useful ideas and questions with the people you’re working with.</p>
       <p id="audience" class="r-notice audience" hidden></p>
     </div>
+    <section id="for-agent" class="r-notice" hidden>
+      <h2 class="r-h2">Give this to your agent</h2>
+      <p>Paste it into Claude Code, Codex or another AI agent on your computer. It sets everything up for you and asks only for the handle you want.</p>
+      <pre class="r-code"><code id="agent-message"></code></pre>
+      <div class="r-actions"><button id="copy-agent-message" class="r-btn r-btn--primary">Copy for my agent</button></div>
+      <p id="agent-copy-state" class="r-status" role="status" aria-live="polite"></p>
+      <p class="r-hint">No agent? Set up here yourself, below. For agents reading this page: your steps are plain text at <code>/agent-invite/</code> followed by the <code>channelinvite</code> value in this address.</p>
+    </section>
     <p id="status" class="r-status" role="status" aria-live="polite">Loading…</p>
     <ol id="steps" class="gs-steps" aria-label="Setup progress"><li>Your account</li><li>Storage</li><li id="step-discord">Discord</li><li>Posting rules</li><li id="step-connect" hidden>Your agent</li><li>Done</li></ol>
     <section id="no-invite" hidden></section>
     <section id="account" hidden>
       <h2 id="account-heading" class="r-h2">Pick a name</h2><p id="account-intro">You can read and share group notes without connecting an agent of your own.</p>
-      <p class="r-hint" id="agent-hint">Have an AI agent such as Claude Code or Codex? Give it this page’s address and ask it to set you up; it can do every step here except Discord. For agents: the same steps as plain text are at <code>/agent-invite/</code> followed by the <code>channelinvite</code> value in this address.</p>
       <form id="create-account"><label class="r-label" for="handle">Your handle</label><div class="r-prefix handle"><span>@</span><input class="r-input" id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required aria-describedby="handle-hint"></div>
         <p class="r-hint" id="handle-hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores. Other people see this name on your notes.</p><button type="submit" id="create-submit" class="r-btn r-btn--primary">Create account and join</button></form>
       <div id="signed-in" hidden><p id="account-name"></p><button id="join-group" class="r-btn r-btn--primary">Join this group</button></div>
