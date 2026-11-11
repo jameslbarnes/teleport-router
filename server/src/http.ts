@@ -7373,12 +7373,11 @@ const server = createServer(async (req, res) => {
       if (url.pathname === '/api/traces') {
         // An upload is held in memory while it is checked and stored. Two at a time is enough for capture clients.
         if (traceUploads >= 2) { res.writeHead(429, { 'Retry-After': '5' }); res.end(JSON.stringify({ error: 'Other traces are being stored. Try again in a few seconds.' })); return; }
-        // The slot is held until the work ends, not until the caller hangs up, and for five minutes at most
-        // if storage never answers.
+        // The slot is held until the work ends, not until the caller hangs up and not on a timer: releasing it
+        // while a stalled upload still holds its data would let more than two pile up.
         traceUploads++;
         let held = true;
-        releaseUpload = () => { if (held) { held = false; traceUploads--; clearTimeout(expiry); } };
-        const expiry = setTimeout(releaseUpload, 5 * 60_000); expiry.unref();
+        releaseUpload = () => { if (held) { held = false; traceUploads--; } };
       }
       try {
       let body: any;

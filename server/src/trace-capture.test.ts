@@ -317,7 +317,23 @@ describe('Owner-only traces on a server with no release key', () => {
     await expect(w.release.putTrace(alice.user, body)).rejects.toThrow('already has its trace');
   });
 
-  it('removes its chunks and allows a retry when the record was not saved', async () => {
+  it('keeps its chunks when a write fails without a clear answer, so a record that lands late still opens', async () => {
+    // The record write reports a failure, reading back finds nothing, and storage saves the record afterwards.
+    const late: { save?: () => Promise<void> } = {};
+    const w = world(s => ({ ...s, put: async (k, v, c) => { if (k.endsWith('/meta') && !late.save) { late.save = () => s.put(k, v, c); throw new Error('reply lost'); } await s.put(k, v, c); } }));
+    const alice = w.person('alice'); w.post('p1', 'alice');
+    const owner = w.release.ownerKey(alice.user), context = { ownerDid: owner.owner_did, entryId: 'p1' };
+    const sealed = sealFull(Buffer.from('landed late'), context, owner.owner_public_key);
+    const body = { entry_id: 'p1', full: { meta: sealed.meta, data: sealed.ciphertext.toString('base64') } };
+    await expect(w.release.putTrace(alice.user, body)).rejects.toThrow('reply lost');
+    expect([...w.stores.get('alice')!.keys()].length).toBeGreaterThan(0);   // chunks kept, no record yet
+    expect(await w.release.getTrace(alice.user, 'p1', 'full')).toBeNull();
+    await late.save!();
+    const got = (await w.release.getTrace(alice.user, 'p1', 'full'))!;
+    expect(openFull(got.meta, Buffer.from(got.data, 'base64'), context, alice.wallet.privateKey).toString()).toBe('landed late');
+  });
+
+  it('allows a retry after a write that never landed, and removes its chunks only when another upload owns the post', async () => {
     let failed = false;
     const w = world(s => ({ ...s, put: async (k, v, c) => { if (k.endsWith('/meta') && !failed) { failed = true; throw new Error('storage unavailable'); } await s.put(k, v, c); } }));
     const alice = w.person('alice'); w.post('p1', 'alice');
@@ -325,8 +341,16 @@ describe('Owner-only traces on a server with no release key', () => {
     const sealed = sealFull(Buffer.from('second attempt'), context, owner.owner_public_key);
     const body = { entry_id: 'p1', full: { meta: sealed.meta, data: sealed.ciphertext.toString('base64') } };
     await expect(w.release.putTrace(alice.user, body)).rejects.toThrow('storage unavailable');
-    expect([...w.stores.get('alice')!.keys()]).toEqual([]);
+    const orphans = [...w.stores.get('alice')!.keys()];
+    expect(orphans.length).toBeGreaterThan(0);
     expect(await w.release.putTrace(alice.user, body)).toMatchObject({ stored: true });
+    const got = (await w.release.getTrace(alice.user, 'p1', 'full'))!;
+    expect(openFull(got.meta, Buffer.from(got.data, 'base64'), context, alice.wallet.privateKey).toString()).toBe('second attempt');
+    // A third upload finds the post taken and leaves nothing of its own behind.
+    const before = w.stores.get('alice')!.size;
+    await expect(w.release.putTrace(alice.user, body)).rejects.toThrow('already has its trace');
+    expect(w.stores.get('alice')!.size).toBe(before);
+    expect(await w.release.listTraces(alice.user)).toEqual(['p1']);
   });
 
   it('refuses everything that would need a release key', async () => {

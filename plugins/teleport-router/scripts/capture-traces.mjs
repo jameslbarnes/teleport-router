@@ -79,7 +79,15 @@ const lockPath = statePath + '.lock';
 const lockToken = `${process.pid} ${Date.now()}`;
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; } };
 const holder = await readFile(lockPath, 'utf8').catch(() => null);
-if (holder !== null && !alive(Number(holder.split(' ')[0]))) await rm(lockPath, { force: true });
+if (holder !== null && !alive(Number(holder.split(' ')[0]))) {
+  // Move the dead run's lock aside before removing it. Only one contender's rename succeeds, and a contender
+  // that renamed a lock other than the one it read puts it back.
+  const aside = `${lockPath}.${process.pid}.stale`;
+  if (await rename(lockPath, aside).then(() => true, () => false)) {
+    if (await readFile(aside, 'utf8').catch(() => null) === holder) await rm(aside, { force: true });
+    else await rename(aside, lockPath).catch(() => {});
+  }
+}
 await writeFile(lockPath, lockToken, { flag: 'wx' }).catch(() => fail(`Another run is using ${statePath} (lock file ${lockPath}). Try again when it finishes.`));
 const unlock = async () => { if (await readFile(lockPath, 'utf8').catch(() => null) === lockToken) await rm(lockPath, { force: true }); };
 const stop = async message => { await unlock(); fail(message); };
@@ -94,20 +102,29 @@ const sliceHash = (lines, post) => createHash('sha256').update(lines.slice(post.
 // state.sessions records, for every log read, which session started it and whether it called a never-upload
 // tool or opened with carried-over history. A session is excluded if it or any ancestor did, however the
 // logs were ordered when they were read.
+// A session named as a parent whose own log has not been read is treated as excluded: nothing is known
+// about what it called.
 const isExcluded = (id, seen = new Set()) => {
-  const s = id ? state.sessions[id] : null;
-  if (!s || seen.has(id)) return false;
+  if (!id || seen.has(id)) return false;
+  const s = state.sessions[id];
+  if (!s) return true;
   return !!(s.called || s.summary) || isExcluded(s.parent, seen.add(id));
 };
-const excluded = () => new Set(Object.keys(state.sessions).filter(id => isExcluded(id)));
-const VIA_PARENT = 'a session this one descends from called a tool whose results are never uploaded, or its history cannot be checked';
+// findPosts asks whether a log's parent is excluded, so parents that are named but unread are listed too.
+const excluded = () => new Set([...Object.keys(state.sessions), ...Object.values(state.sessions).map(s => s.parent).filter(Boolean)].filter(id => isExcluded(id)));
+const VIA_PARENT = 'a session this one descends from called a tool whose results are never uploaded, or its log has not been read so that cannot be ruled out';
 const rulesPath = value('--rules') || join(dirname(statePath), 'rules.json');
 const rulesText = await readFile(rulesPath, 'utf8').catch(err => err.code === 'ENOENT' && !value('--rules') ? null : stop(`Could not read ${rulesPath}: ${err.message}`));
 let rules = {};
 if (rulesText !== null) { try { rules = JSON.parse(rulesText); } catch { await stop(`${rulesPath} is not valid JSON. Nothing was indexed or uploaded.`); } }
 if (!rules || typeof rules !== 'object' || Array.isArray(rules)) await stop(`${rulesPath} must hold an object such as { "never_upload_tools": [] }. Nothing was indexed or uploaded.`);
-const neverUpload = [...new Set([...(Array.isArray(rules.never_upload_tools) ? rules.never_upload_tools : []), ...values('--never-upload')])];
+if (rulesText !== null && !Array.isArray(rules.never_upload_tools)) await stop(`${rulesPath} must list never_upload_tools as an array, for example { "never_upload_tools": ["mcp__diary__"] } or { "never_upload_tools": [] }. Nothing was indexed or uploaded.`);
+const neverUpload = [...new Set([...(rules.never_upload_tools || []), ...values('--never-upload')])].sort();
 if (neverUpload.some(p => typeof p !== 'string' || p.length < 4)) await stop('Each never-upload entry must be a tool-name prefix of at least four characters.');
+// What was learned about sessions was learned under the rules of the time. When the rules change it is
+// forgotten, and sessions count as unread until their logs are read again.
+const rulesMark = createHash('sha256').update(JSON.stringify(neverUpload)).digest('hex');
+if (state.rules_sha256 !== rulesMark) { state.sessions = {}; state.rules_sha256 = rulesMark; }
 
 try {
   // 1. Index: which post came from which lines of which session log. Local only.

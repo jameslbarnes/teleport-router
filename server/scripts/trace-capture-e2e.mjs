@@ -101,6 +101,9 @@ try {
   const run2=(...args)=>run(process.execPath,[cli,'--router',base,'--key-file',keyFile,'--projects',projects,'--state',stateFile,...args],{env:{...process.env,ROUTER_KEY:'',CLAUDE_CONFIG_DIR:''}}).then(()=>null,e=>e);
   const noRules=await run2('--upload',ids[0],'--owner-key-file',ownerKeyFile);
   assert(noRules&&/Before the first upload, create/.test(noRules.stderr),'Nothing is uploaded until the owner has written their rules');
+  await writeFile(join(work,'rules.json'),JSON.stringify({never_upload_tools:'mcp__diary__'}));
+  const badRules=await run2();
+  assert(badRules&&/must list never_upload_tools as an array/.test(badRules.stderr),'Rules that would silently exclude nothing stop the run');
   await writeFile(join(work,'rules.json'),JSON.stringify({never_upload_tools:['mcp__diary__']}));
   const indexed=await capture();
   assert.equal(indexed.posts_found,3); assert.equal(indexed.indexed_total,3); assert.equal(indexed.uploaded,0); assert.equal(indexed.indexed_withheld,1);
