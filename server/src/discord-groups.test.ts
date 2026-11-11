@@ -12,7 +12,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   let clock = 1_000_000;
   const data = new Map<string, Map<string,string>>();
   const revoked = new Set<string>();
-  const audienceState = {botId:'100000000000000090',memberIds:['100000000000000003','100000000000000090'], unavailable:false,
+  const audienceState = {botId:'100000000000000090',viewerIds:['100000000000000003','100000000000000090'], open:false, unavailable:false,
     beforeRead:async()=>{}};
   const layer = authorStorage(base, async b => {
     const check = () => {if (revoked.has(b.space)) throw new Error('revoked');};
@@ -30,7 +30,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   await base.createChannel({id:'test-group', name:'Private test', visibility:'private', joinRule:'invite', createdBy:'alice', createdAt:clock,
     skills:[], subscribers:['alice','bob','router_bot'].map(handle=>({handle,role:handle==='alice'?'admin':'member',joinedAt:clock}))});
   const service = discordGroups(layer.storage, layer.storage, layer.status, {baseUrl:'https://router.example',now:()=>clock,
-    audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {...audienceState,memberIds:[...audienceState.memberIds]};}});
+    audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {botId:audienceState.botId,open:audienceState.open,viewerIds:[...audienceState.viewerIds]};}});
   const context = {guildId:'100000000000000001', channelId:'100000000000000002', discordUserId:'100000000000000003'};
   const call = (who: keyof typeof keys, path: string, body: Record<string,unknown>) => service.serve('/api/discord/'+path, `Bearer ${keys[who]}`, body) as Promise<any>;
   await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',
@@ -62,12 +62,24 @@ describe('Shared conversational group access',()=>{
   });
   it('blocks any unlinked arrival or other bot, then permits a currently linked group member',async()=>{
     const f=await conversation();await f.enable();
-    const bobId='100000000000000008';f.audienceState.memberIds.push(bobId);
+    const bobId='100000000000000008';f.audienceState.viewerIds.push(bobId);
     await expect(f.ask('check')).rejects.toMatchObject({status:403});
     await f.link('bob',bobId); expect((await f.ask('check')).groupId).toBe('test-group');
-    f.audienceState.memberIds.push('100000000000000099');await expect(f.ask('check')).rejects.toMatchObject({status:403});
-    f.audienceState.memberIds.pop();await f.base.removeSubscriber('test-group','bob');
+    f.audienceState.viewerIds.push('100000000000000099');await expect(f.ask('check')).rejects.toMatchObject({status:403});
+    f.audienceState.viewerIds.pop();await f.base.removeSubscriber('test-group','bob');
     await expect(f.ask('check')).rejects.toMatchObject({status:403});
+  });
+  it('refuses a channel that anyone joining the server would see, even when everyone present is linked',async()=>{
+    const f=await conversation();await f.enable();expect((await f.ask('check')).groupId).toBe('test-group');
+    f.audienceState.open=true;
+    await expect(f.ask('check')).rejects.toMatchObject({status:403,message:expect.stringContaining('visible to everyone')});
+  });
+  it('ignores people in the server who cannot see the channel, and refuses a requester who cannot',async()=>{
+    const f=await conversation();await f.enable();
+    // The reader reports viewers only: an unlinked newcomer held outside the channel is simply absent.
+    expect((await f.ask('check')).groupId).toBe('test-group');
+    f.audienceState.viewerIds=[f.audienceState.botId];
+    await expect(f.ask('check')).rejects.toMatchObject({status:403,message:expect.stringContaining('cannot see this channel')});
   });
   it('rechecks source deletion, edits, audience changes and permission revocation before delivery',async()=>{
     const f=await conversation();await f.enable();const saved=await f.save(f.grant,'The violet telescope is ready');
@@ -80,9 +92,9 @@ describe('Shared conversational group access',()=>{
     await f.layer.storage.addEntry({...original,content:'The telescope date changed.'});
     await expect(f.ask('verify',{audienceVersion,sources})).rejects.toMatchObject({status:409});
     await f.layer.storage.addEntry(original);
-    f.audienceState.memberIds.push('100000000000000008');await f.link('bob','100000000000000008');
+    f.audienceState.viewerIds.push('100000000000000008');await f.link('bob','100000000000000008');
     await expect(f.ask('verify',{audienceVersion,sources})).rejects.toMatchObject({status:409});
-    f.audienceState.memberIds.pop();
+    f.audienceState.viewerIds.pop();
     await f.layer.storage.deleteEntry(saved.entry.id);
     await expect(f.ask('verify',{audienceVersion,sources})).rejects.toMatchObject({status:404});
     await f.base.removeSubscriber('test-group','alice');await expect(f.ask('verify',{audienceVersion,sources:[]})).rejects.toMatchObject({status:403});
@@ -362,6 +374,20 @@ describe('Discord permission lifetime and recall order',()=>{
     await f.operate(linked.grant,{action:'unlink'});
     await expect(f.operate(linked.grant,{action:'status'})).rejects.toMatchObject({status:403});
     expect((await f.base.getUser('alice'))!.discordGrants![0].expiresAt).toBe(linked.expiresAt);
+  });
+
+  it('answers the bot\'s membership question without extending the permission',async()=>{
+    const f = await fixture('guild');
+    const linked = await f.link();
+    f.advance(20 * 86400_000);
+    expect(await f.operate(linked.grant,{action:'member'})).toEqual({handle:'alice',groupId:'test-group',expiresAt:linked.expiresAt});
+    expect((await f.base.getUser('alice'))!.discordGrants![0].expiresAt).toBe(linked.expiresAt);
+    // It ends on time however often the bot asks, and a removed member stops counting at once.
+    f.advance(11 * 86400_000);
+    await expect(f.operate(linked.grant,{action:'member'})).rejects.toMatchObject({status:403});
+    const g = await fixture('guild'), other = await g.link();
+    await g.base.removeSubscriber('test-group','alice');
+    await expect(g.operate(other.grant,{action:'member'})).rejects.toMatchObject({status:403});
   });
 
   it('puts notes that match more of the question first and ignores common words',()=>{

@@ -15,7 +15,8 @@ sys.modules.setdefault(spec.name, importlib.util.module_from_spec(spec))
 core = importlib.import_module(spec.name + ".participation")
 models = importlib.import_module(spec.name + ".models")
 memory = importlib.import_module(spec.name + ".group_memory")
-Controller = importlib.import_module(spec.name + ".controller").Controller
+controller_module = importlib.import_module(spec.name + ".controller")
+Controller = controller_module.Controller
 Store = importlib.import_module(spec.name + ".store").Store
 
 NOW = 1_800_000_000.0
@@ -92,6 +93,16 @@ class GroupMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.router.fail_check=True
         self.assertEqual((await self.controller.evaluate(20,"direct mention",1))["outcome"],"access-unavailable")
         self.assertEqual(self.provider.calls,[])
+
+    async def test_a_mention_is_told_routers_reason_and_ambient_chat_is_not(self):
+        async def refused(channel, trigger):
+            raise controller_module.Refused("I cannot use group notes here until everyone who can see this channel has linked their account.")
+        self.controller.turn_factory=refused
+        self.assertEqual((await self.controller.evaluate(20,"direct mention",1))["outcome"],"access-unavailable")
+        self.assertIn("everyone who can see this channel",self.poster.call_args.args[1])
+        self.poster.reset_mock()
+        self.assertEqual((await self.controller.evaluate(20,"burst ended"))["outcome"],"access-unavailable")
+        self.poster.assert_not_called()
 
     async def test_unavailable_ambient_access_does_not_interrupt_chat(self):
         self.router.fail_check=True

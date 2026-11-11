@@ -17,6 +17,11 @@ from .participation import (DAY_S, AdaptiveCooldown, Decision, Msg, RateLimiter,
                             looks_like_question, speech_acts, word_cap)
 from .store import Store
 
+
+class Refused(Exception):
+    """Router declined to open a group answer. The text is Router's own bounded message, safe to show."""
+
+
 if TYPE_CHECKING:  # the SDK loads after the plugin does; see __init__.py
     from .models import Brain
 
@@ -141,13 +146,14 @@ class Controller:
                 d.intent if d else "none", d.confidence if d else 0, d.threshold if d else 0,
                 reason or (d.reason if d else outcome), {"why": why}, outcome)
 
-        async def unavailable():
+        async def unavailable(reason: str = ""):
             record("access-unavailable")
             # Failed ambient checks stay quiet. A source change or outage must
             # not interrupt ordinary chat or incorrectly blame an account link.
+            # A person who asked directly is told Router's own reason when it gave one.
             if mode == "live" and self.poster and mentioned_id:
                 try:
-                    await self.poster(channel_id, "I couldn't finish this group answer. Please try again. "
+                    await self.poster(channel_id, reason or "I couldn't finish this group answer. Please try again. "
                         "You can use /router-status to check your connection, or /router-recall for a private answer.", latest.id)
                 except Exception:
                     pass
@@ -161,6 +167,8 @@ class Controller:
             return {"outcome": "check-unavailable"}
         try:
             turn = await self.turn_factory(channel_id, latest)
+        except Refused as exc:
+            return await unavailable(str(exc))
         except Exception:
             return await unavailable()
         if mentioned_id:

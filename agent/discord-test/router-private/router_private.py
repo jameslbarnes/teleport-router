@@ -97,7 +97,9 @@ class PrivateRouter:
                     message = "Private group request failed."
                 if not isinstance(message, str) or len(message) > 300:
                     message = "Private group request failed."
-                raise PrivateError(message) from None
+                refusal = PrivateError(message)
+                refusal.status = exc.code  # lets the gate tell "Router said no" from "Router did not answer"
+                raise refusal from None
             except (urllib.error.URLError, TimeoutError, ValueError):
                 raise PrivateError("Router could not confirm the request. Please retry; no success is assumed.") from None
         return await asyncio.to_thread(call)
@@ -187,6 +189,25 @@ class PrivateRouter:
         if action not in ("check", "search", "read", "verify"):
             raise PrivateError("Conversation access is read-only.")
         return await self.request("conversation/operate", {**fields, **actor, "action": action, "grant": link["grant"]})
+
+    async def membership(self, discord_user_id, channel_id):
+        """Is this Discord account linked to the group right now? True when Router confirms it, False when
+        there is no link or Router refuses it, None when Router could not be asked. Reads no notes and
+        does not extend the person's permission."""
+        async with self.lock:
+            link = self._load().get(str(discord_user_id))
+        if not link:
+            return False
+        try:
+            self.check_group(link)
+        except PrivateError:
+            return False
+        try:
+            await self.request("operate", {"guildId": self.settings["guild_id"], "channelId": str(channel_id),
+                "discordUserId": str(discord_user_id), "action": "member", "grant": link["grant"]})
+            return True
+        except PrivateError as exc:
+            return False if getattr(exc, "status", None) == 403 else None
 
     async def recall(self, interaction, query, summarize):
         found = await self.operate(interaction, "search", query=query)

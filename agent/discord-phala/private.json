@@ -2,5 +2,7 @@
   "base_url": "https://router.teleport.computer",
   "guild_id": "1568051145551650858",
   "scope": "guild",
-  "group_id": "router-working-group"
+  "group_id": "router-working-group",
+  "member_role_id": "1570162098489786408",
+  "welcome_channel_id": "1570162435053195264"
 }

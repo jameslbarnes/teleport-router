@@ -14,7 +14,7 @@ import os
 import time
 from pathlib import Path
 
-from .controller import Controller
+from .controller import Controller, Refused
 from .participation import Msg
 from .store import Store
 
@@ -64,7 +64,15 @@ def register(ctx):
                 router = getattr(adapter, "router_private", None)
                 if router is None or controller.brain is None:
                     raise RuntimeError("Private Router connection unavailable")
-                return await GroupTurn(controller.brain, router, guild.id, key, trigger).start()
+                try:
+                    return await GroupTurn(controller.brain, router, guild.id, key, trigger).start()
+                except Exception as exc:
+                    # The private plugin's own error type carries a fixed, bounded message from Router
+                    # (for example, that someone who can see the channel still has to link). Anything
+                    # else stays generic.
+                    if type(exc).__name__ == "PrivateError" and str(exc):
+                        raise Refused(str(exc)[:300]) from None
+                    raise
             controller.turn_factory = make_turn
 
         def watched(channel_or_id, parent_id=None):
