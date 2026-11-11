@@ -31,11 +31,19 @@
 //                            One of the two is required for the first upload, because traces are encrypted to
 //                            this key and Router is the party that must not be able to read them. The run
 //                            stops if Router reports a different key. The key is then remembered.
+//   --extraction-copy        also upload a shorter extraction copy that the insights enclave may open, in runs
+//                            you authorize one at a time. Needs a current insights consent. Withheld traces get none.
+//   --release-key <k>        the enclave key you checked (scripts/insights-owner.mjs enclave); required with the
+//                            first extraction copy, then remembered. The run stops if Router or your consent names
+//                            another key.
 import { readFile, writeFile, readdir, stat, mkdir, rename, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
-import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, sealFull, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+
+// The extraction copy must fit the enclave's limit on what it opens (400 KiB of ciphertext).
+const EXTRACTION_MAX_BYTES = 380 * 1024;
 
 const argv = process.argv.slice(2);
 const flag = name => argv.includes(name);
@@ -206,13 +214,28 @@ try {
     if (!state.owner) { state.owner = { handle: reported.handle, did: reported.owner_did, publicKey: mine, confirmedAt: new Date().toISOString() }; await saveState(); }
     return owner = { did: reported.owner_did, publicKey: mine, maxBytes: Math.min(reported.full_max_bytes || 6 * 1024 * 1024, 6 * 1024 * 1024) };
   }
+  const extraction = flag('--extraction-copy');
+  let release = null;
+  async function releaseKey() {
+    if (release) return release;
+    // As with the owner key: the key an extraction copy is wrapped to must be one the owner checked, not one Router reported.
+    const status = await call('/api/insights/consent/status');
+    if (!status.active) await stop(`--extraction-copy needs a current insights consent (${status.reason}). Nothing was uploaded.`);
+    const pinned = value('--release-key') ? compressPublicKey(value('--release-key')) : state.enclave?.releaseKey;
+    if (!pinned) await stop('The first extraction copy needs --release-key <the enclave key you checked with insights-owner.mjs enclave>. Nothing was uploaded.');
+    if (state.enclave && state.enclave.releaseKey !== pinned) await stop(`The enclave key given differs from the one remembered in ${statePath}. Nothing was uploaded.`);
+    if (compressPublicKey(status.release_key) !== pinned || compressPublicKey(status.policy.enclave.releaseKey) !== pinned)
+      await stop('Router or your consent names an enclave key other than the one you checked. Nothing was uploaded.');
+    if (!state.enclave) { state.enclave = { releaseKey: pinned, confirmedAt: new Date().toISOString() }; await saveState(); }
+    return release = { publicKey: pinned, policyId: status.policy.policyId };
+  }
 
   for (const entryId of wanted) {
     const item = state.index[entryId], known = state.traces[entryId];
     if (!item) { totals.failed++; report.push({ entry: entryId, error: 'No session log on this machine is indexed for that post. Try a larger --days.' }); continue; }
     if (known && !known.skipped) { totals.already_uploaded++; continue; }
     const line = { entry: entryId, agent: item.agent, session: item.session_id?.slice(0, 8), posted_at: item.posted_at };
-    let built;
+    let built, small = null;
     try {
       const lines = (await readFile(item.log, 'utf8')).split('\n');
       // Decide again whether this trace may be uploaded: an exclusion may have been learned since it was indexed.
@@ -222,14 +245,23 @@ try {
       post.withheld ||= item.withheld || (isExcluded(fresh.parentSessionId) ? VIA_PARENT : null);
       if (post.withheld && !item.withheld) item.withheld = post.withheld;
       built = buildTrace({ post, lines, source: { log: basename(item.log), ...sourceOf(lines, post) }, extraSecrets: [routerKey].filter(Boolean), maxBytes: (await ownerKey()).maxBytes - 64 * 1024 });
+      if (extraction && !built.summary.withheld)
+        small = buildTrace({ post, lines, source: { log: basename(item.log), ...sourceOf(lines, post) }, extraSecrets: [routerKey].filter(Boolean), maxBytes: EXTRACTION_MAX_BYTES });
     } catch (err) { totals.failed++; report.push({ ...line, error: err.code === 'ENOENT' ? 'The session log is no longer on this machine.' : err.message }); continue; }
     Object.assign(line, { records: built.summary.records, bytes: built.plaintext.length, withheld: built.summary.withheld, secrets_removed: built.summary.secrets_removed ?? 0, shortened_to: built.summary.shortened_to });
     if (built.summary.withheld) totals.withheld++;
     const o = await ownerKey();
     const sealed = sealFull(built.plaintext, { ownerDid: o.did, entryId }, o.publicKey);
+    let derived;
+    if (small) {
+      const r = await releaseKey();
+      const s = sealDerived(small.plaintext, { ownerDid: o.did, entryId }, o.publicKey, r.publicKey);
+      derived = { meta: s.meta, data: s.ciphertext.toString('base64'), policy_id: r.policyId };
+    }
     try {
-      const stored = await call('/api/traces', { entry_id: entryId, full: { meta: sealed.meta, data: sealed.ciphertext.toString('base64') } });
-      state.traces[entryId] = { sha256: stored.full_sha256, bytes: sealed.meta.bytes, at: new Date().toISOString(), withheld: built.summary.withheld || undefined };
+      const stored = await call('/api/traces', { entry_id: entryId, full: { meta: sealed.meta, data: sealed.ciphertext.toString('base64') }, ...(derived ? { derived } : {}) });
+      state.traces[entryId] = { sha256: stored.full_sha256, bytes: sealed.meta.bytes, at: new Date().toISOString(), withheld: built.summary.withheld || undefined,
+        extraction_sha256: stored.derived_sha256 || undefined };
       totals.uploaded++; report.push({ ...line, uploaded: true });
     } catch (err) {
       if (/already has its trace/.test(err.message)) { state.traces[entryId] = { existing: true, at: new Date().toISOString() }; totals.already_uploaded++; }

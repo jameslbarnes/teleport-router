@@ -7,7 +7,7 @@ import type { JournalEntry, User } from './storage.js';
 import type { GroupStore } from './group-store.js';
 // The capture client ships with the plugin as plain JavaScript.
 // @ts-ignore
-import { findPosts, buildTrace, sourceOf, cleanRecords, scrubText, sealFull, openFull, readTrace } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
+import { findPosts, buildTrace, sourceOf, cleanRecords, scrubText, sealFull, sealDerived, openFull, readTrace } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
 // Synthetic session logs only, in the shape Claude Code writes them.
 const SESSION = 'synthetic-session';
@@ -375,5 +375,14 @@ describe('The client and server envelopes are the same format', () => {
     expect(openPart(fromClient.meta, fromClient.ciphertext, c, 'full', 'owner', wallet.privateKey).toString()).toBe('sealed by the capture client');
     const fromServer = sealPart(Buffer.from('sealed by the server code'), c, 'full', { owner: wallet.signingKey.compressedPublicKey });
     expect(openFull(fromServer.meta, fromServer.ciphertext, c, wallet.privateKey).toString()).toBe('sealed by the server code');
+  });
+  it('seals an extraction copy that the owner and the enclave key each open, and nobody else', () => {
+    const enclave = testWallet('enclave-format-check'), other = testWallet('someone-else');
+    const copy = sealDerived(Buffer.from('extraction copy'), c, wallet.signingKey.publicKey, enclave.signingKey.publicKey);
+    expect(checkPartMeta(copy.meta, ['owner', 'release'])).toEqual(copy.meta);
+    expect(openPart(copy.meta, copy.ciphertext, c, 'derived', 'owner', wallet.privateKey).toString()).toBe('extraction copy');
+    expect(openPart(copy.meta, copy.ciphertext, c, 'derived', 'release', enclave.privateKey).toString()).toBe('extraction copy');
+    expect(() => openPart(copy.meta, copy.ciphertext, c, 'derived', 'release', other.privateKey)).toThrow();
+    expect(() => openPart(copy.meta, copy.ciphertext, c, 'full', 'release', enclave.privateKey)).toThrow();
   });
 });
