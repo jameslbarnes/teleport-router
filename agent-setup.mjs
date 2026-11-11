@@ -2,9 +2,10 @@
 // Router setup for an agent to run on a person's behalf, in place of the guided setup page.
 // Needs Node.js 20 or later. Read it before running it: it is one file and does only what is listed here.
 //
-//   node agent-setup.mjs join --invite <token or invitation link> --handle <name> [--approve-rules group]
+//   node agent-setup.mjs join --invite <token or invitation link> --handle <name> [--approve-rules group|group-only]
 //       Creates the person's Router account, joins the group, creates their encrypted note storage
-//       and, with --approve-rules group, saves the posting rules the group suggests. Running the same
+//       and, with --approve-rules, saves posting rules the group suggests: "group-only" posts to this group and
+//       never publicly; "group" posts to this group and asks before anything public. Running the same
 //       command again continues where an earlier run stopped.
 //   node agent-setup.mjs status --handle <name>
 //       What is set up: group membership, storage, posting rules, Discord.
@@ -233,7 +234,7 @@ async function run() {
     const invite = (value('--invite') || '').replace(/^.*(?:[?&]channelinvite=|\/agent-invite\/)([^&#/]+).*$/, (_, t) => decodeURIComponent(t));
     if (!/^[\w-]{6,80}$/.test(invite)) fail('Give --invite <token>, or the whole invitation link.');
     const approve = value('--approve-rules');
-    if (flag('--approve-rules') && approve !== 'group') fail('--approve-rules takes "group": save the rules this group suggests. Leave it out to choose rules later.');
+    if (flag('--approve-rules') && !['group', 'group-only'].includes(approve)) fail('--approve-rules takes "group-only" (post to this group, never publicly) or "group" (post to this group, and ask before anything public). Leave it out to choose rules later.');
     // Look at the invitation before creating anything, so a dead link leaves no account behind.
     let view = await api('/api/group-onboarding?channelinvite=' + encodeURIComponent(invite));
     await mkdir(dir, { recursive: true });
@@ -274,9 +275,11 @@ async function run() {
     // 4. Posting rules: saved only when the person approved the group's suggestion, and never over rules they already have.
     const current = await api('/api/posting-rules', { key });
     if (current.rules) steps.posting_rules = 'kept the rules already saved';
-    else if (approve === 'group') {
-      await api('/api/posting-rules', { key, body: { rules: view.suggested_rules, confirmed: true, expected_revision: current.revision || 0 } });
-      steps.posting_rules = 'saved the group’s suggested rules';
+    else if (approve) {
+      const chosen = approve === 'group-only' ? view.group_only_rules : view.suggested_rules;
+      if (!chosen) throw new Error('This group is public, so there are no group-only rules for it. Use --approve-rules group, or leave it out.');
+      await api('/api/posting-rules', { key, body: { rules: chosen, confirmed: true, expected_revision: current.revision || 0 } });
+      steps.posting_rules = approve === 'group-only' ? 'saved: this group only, never public' : 'saved the group’s suggested rules';
     } else steps.posting_rules = 'not saved: choose them with the person, then save with router_posting_rules';
 
     const state = await overview(handle, key, groupId);
@@ -287,7 +290,7 @@ async function run() {
     console.log(JSON.stringify({ done: steps, ...state,
       keys: { folder: dir, files: ['router-key', ...(state.storage === 'connected' ? ['storage-key', 'storage-grant.json'] : [])],
         note: 'These files are the account. Router cannot recover them. Tell the person to back this folder up somewhere private. Never print or post their contents.' },
-      suggested_rules_in_words: view.suggested_rules.instructions, next }, null, 1));
+      rules_in_words: (await api('/api/posting-rules', { key })).rules?.instructions || 'none saved', next }, null, 1));
     return;
   }
 

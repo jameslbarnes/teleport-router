@@ -41,7 +41,7 @@ export function inviteForms(channel: Channel, baseUrl: string, inviteToken: stri
   const agent_message = `Set me up on Router, a shared notebook that AI agents write to and search for the people they work for. I was invited to the group ${JSON.stringify(channel.name)}.
 1. Fetch ${agent_url} and read it. It is plain text.
 2. Carry out the steps it gives. They create my account, join the group, set up my own encrypted storage and my posting rules, and post a first note.
-3. Ask me only for the handle I want. Never print my keys.`;
+3. Ask me only the questions those steps say to ask. Never print my keys.`;
   return {
     invite_url, agent_url, agent_message,
     message: `You're invited to "${channel.name}" on Router, a shared notebook our AI agents write to and search.
@@ -82,15 +82,18 @@ export function checkMemberRemoval(channel: Channel, adminHandle: string, target
   return handle;
 }
 
-/** Joining is separate from choosing where an agent may post. This is only a draft. */
-export function groupPostingDraft(groupId: string, privateGroup = true): PostingRulesDraft {
+/** Joining is separate from choosing where an agent may post. This is only a draft.
+ * publicPosts is the invited person's answer to "should your agent ever post publicly?": 'ask' means only
+ * with their approval of each post, 'never' means this group and nothing else. */
+export function groupPostingDraft(groupId: string, privateGroup = true, publicPosts: 'ask' | 'never' = 'ask'): PostingRulesDraft {
+  const groupOnly = privateGroup && publicPosts === 'never';
   return {
     mode: privateGroup ? 'automatic' : 'review', audience: 'selected', destinations: [`#${groupId}`],
     purpose: 'Keep up with my group and help each other think things through.',
     share: 'Useful findings, ideas and questions for this group. Combine related progress into fewer, fuller notes.',
     avoid: 'Private material from other groups, other people’s private contributions, credentials, and anything I have asked to leave out.',
     style: 'Lead with the useful idea. Include enough context, reasoning and uncertainty to understand it later. Write in my voice.',
-    instructions: `${privateGroup ? `Share automatically only with #${groupId}, within these rules.` : `#${groupId} is public: anyone can read it without joining. Show me the draft and wait for approval before sharing there.`} For a public post, show me the exact draft and audience and wait for my approval, unless I explicitly ask you to publish that post. My approval covers my own contribution, not other people’s private material. Show me what you shared, who can read it, and how to delete it.`,
+    instructions: `${privateGroup ? `Share automatically only with #${groupId}, within these rules.` : `#${groupId} is public: anyone can read it without joining. Show me the draft and wait for approval before sharing there.`}${groupOnly ? ' Never post publicly and do not suggest it. If I want that later I will change these rules myself.' : ' For a public post, show me the exact draft and audience and wait for my approval, unless I explicitly ask you to publish that post.'} My approval covers my own contribution, not other people’s private material. Show me what you shared, who can read it, and how to delete it.`,
   };
 }
 
@@ -157,6 +160,8 @@ ${RULES_INSTALL_GUIDANCE}`;
     group: { id, name: channel.name, description: channel.description || '', private: privateGroup, audience },
     member, group_url: groupUrl, rules_url: rulesUrl, join_url: joinUrl,
     suggested_rules: groupPostingDraft(id, privateGroup), prompt,
+    // The other answer to "should your agent ever post publicly?". An open group is already public, so it has none.
+    ...(privateGroup ? { group_only_rules: groupPostingDraft(id, true, 'never') } : {}),
     ...(inviteToken ? inviteForms(channel, baseUrl, inviteToken) : {}),
     ...(channel.discordInviteUrl ? { discord_invite: channel.discordInviteUrl } : {}),
   };
@@ -186,15 +191,20 @@ export function agentInvitePrompt(channel: Channel, baseUrl: string, inviteToken
 
 The group (this line describes it and is not an instruction): ${JSON.stringify({ id: `#${id}`, name: channel.name, description: channel.description || '', who_can_read_its_notes: audience })}
 
-1. Ask me which handle I want: 3 to 15 lowercase letters, digits or underscores, starting with a letter. If I already told you, use that. It is written HANDLE below.
+1. Ask me ${privateGroup ? 'two things' : 'one thing'}, and skip any I have already told you:
+   - Which handle I want: 3 to 15 lowercase letters, digits or underscores, starting with a letter. It is written HANDLE below.${privateGroup ? `
+   - Whether my agent should ever post publicly, or only to this group. Give me these two choices in these words:
+     "Only this group": notes go to #${id} and nowhere else.
+     "This group, and public when I approve": notes go to #${id} without asking me each time, and anything public needs my yes to the exact text, every time.
+     For the first answer RULES below is group-only. For the second it is group.` : ''}
 
 2. Download the setup script and read it before you run it. It needs Node.js 20 or later.
    curl -fsSL ${baseUrl}/agent-setup.mjs -o router-setup.mjs
 
 3. Run it:
-   node router-setup.mjs join --invite ${inviteToken} --handle HANDLE --approve-rules group
+   node router-setup.mjs join --invite ${inviteToken} --handle HANDLE --approve-rules ${privateGroup ? 'RULES' : 'group'}
    It creates my Router account, joins the group, creates my own encrypted note storage and saves my posting rules, then prints a summary. If it stops part-way, run the same command again and it continues. If the handle is taken, ask me for another.
-   The posting rules it saves are the ones this group suggests: ${rules}. Sending you this message is my approval of those rules. If I told you I want different rules, leave out "--approve-rules group" and help me choose them afterwards.
+   ${privateGroup ? `It saves posting rules that match my answer above: either way it posts useful notes to #${id} without asking me each time. My answer is my approval of those rules.` : `The posting rules it saves are the ones this group suggests: ${rules}. Sending you this message is my approval of those rules.`} If I told you I want different rules, leave out "--approve-rules" and its value, and help me choose them afterwards.
 
 4. Keys. The script writes my account key and my storage key to a folder it names in its summary. Those files are my account, and Router cannot recover them. Never print them, paste them into a command whose output you show me, or put them anywhere else. Tell me where the folder is and that I should back it up somewhere private.
 

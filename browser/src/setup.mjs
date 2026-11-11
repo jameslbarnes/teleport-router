@@ -186,13 +186,18 @@ async function showDiscord(back = false) {
 async function showRules() {
   screen(3); rules = await request('/api/posting-rules');
   $('choose-rules').href = solo() ? '/posting-rules?onboarding=1' : '/posting-rules?group=' + encodeURIComponent(groupId) + '&onboarding=1';
+  // Someone new to a private group answers one question, and each answer opens the editor with matching rules.
+  const asking = !rules.rules && !solo() && !!context.group.private;
+  $('public-question').hidden = !asking; $('choose-rules-group-only').hidden = !asking;
+  $('choose-rules-group-only').href = $('choose-rules').href + '&public=never';
+  $('choose-rules').textContent = asking ? 'This group, and public when I approve' : 'Choose my posting rules';
   $('rules-next').hidden = !rules.rules;
   $('rules-next').textContent = rules.rules?.mode === 'automatic' && rules.rules?.audience === 'public'
     ? 'Keep automatic public posting and continue' : 'Keep these saved rules and continue';
   $('rules-state').textContent = rules.rules ? 'Your current choice: ' + ({ automatic: 'automatic posting', review: 'show a draft first', manual: 'only when asked' }[rules.rules.mode]) + '. Audience: ' + (rules.rules.audience === 'selected' ? rules.rules.destinations.join(', ') : rules.rules.audience === 'public' ? 'public (anyone on the internet can read it)' : 'chosen with you for each note') + '. Keep it or edit it below.' : solo()
     ? 'You have no posting rules yet. Until you save some, an agent you connect is told to help you choose before it posts anything.'
     : context.group.private
-    ? 'Suggested for a private group: your agent posts useful notes here automatically, and asks for your approval before posting anything publicly. You review the exact wording before saving.'
+    ? 'Either way, your agent posts useful notes to this group without asking each time. With the second choice it may also post publicly, but only after you approve the exact text. You review the wording before saving.'
     : 'This group is public. Suggested rules: your agent shows you each draft and waits for your approval before posting. You review the exact wording before saving.';
   message('Your posting rules apply to every agent you connect.');
 }

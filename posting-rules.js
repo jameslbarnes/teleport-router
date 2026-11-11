@@ -144,7 +144,8 @@
   }
   $('use-group').addEventListener('click', () => {
     if (!groupContext) return;
-    const suggested = groupContext.suggested_rules;
+    // The guided setup passes the person's answer to "should your agent ever post publicly?".
+    const suggested = (new URLSearchParams(location.search).get('public') === 'never' && groupContext.group_only_rules) || groupContext.suggested_rules;
     const currentMode = selected('mode');
     form.elements.namedItem('mode').value = ['manual', 'review'].includes(currentMode) ? currentMode : suggested.mode;
     form.elements.namedItem('audience').value = suggested.audience;
