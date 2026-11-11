@@ -72,6 +72,11 @@ jobs:
       - name: Test independent uptime monitor
         run: node --test scripts/monitor-router.test.mjs
 
+      - name: Test the sub-container host
+        run: |
+          node subhost/embed.mjs --check
+          node --test subhost/subhost.test.mjs
+
       - name: Build server
         working-directory: server
         run: npm run build
