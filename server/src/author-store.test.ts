@@ -233,6 +233,30 @@ describe('Linking while other people link and read',()=>{
     expect(await layer.status('alice')).toMatchObject({linked:true,available:true});
   });
 
+  it('reloads all of an account after a write that overlapped hiding it for a re-link that then failed',async()=>{
+    const f=await fixture(); let clock=1000; let slowWrites=false; let failLists=false;
+    let entered!:()=>void; const inWrite=new Promise<void>(r=>{entered=r;});
+    let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);
+      return {...s,
+        put:async(...args:Parameters<GroupStore['put']>)=>{if(slowWrites){entered();await gate;}return s.put(...args);},
+        list:async(p:string)=>{if(failLists)throw new Error('storage unavailable');return s.list(p);}};},codec,{leaseMs:60,now:()=>clock});
+    await layer.link(f.users[0],binding('alice'));
+    const first=await layer.storage.addEntry(post('alice','first'));
+    slowWrites=true;
+    const writing=layer.storage.addEntry(post('alice','second')); // holds Alice's account while its write waits
+    await inWrite;
+    failLists=true;
+    const relink=layer.link(f.users[0],binding('alice')).catch((err:unknown)=>err); // queues behind the write, then fails
+    clock+=61; // her lease runs out while the re-link waits: reads stop serving her records
+    expect((await layer.storage.getEntries()).map(e=>e.id)).not.toContain(first.id);
+    release(); const second=await writing;
+    expect(await relink).toBeInstanceOf(Error);
+    failLists=false;
+    const ids=(await layer.storage.getEntries()).map(e=>e.id);
+    expect(ids).toEqual(expect.arrayContaining([first.id,second.id]));
+  });
+
   it('lets a slow write finish rather than give up on it',async()=>{
     const f=await fixture(); const e=await f.base.addEntry(post('alice'));
     const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);

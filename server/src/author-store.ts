@@ -26,7 +26,9 @@ type RecordValue = JournalEntry | Conversation | Summary;
 type NewRecord = Omit<JournalEntry, 'id'> | Omit<Conversation, 'id'> | Omit<Summary, 'id'>;
 type Kind = 'posts' | 'conversations' | 'summaries';
 type BindingUser = User & { tinycloud: AuthorBinding };
-type AuthorState = { user: BindingUser; expires: number; available: boolean; activationPending?: boolean; retryAt?: number; checking?: Promise<void> };
+type AuthorState = { user: BindingUser; expires: number; available: boolean; activationPending?: boolean; retryAt?: number; checking?: Promise<void>;
+  /** Records were evicted without the account's lock: only a full reload may make it available again. */
+  hidden?: boolean };
 const order = (a: {timestamp: number; id: string}, b: {timestamp: number; id: string}) => b.timestamp - a.timestamp || b.id.localeCompare(a.id);
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 
@@ -135,6 +137,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     evict(state.user);
     for (const { kind, value } of loaded) index(kind).set(value.id, value);
     state.available = true;
+    state.hidden = false;
     state.expires = now() + leaseMs;
   }
   async function check(state: AuthorState, reload = false) {
@@ -145,7 +148,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     // account's records once their lease has run out, as a failed check would, and let everyone else's reads go on.
     // The link loads them again when it switches; if it fails, the next check after it does.
     if (!reload && linking.has(state.user.handle)) {
-      if (state.available) { state.available = false; state.expires = 0; evict(state.user); }
+      if (state.available) { state.available = false; state.expires = 0; state.hidden = true; evict(state.user); }
       return;
     }
     if (state.checking) return state.checking;
@@ -232,6 +235,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         const store = await resolveStore(state.user.tinycloud);
         saved = { ...value, id: (value as RecordValue).id || generateEntryId(), keywords: tokenize(value.content) } as RecordValue;
         await store.put(`${kind}/${saved.id}`, codec.encode(state.user.tinycloud, kind, saved));
+        // Reads stopped serving this account while the write ran: the next check reloads all of it, this record included.
+        if (state.hidden) return saved;
         state.available = true;
         state.expires = now() + leaseMs;
       } else saved = await (kind === 'posts' ? base.addEntry(value as JournalEntry)
