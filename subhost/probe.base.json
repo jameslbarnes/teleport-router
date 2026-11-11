@@ -1,0 +1,10 @@
+{
+  "name": "tinycloud-probe",
+  "image": "docker.io/generalsemantics/teleport-router@sha256:70e1f5f55adc68df579a8b4fb69d7f20a4b428c9192360241223b8fe3ad74fdb",
+  "workdir": "/app/server",
+  "env": {
+    "NODE_ENV": "production",
+    "TINYCLOUD_HOST": "https://tee.node.tinycloud.xyz"
+  },
+  "user": "node"
+}

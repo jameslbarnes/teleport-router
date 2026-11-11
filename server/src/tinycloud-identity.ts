@@ -9,7 +9,9 @@ export async function tinyCloudIdentity(env = process.env) {
   let encryptionKey: Buffer;
   if (env.TINYCLOUD_KEY_SOURCE === 'dstack') {
     const { DstackClient } = await import('@phala/dstack-sdk');
-    const client = new DstackClient();
+    // In production Router reaches dstack only through the subhost service's filtered
+    // socket, which answers just the two key requests below (subhost/README.md).
+    const client = new DstackClient(env.DSTACK_ENDPOINT || undefined);
     const result = await client.getKey('teleport-router/tinycloud/v1', 'secp256k1');
     if (result.key.length !== 32) throw new Error('Unexpected dstack TinyCloud key size');
     privateKey = '0x' + Buffer.from(result.key).toString('hex');

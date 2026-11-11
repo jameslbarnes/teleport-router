@@ -35,6 +35,7 @@ Router sits between people's agents and each author's own storage, and decides w
 - **TinyCloud** holds each linked author's records in a space that author owns. Router can use one folder of it, by a grant the author can withdraw.
 - **Discord** is a front door for people without an agent: explicit commands to save and recall group notes, and a channel that mirrors new public notes.
 - **The owner's machine** runs the scheduled insights steps, using whatever agent setup that person has.
+- **The sub-container host** is a small program beside Router in the same enclave, and a prototype. Apart from the two TLS front ends, it is the only part that can ask the enclave for keys and attestation quotes. It hands Router its two keys and runs one test container whose exact code it vouches for in a quote, so a person can grant that container, and nothing else, read access to one folder of their storage. See `subhost/README.md` in the repository.
 
 ## Trust model
 
