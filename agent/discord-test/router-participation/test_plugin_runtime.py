@@ -181,6 +181,17 @@ class PrivateChannelRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await self.listener(self.message(3,"thread",parent=CHANNEL,channel=OTHER,mentions=[BOT_USER]))
         self.controller.mentioned.assert_called_once()
 
+    async def test_a_mention_in_another_text_channel_is_answered_and_other_talk_there_is_ignored(self):
+        def elsewhere(mid,text,mentions=()):
+            m=self.message(mid,text,mentions=mentions,channel=OTHER); m.channel.type=discord.ChannelType.text; return m
+        await self.listener(elsewhere(20,"not for the bot"))
+        self.controller.mentioned.assert_not_called(); self.controller.human_message.assert_not_called()
+        self.assertIsNone(self.stores[0].get_message(20))
+        await self.listener(elsewhere(21,"@Router what did I write last?",mentions=[BOT_USER]))
+        self.controller.mentioned.assert_called_once()
+        self.assertEqual(self.controller.mentioned.call_args.args[0],OTHER)
+        self.controller.human_message.assert_not_called()
+
     async def test_private_reply_text_never_enters_store_or_disk_even_on_edit(self):
         await self.listener(self.message(10,"SENSITIVE source from private recall",bot=True))
         self.assertNotIn("SENSITIVE",self.stores[0].get_message(10).text)

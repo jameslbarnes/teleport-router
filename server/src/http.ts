@@ -32,7 +32,7 @@ import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { discordAudience } from './discord-audience.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
-import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteText, discordInvite, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
+import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteText, discordInvite, joinDiscordNote, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
@@ -3696,7 +3696,7 @@ function createMCPServer(secretKey: string) {
         server.sendToolListChanged().catch(() => {});
 
         return {
-          content: [{ type: 'text' as const, text: `Joined #${channelId}. Choose what to share at ${BASE_URL}/posting-rules?group=${encodeURIComponent(channelId)}. Your existing rules are unchanged. Read this group's notes with router_search group_id: "${channelId}". You also have ${channel.skills.length} group skill(s) as channel_${channelId}_* tools.` }],
+          content: [{ type: 'text' as const, text: `Joined #${channelId}. Choose what to share at ${BASE_URL}/posting-rules?group=${encodeURIComponent(channelId)}. Your existing rules are unchanged. Read this group's notes with router_search group_id: "${channelId}". You also have ${channel.skills.length} group skill(s) as channel_${channelId}_* tools.${joinDiscordNote(channel)}` }],
         };
       }
 
@@ -7089,7 +7089,7 @@ const server = createServer(async (req, res) => {
       }
 
       res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, channel }));
+      res.end(JSON.stringify({ ok: true, channel, ...(channel.discordInviteUrl ? { discord_invite: channel.discordInviteUrl } : {}) }));
       return;
     }
 

@@ -107,11 +107,19 @@ try {
   assert.equal(plain.code,0,plain.err.slice(-800));
   const second=JSON.parse(plain.out);
   assert.equal(second.posting_rules.saved,false); assert.equal(second.storage,'not connected'); assert.match(second.done.storage,/skipped/);
+  // The other answer to "should your agent ever post publicly?": this group only.
+  const quiet=`lark${suffix}`, only=await cli('join','--invite',invite.token,'--handle',quiet,'--approve-rules','group-only','--no-storage');
+  assert.equal(only.code,0,only.err.slice(-800));
+  const onlyResult=JSON.parse(only.out);
+  assert.equal(onlyResult.done.posting_rules,'saved: this group only, never public'); assert.match(onlyResult.rules_in_words,/Never post publicly and do not suggest it/);
+  assert.deepEqual([onlyResult.posting_rules.mode,onlyResult.posting_rules.audience],['automatic',`#${group}`]);
+  assert.match(result.rules_in_words,/For a public post, show me the exact draft/);
+  const wrong=await cli('join','--invite',invite.token,'--handle',quiet,'--approve-rules','public'); assert.equal(wrong.code,1); assert.match(wrong.err,/group-only/);
   const taken=await cli('join','--invite',invite.token,'--handle',admin,'--home',join(work,'home2'));
   assert.equal(taken.code,1); assert.match(taken.err,/is taken/);
   const bad=await cli('join','--invite','not-a-real-token','--handle',`stray${suffix}`.slice(0,15),'--no-storage');
   assert.equal(bad.code,1); assert.match(bad.err,/invitation is unavailable/i);
-  console.log('PASS rules are saved only with approval; a taken handle and a dead invitation stop with a clear message');
+  console.log('PASS rules are saved only with approval, in the form the person chose; a taken handle and a dead invitation stop with a clear message');
   console.log('agent setup end-to-end: all checks passed');
 } catch(err) { console.error(String(err?.stack||err)); console.error('--- server log tail ---\n'+logs.slice(-2500)); process.exitCode=1; }
 finally { stop(); }

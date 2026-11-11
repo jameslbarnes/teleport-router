@@ -81,6 +81,11 @@ def register(ctx):
 
         async def on_message(message):
             key = watched(message.channel)
+            summoned = native.user is not None and native.user in message.mentions
+            if key is None and private_conversation and summoned and getattr(message.channel, "type", None) == discord.ChannelType.text:
+                # A mention is answered in any ordinary text channel of the server. Nothing else said
+                # there is recorded or checked, and Router still decides whether group notes may be used.
+                key = message.channel.id
             if key is None or message.type not in (discord.MessageType.default, discord.MessageType.reply):
                 return
             if private_conversation and getattr(getattr(message, "guild", None), "id", None) != guild.id:
@@ -90,7 +95,6 @@ def register(ctx):
             if m.is_self:
                 return
             person = not message.author.bot or (not private_conversation and message.webhook_id is not None and message.webhook_id in test_webhooks)
-            summoned = native.user is not None and native.user in message.mentions
             if person and not m.text.startswith("/"):
                 if private_conversation and summoned:
                     controller.mentioned(key, m)
