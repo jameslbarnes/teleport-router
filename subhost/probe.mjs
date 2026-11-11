@@ -46,7 +46,10 @@ const server = createServer((req, res) => {
       if (value === null) { reply(res, 200, { ok: false, did, error: 'not found' }); return; }
       reply(res, 200, { ok: true, did, path, bytes: Buffer.byteLength(value), sha256: createHash('sha256').update(value).digest('hex') });
     } catch (err) {
-      reply(res, 200, { ok: false, did, error: String(err?.message || err).slice(0, 300) });
+      const message = String(err?.message || err);
+      // Router's client words a withdrawn grant for groups; say it plainly here.
+      const withdrawn = /revoked|expired/i.test(message);
+      reply(res, 200, { ok: false, did, error: withdrawn ? 'the grant was revoked or has expired' : message.slice(0, 300) });
     }
   });
 });
