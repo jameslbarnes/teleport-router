@@ -110,6 +110,8 @@ test('quote parsing, event digests and RTMR3 replay agree with a real Router quo
   for (const f of ['mrtd', 'rtmr0', 'rtmr1', 'rtmr2', 'rtmr3']) assert.equal(q[f], tcb[f], f);
   for (const e of tcb.event_log.filter(x => x.imr === 3)) assert.equal(eventDigest(e), e.digest, e.event);
   assert.equal(replayRtmr(tcb.event_log, 3), q.rtmr3);
+  // dstack's own GetQuote leaves RTMR3 digests empty; computing them from content replays the same value.
+  assert.equal(replayRtmr(tcb.event_log.map(e => (e.imr === 3 ? { ...e, digest: '' } : e)), 3, { fromContent: true }), q.rtmr3);
   const composeHash = tcb.event_log.find(e => e.event === 'compose-hash').event_payload;
   assert.equal(q.mrConfigId, `01${composeHash}${'0'.repeat(30)}`);
   const approved = JSON.parse(readFileSync(join(ROOT, 'subhost/approved.json'), 'utf8'));
@@ -213,6 +215,15 @@ test('verifyBundle accepts a consistent bundle and refuses each kind of mismatch
   // A different compose file is refused even when re-measured consistently.
   const other = syntheticBundle({ template, deployedCompose: `${deployed}  extra:\n    image: x\n`, nonce, spec: SPEC });
   assert.throws(() => verifyBundle(other.bundle, other.expected), /approved template/);
+
+  // As dstack's GetQuote returns it: RTMR3 digests empty. Still accepted, and an
+  // edited payload is still caught, now by the RTMR3 replay.
+  const blank = structuredClone(bundle);
+  for (const e of blank.event_log) if (e.imr === 3) e.digest = '';
+  assert.equal(verifyBundle(blank, expected).appId, APP);
+  const edited = structuredClone(blank);
+  edited.event_log.find(e => e.event === 'os-image-hash').event_payload = 'ff'.repeat(32);
+  assert.throws(() => verifyBundle(edited, expected), /RTMR3/);
 });
 
 test('the embedded container spec is probe.base.json plus probe.mjs', () => {

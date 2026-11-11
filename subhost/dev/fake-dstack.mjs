@@ -35,7 +35,8 @@ export function startFakeDstack({ socketPath, template, appId = 'f'.repeat(40), 
         Buffer.from(`01${composeHash}${'0'.repeat(30)}`, 'hex').copy(quote, 232);
         Buffer.from(replayRtmr(events, 3), 'hex').copy(quote, 520);
         Buffer.from(body.report_data, 'hex').copy(quote, 568);
-        return reply(res, { quote: quote.toString('hex'), event_log: JSON.stringify(events) });
+        // Like dstack's guest agent: RTMR3 events come back with empty digests.
+        return reply(res, { quote: quote.toString('hex'), event_log: JSON.stringify(events.map(e => ({ ...e, digest: '' }))) });
       }
       res.writeHead(404); res.end('{}');
     });
