@@ -162,6 +162,8 @@ export interface User {
   discordGrants?: import('./discord-groups.js').DiscordGroupGrant[];
   /** Private personal instructions. Never expose in public user/profile responses. */
   postingRules?: PostingRules;
+  /** The owner's signed permission for insights runs to read their traces. Checked on every run. */
+  insightsConsent?: import('./insights-release.js').InsightsConsentRecord;
 }
 
 /**
