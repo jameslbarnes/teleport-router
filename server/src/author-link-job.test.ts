@@ -28,17 +28,14 @@ describe('A storage link as its owner sees it while waiting', () => {
     expect(given).toBe(6000);
   });
 
-  it('reports a link that never ends as failed once its deadline has passed, and as complete if it then finishes', async () => {
+  it('stays running until the link itself ends, so a second link for the account cannot start meanwhile', async () => {
     vi.useFakeTimers();
     let finish!: (v: unknown) => void;
-    const job = startLinkJob(() => new Promise(r => { finish = r; }), { deadlineMs: 1000, graceMs: 500 });
-    await vi.advanceTimersByTimeAsync(1499);
+    const job = startLinkJob(() => new Promise(r => { finish = r; }), { deadlineMs: 1000 });
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(job.status).toBe('running');
-    await vi.advanceTimersByTimeAsync(2);
-    expect(job).toMatchObject({ status: 'failed', error: expect.stringContaining('in time') });
     finish({ copied: 0 }); await vi.advanceTimersByTimeAsync(0);
     expect(job).toMatchObject({ status: 'complete', result: { copied: 0 } });
-    expect(job.error).toBeUndefined();
   });
 
   it('says plainly when storage did not answer in time, and keeps other failures general', async () => {

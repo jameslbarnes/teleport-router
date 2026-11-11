@@ -214,19 +214,41 @@ describe('Linking while other people link and read',()=>{
     expect(steps).toEqual(['waiting','checking','encrypting','finding','copying','reading','saving','cleaning']);
   });
 
-  it("keeps serving everyone's reads while one account re-links",async()=>{
+  it("answers everyone's reads while one account re-links, and stops serving that account when its lease runs out",async()=>{
     const f=await fixture(); let clock=1000; let held=false;
     let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
     const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);
       return {...s,list:async(p:string)=>{if(held)await gate;return s.list(p);}};},codec,{leaseMs:60,now:()=>clock});
     await layer.link(f.users[0],binding('alice'));
     const mine=await layer.storage.addEntry(post('alice'));
+    const theirs=await layer.storage.addEntry(post('bob'));
     held=true;
     const relink=layer.link(f.users[0],binding('alice'));
     clock+=61; // Alice's read lease runs out while her re-link waits on storage
-    expect((await layer.storage.getEntries()).map(e=>e.id)).toContain(mine.id);
+    const during=(await layer.storage.getEntries()).map(e=>e.id);
+    expect(during).toContain(theirs.id);
+    expect(during).not.toContain(mine.id);
     release(); await relink;
+    expect((await layer.storage.getEntries()).map(e=>e.id)).toContain(mine.id);
     expect(await layer.status('alice')).toMatchObject({linked:true,available:true});
+  });
+
+  it('lets a slow write finish rather than give up on it',async()=>{
+    const f=await fixture(); const e=await f.base.addEntry(post('alice'));
+    const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);
+      return {...s,put:async(...args:Parameters<GroupStore['put']>)=>{await new Promise(r=>setTimeout(r,60));return s.put(...args);}};},codec);
+    expect(await layer.link(f.users[0],binding('alice'),undefined,{callTimeoutMs:20})).toMatchObject({copied:1,legacyCleanupPending:0});
+    expect(await layer.storage.getEntry(e.id)).toEqual(e);
+  });
+
+  it('never claims a record that carries neither the handle nor a pseudonym of the account',async()=>{
+    const f=await fixture();
+    const dave=await f.base.createUser({handle:'dave',secretKeyHash:'dave'});
+    f.data.set('space:dave',new Map());
+    const orphan=await f.base.addEntry({content:'no author fields',timestamp:1000,client:'code'} as unknown as JournalEntry);
+    await f.layer.link(dave,binding('dave'));
+    expect(await f.base.getEntry(orphan.id)).toEqual(orphan);
+    expect(f.data.get('space:dave')!.has(`posts/${orphan.id}`)).toBe(false);
   });
 });
 

@@ -1,9 +1,9 @@
 /** A link to an author's own storage, running in the background, as its owner sees it while they wait:
- * whether it is waiting to start or working, how long each step took, and a deadline after which it
- * reports failure instead of running on unseen. */
+ * whether it is waiting to start or working, and how long each step took. The job stays running until
+ * the link itself ends, so a second link for the account cannot start while the first still holds it. */
 import { LinkTimeoutError, type LinkStep } from './author-store.js';
 
-/** A link that has not switched storage by then stops; nothing is switched and a retry resumes it. */
+/** A link that has not switched storage by then stops without switching; a retry resumes it. */
 export const LINK_DEADLINE_MS = 20 * 60_000;
 
 export interface LinkJob {
@@ -39,7 +39,7 @@ const FAILED = 'Migration did not complete. Existing verified data is retained; 
 const TIMED_OUT = 'Storage did not finish in time. Nothing was switched and your records are where they were; try again in a few minutes.';
 
 export function startLinkJob(run: (link: LinkRun) => Promise<unknown>,
-  { deadlineMs = LINK_DEADLINE_MS, graceMs = 2 * 60_000, now = Date.now } = {}): LinkJob {
+  { deadlineMs = LINK_DEADLINE_MS, now = Date.now } = {}): LinkJob {
   const started = now();
   const job: LinkJob = { status: 'running', phase: 'waiting', progress: STEP_TEXT.waiting, started_at: new Date(started).toISOString(), steps: [] };
   let step: LinkStep = 'waiting', stepStarted = started;
@@ -49,10 +49,6 @@ export function startLinkJob(run: (link: LinkRun) => Promise<unknown>,
     stepStarted = at;
   };
   const finish = (fields: Partial<LinkJob>) => { endStep(); delete job.phase; Object.assign(job, fields); };
-  // The link stops itself at its deadline, within one storage call. This covers a link that never
-  // gets to start, for example behind work on the same account that does not end.
-  const watchdog = setTimeout(() => { if (job.status === 'running') finish({ status: 'failed', error: TIMED_OUT }); }, deadlineMs + graceMs);
-  watchdog.unref?.();
   run({
     deadline: started + deadlineMs,
     onStep: next => {
@@ -63,14 +59,8 @@ export function startLinkJob(run: (link: LinkRun) => Promise<unknown>,
       job.progress = STEP_TEXT[next];
     },
     progress: message => { if (job.status === 'running') job.progress = message; },
-  }).then(result => {
-    clearTimeout(watchdog);
-    // A link that finished after the watchdog gave up did finish: say so.
-    if (job.status === 'running') finish({ status: 'complete', result, progress: DONE });
-    else Object.assign(job, { status: 'complete', result, progress: DONE, error: undefined });
-  }, err => {
-    clearTimeout(watchdog);
-    if (job.status === 'running') finish({ status: 'failed', error: err instanceof LinkTimeoutError ? TIMED_OUT : FAILED });
-  });
+  }).then(result => finish({ status: 'complete', result, progress: DONE }),
+    // A timeout is only ever raised before the switch, so its message can say nothing was switched.
+    err => finish({ status: 'failed', error: err instanceof LinkTimeoutError ? TIMED_OUT : FAILED }));
   return job;
 }

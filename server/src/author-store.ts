@@ -35,15 +35,13 @@ export type LinkStep = 'waiting' | 'checking' | 'encrypting' | 'finding' | 'copy
 export interface LinkOptions {
   /** Time (ms since the epoch) after which the link stops before switching anything, time spent waiting to start included. */
   deadline?: number;
-  /** Longest wait for any one storage call. */
+  /** Longest wait for any one storage read or listing. Writes are never cut short. */
   callTimeoutMs?: number;
   onStep?: (step: LinkStep) => void;
 }
-/** The link ran out of time, or storage did not answer one call in time. Nothing was switched. */
+/** The link ran out of time, or storage did not answer a read in time. Nothing was switched. */
 export class LinkTimeoutError extends Error {}
 export const LINK_CALL_TIMEOUT_MS = 60_000;
-/** Longest a running link pauses grant checks on its account for reads. */
-const LINK_PAUSES_CHECKS_MS = 30 * 60_000;
 
 function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -53,14 +51,15 @@ function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
-/** The same store, with no single call waiting longer than `ms`. A call that lands late is harmless
- * to linking, whose every write is conditional. */
-function timeLimited(store: GroupStore, ms: number): GroupStore {
+/** The same store, with no read or listing waiting longer than `ms`. Writes are left to finish: a write
+ * given up on while still in flight could land after a retry and after the owner deleted that record,
+ * which a conditional write does not prevent. */
+function readsWithin(store: GroupStore, ms: number): GroupStore {
   const limited: GroupStore = {
-    put: (key, value, condition) => within(store.put(key, value, condition), ms, 'a write'),
+    put: (key, value, condition) => store.put(key, value, condition),
     get: key => within(store.get(key), ms, 'a read'),
     list: path => within(store.list(path), ms, 'a listing'),
-    delete: key => within(store.delete(key), ms, 'a deletion'),
+    delete: key => store.delete(key),
   };
   if (store.getVersioned) limited.getVersioned = key => within(store.getVersioned!(key), ms, 'a read');
   return limited;
@@ -85,14 +84,15 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
   const authors = new Map<string, AuthorState>();
   const handlesByPseudonym = new Map<string, string>();
   const locks = new Map<string, Promise<unknown>>();
-  /** Accounts with a link running, and until when reads keep serving what was loaded instead of waiting for it. */
-  const linking = new Map<string, { count: number; until: number }>();
+  /** Accounts with a link running, which holds the account for as long as it runs. */
+  const linking = new Map<string, number>();
   let initializing: Promise<void> | undefined;
   const index = (kind: Kind): Map<string, any> => kind === 'posts' ? entries : kind === 'conversations' ? conversations : summaries;
   const ownerOf = (value: {handle?: string; pseudonym: string}) => value.handle && authors.has(value.handle)
     ? value.handle : [...authors].find(([, s]) => belongs(value, s.user))?.[0];
   const belongs = (value: {handle?: string; pseudonym: string}, user: BindingUser) =>
-    value.handle === user.handle || value.pseudonym === user.tinycloud.pseudonym || value.pseudonym === user.legacyPseudonym;
+    value.handle === user.handle || value.pseudonym === user.tinycloud.pseudonym
+    || (!!user.legacyPseudonym && value.pseudonym === user.legacyPseudonym);
   async function exclusive<T>(handle: string, action: () => Promise<T>): Promise<T> {
     const prior = locks.get(handle) || Promise.resolve();
     const task = prior.catch(() => {}).then(action);
@@ -141,9 +141,13 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     if (state.activationPending) return; // uncertain metadata commit: only a verified re-link can resume
     if (!reload && state.available && state.expires > now()) return;
     if (!reload && !state.available && (state.retryAt || 0) > now()) return;
-    // A re-link holds this account for as long as it runs; everyone's reads would otherwise wait on it.
-    // The link proves the grant itself, and the next check after it ends catches any revocation.
-    if (!reload && (linking.get(state.user.handle)?.until || 0) > now()) return;
+    // A link holds this account until it ends, and every read would wait for it here. Instead, stop serving this
+    // account's records once their lease has run out, as a failed check would, and let everyone else's reads go on.
+    // The link loads them again when it switches; if it fails, the next check after it does.
+    if (!reload && linking.has(state.user.handle)) {
+      if (state.available) { state.available = false; state.expires = 0; evict(state.user); }
+      return;
+    }
     if (state.checking) return state.checking;
     const started = now();
     state.checking = exclusive(state.user.handle, async () => {
@@ -300,9 +304,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     { deadline = Infinity, callTimeoutMs = LINK_CALL_TIMEOUT_MS, onStep = () => {} }: LinkOptions = {}) {
     const due = () => { if (now() > deadline) throw new LinkTimeoutError('The link ran out of time before switching storage.'); };
     onStep('waiting');
-    const running = linking.get(user.handle);
-    linking.set(user.handle, { count: (running?.count || 0) + 1,
-      until: Math.max(running?.until || 0, Math.min(deadline, now() + LINK_PAUSES_CHECKS_MS)) });
+    linking.set(user.handle, (linking.get(user.handle) || 0) + 1);
     try {
       await init();
       handlesByPseudonym.set(binding.pseudonym,user.handle);
@@ -310,8 +312,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       // Links for other accounts and other storage run alongside.
       return await exclusive(`did:${binding.ownerDid.toLowerCase()}`, () => linkAccount(user, binding, progress, due, callTimeoutMs, onStep));
     } finally {
-      const done = linking.get(user.handle);
-      if (done && --done.count === 0) linking.delete(user.handle);
+      const left = (linking.get(user.handle) || 1) - 1;
+      if (left) linking.set(user.handle, left); else linking.delete(user.handle);
     }
   }
   function linkAccount(user: User, binding: AuthorBinding, progress: (message: string) => void, due: () => void,
@@ -334,7 +336,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         ownerPublicKey: ownerPublicKey(binding, binding.ownerPublicKey),
         minRecordVersion: durableBinding?.minRecordVersion || previous?.user.tinycloud.minRecordVersion };
       const linked = { ...user, tinycloud: binding } as BindingUser;
-      const store = timeLimited(await within(resolveStore(binding), callTimeoutMs, 'opening the grant'), callTimeoutMs);
+      const store = readsWithin(await within(resolveStore(binding), callTimeoutMs, 'opening the grant'), callTimeoutMs);
       await store.list('posts/'); // prove the actual grant works, not only its unsigned metadata
       if (!store.getVersioned) throw new Error('TinyCloud conditional writes are required for encryption migration');
       let recovery = await store.get(RECOVERY_KEY);
@@ -428,7 +430,10 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         catch { failed.push(`${kind}/${value.id}`); }
       });
       if(extra.getDailySummaries && extra.deleteDailySummary) {
-        for(const s of await extra.getDailySummaries(100000)) if(s.pseudonyms.some((p:string)=>belongs({pseudonym:p},linked))) {
+        // The account has switched by now: a failure here is cleanup left to a retry, not a failed link.
+        let days: DailySummary[] = [];
+        try { days = await extra.getDailySummaries(100000); } catch { failed.push('daily'); }
+        for(const s of days) if(s.pseudonyms.some((p:string)=>belongs({pseudonym:p},linked))) {
           try { await extra.deleteDailySummary(s.date); } catch { failed.push(`daily/${s.date}`); }
         }
       }
