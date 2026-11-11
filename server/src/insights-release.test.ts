@@ -51,7 +51,7 @@ function world(reply = (log: string) => JSON.stringify(log.includes('timeout')
     return release.putTrace(p.user, { entry_id: entryId, full: { meta: full.meta, data: full.ciphertext.toString('base64') },
       ...(derived ? { derived: { meta: derived.meta, data: derived.ciphertext.toString('base64'), policy_id: policy!.policyId } } : {}) });
   };
-  return { release, person, post, consent, upload, calls, stores, advance: (ms: number) => { clock += ms; } };
+  return { release, person, post, consent, upload, calls, stores, users, advance: (ms: number) => { clock += ms; } };
 }
 const question = { template: 'skill-check', params: { skill: 'Smoke test before long runs', when: 'a run is expected to take more than a few minutes' } };
 
@@ -164,6 +164,23 @@ describe('Private traces and insights runs', () => {
     const otherProgram = { ...policy, program: { ...policy.program, sha256: '0'.repeat(64) } };
     await expect(w.release.saveConsent(alice.user, otherProgram as InsightsPolicy, await alice.wallet.signMessage(message))).rejects.toThrow('does not match');
     expect(w.release.consentStatus(alice.user)).toMatchObject({ active: false, reason: 'none' });
+  });
+
+  it('checks the stored consent\'s signature on every use, so an edited account record grants nothing', async () => {
+    const w = world();
+    const agent = w.person('insights', false);
+    const people = ['alice', 'bob', 'carol'].map(h => w.person(h));
+    for (const p of people) { w.post(`p-${p.user.handle}`, p.user.handle); await w.upload(p, `p-${p.user.handle}`, LOG_A, await w.consent(p, ['insights'])); }
+    expect(w.release.consentStatus(people[0].user)).toMatchObject({ active: true });
+
+    // Someone with write access to the account records widens Alice's scope and names another requester.
+    const alice = w.users.get('alice');
+    w.users.set('alice', { ...alice, insightsConsent: { ...alice.insightsConsent, policy: { ...alice.insightsConsent.policy,
+      scope: { groups: ['insights-notes', 'everything'] } } } });
+    expect(w.release.consentStatus(people[0].user)).toMatchObject({ active: false, reason: 'bad_signature' });
+    const result = await w.release.run(agent.user, { ...question, entry_ids: people.map(p => `p-${p.user.handle}`) });
+    expect(result).toMatchObject({ released: false, skipped: { no_consent: 1 } });
+    expect(w.calls).toHaveLength(2);
   });
 
   it('names the declared upgrade policy in the consent, and a consent signed under another policy does not count', async () => {

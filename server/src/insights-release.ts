@@ -198,7 +198,23 @@ export function insightsRelease(deps: ReleaseDeps) {
     if (p.program.sha256 !== program.sha256) return { active: false, reason: 'program_changed' };
     if (p.enclave.releaseKey !== releaseKey || p.enclave.appId !== deps.appId) return { active: false, reason: 'enclave_changed' };
     if (canonical(p.enclave.upgrades ?? null) !== canonical(upgrades)) return { active: false, reason: 'upgrade_policy_changed' };
+    // The stored record is checked again on every use, not only when it was saved: whoever holds the
+    // account records must not be able to widen or invent a consent.
+    if (!user.tinycloud || p.owner?.handle !== user.handle || p.owner?.did !== user.tinycloud.ownerDid || !signedByOwner(record)) return { active: false, reason: 'bad_signature' };
     return { active: true, policy: p };
+  }
+
+  const checkedSignatures = new Map<string, boolean>();
+  function signedByOwner(record: InsightsConsentRecord): boolean {
+    const id = sha256Hex(canonical(record.policy) + '\n' + record.signature);
+    let ok = checkedSignatures.get(id);
+    if (ok === undefined) {
+      try { ok = verifyMessage(consentMessage(record.policy), String(record.signature)).toLowerCase() === ownerAddress(record.policy.owner.did); }
+      catch { ok = false; }
+      if (checkedSignatures.size > 5000) checkedSignatures.clear();
+      checkedSignatures.set(id, ok);
+    }
+    return ok;
   }
 
   /** The fixed question a run or request asks, and the published posts it would read. */
