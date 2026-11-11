@@ -37,7 +37,7 @@ jobs:
       - name: Unit and host tests, with Router's dstack client through the filtered socket
         run: |
           node subhost/embed.mjs --check
-          node --test subhost/
+          node --test subhost/subhost.test.mjs
 
       - name: Start the host against a stand-in dstack, on the real Docker daemon
         run: |

@@ -70,4 +70,4 @@ node scripts/subhost-grant.mjs --url https://<app-id>-8091.dstack-pha-prod9.phal
   means the grant check refuses until a grantor approves the new template.
 
 Edit `host.mjs`, `probe.mjs` or `probe.base.json`, then run `node subhost/embed.mjs`
-to update the template. `node --test subhost/` runs the tests.
+to update the template. `node --test subhost/subhost.test.mjs` runs the tests.

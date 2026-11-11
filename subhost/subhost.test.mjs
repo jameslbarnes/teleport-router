@@ -1,4 +1,4 @@
-// node --test subhost/
+// node --test subhost/subhost.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';

@@ -75,7 +75,7 @@ jobs:
       - name: Test the sub-container host
         run: |
           node subhost/embed.mjs --check
-          node --test subhost/
+          node --test subhost/subhost.test.mjs
 
       - name: Build server
         working-directory: server
