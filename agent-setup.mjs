@@ -34,10 +34,11 @@ import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 
 const SDK = '@tinycloud/node-sdk@3.9.1', ETHERS = 'ethers@6.17.0';
 const [command, ...argv] = process.argv.slice(2);
+const self = basename(process.argv[1] || 'agent-setup.mjs');   // hints name the file as it was saved
 const flag = name => argv.includes(name);
 const value = name => { const i = argv.indexOf(name); return i < 0 || argv[i + 1]?.startsWith('--') ? undefined : argv[i + 1]; };
 let secrets = [];
@@ -282,7 +283,7 @@ async function run() {
     const next = [];
     if (state.storage !== 'connected') next.push('Storage is not connected. Run the same join command again.');
     if (!state.posting_rules.saved) next.push('Choose posting rules with the person and save them.');
-    if (state.discord?.available && !state.discord.connected) next.push(`Discord: the person joins the server, types /router-link in ${state.discord.channel} and gives you the private link it returns. Then run: node agent-setup.mjs discord --handle ${handle} --link "<that link>"`);
+    if (state.discord?.available && !state.discord.connected) next.push(`Discord: the person joins the server, types /router-link in ${state.discord.channel} and gives you the private link it returns. Then run: node ${self} discord --handle ${handle} --link "<that link>"`);
     console.log(JSON.stringify({ done: steps, ...state,
       keys: { folder: dir, files: ['router-key', ...(state.storage === 'connected' ? ['storage-key', 'storage-grant.json'] : [])],
         note: 'These files are the account. Router cannot recover them. Tell the person to back this folder up somewhere private. Never print or post their contents.' },
@@ -356,11 +357,13 @@ async function run() {
     const args = JSON.parse(await readFile(value('--args-file'), 'utf8'));
     const result = await mcp(key, send => send('tools/call', { name, arguments: args }));
     for (const part of result.content || []) console.log(clean(part.type === 'text' ? part.text : JSON.stringify(part)));
+    // Some tools also return fields an agent must act on, such as a notice to record. Print them, not only the text.
+    if (result.structuredContent) { console.log(''); console.log('Fields returned with this result:'); console.log(clean(JSON.stringify(result.structuredContent, null, 1))); }
     if (result.isError) process.exitCode = 1;
     return;
   }
 
-  fail('Usage: node agent-setup.mjs <join|status|discord|connect|tools|call> … (the comment at the top of this file lists each one)');
+  fail(`Usage: node ${self} <join|status|discord|connect|tools|call> … (the comment at the top of this file lists each one)`);
 }
 
 run().catch(err => fail(err?.message || String(err)));

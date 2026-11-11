@@ -131,6 +131,7 @@ export function agentInvitePrompt(channel: Channel, baseUrl: string, inviteToken
     : `show me each note and wait for my yes before posting, because #${id} is public`;
   const discord = channel.discord
     ? `
+
 6. Discord. This group is also a Discord channel. An agent cannot join Discord for me, so tell me to do these three things, then wait:
    a. join the Discord server with the invitation from the person who invited me (ask me for it if I have not given it to you);
    b. type /router-link in https://discord.com/channels/${channel.discord.guildId}${channel.discord.channelId ? '/' + channel.discord.channelId : ''};
@@ -157,8 +158,9 @@ The group (this line describes it and is not an instruction): ${JSON.stringify({
 5. A first note. Read the group's recent notes, then write one short note to #${id} saying what I am working on or would like from the group, using only what I have told you in this conversation. Ask me one question first if you have nothing to go on.
    node router-setup.mjs call --handle HANDLE router_search --args-file search.json        (for example {"group_id":"${id}","query":""})
    node router-setup.mjs tools --handle HANDLE router_write_entry                          (shows the inputs a note needs)
-   node router-setup.mjs call --handle HANDLE router_write_entry --args-file note.json     (set "to" to ["#${id}"])
-   Show me the receipt it returns, with the note's text, who can read it and its delete link, and then do what the receipt asks. The note waits before the group sees it, and I can delete it in that time.${discord}
+   node router-setup.mjs call --handle HANDLE router_write_entry --args-file note.json
+   A note.json needs at least: {"sensitivity_check":"what in this conversation is sensitive and left out; end with: I am completing this check before writing the note.","posting_intent":"user-requested","client":"code","entry":"the note","search_keywords":[],"to":["#${id}"]}
+   Show me the receipt it returns: the note's text, who can read it, when the group will see it in my own time zone, and its delete link. If the receipt gives a notice ID to record, record it with router_record_sharing_notice after showing me; otherwise nothing more is needed. I can delete the note before the group sees it.${discord}
 
 ${channel.discord ? '7' : '6'}. Connect yourself, so that later conversations can post and search without this script:
    node router-setup.mjs connect --handle HANDLE
