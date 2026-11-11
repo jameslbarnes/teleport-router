@@ -66,7 +66,7 @@ jobs:
           # A dev OS image would let whoever runs the CVM log into it, which defeats the attestation.
           [[ "$OS_IMAGE" =~ ^dstack-[0-9][0-9.]*$ ]] || { echo "os_image must be a production dstack image such as dstack-0.5.12, never a dev or GPU image"; exit 1; }
           if [ -n "$CVM_ID" ]; then
-            phala deploy --wait --cvm-id "$CVM_ID" --image "$OS_IMAGE" --no-dev-os -c /tmp/insights-enclave.yml -e /tmp/insights-enclave.env --no-public-logs
+            phala deploy --wait --cvm-id "$CVM_ID" --image "$OS_IMAGE" -c /tmp/insights-enclave.yml -e /tmp/insights-enclave.env --no-public-logs
           else
             phala deploy --wait --name router-insights-enclave --kms phala --image "$OS_IMAGE" --no-dev-os -c /tmp/insights-enclave.yml -e /tmp/insights-enclave.env --no-public-logs
             echo "New enclave app created. Save its app id as the INSIGHTS_ENCLAVE_CVM_ID secret before the next run."
