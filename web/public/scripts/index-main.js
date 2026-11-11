@@ -199,7 +199,8 @@
                     cleanUrl.searchParams.delete('invite');
                     history.replaceState({}, '', cleanUrl.pathname + cleanUrl.search);
                     loadChannelsSidebar();
-                    showJoinStatus(`Joined #${channelIdFromUrl}.`, 'success', 2500);
+                    const joined = await res.json().catch(() => ({}));
+                    showJoinStatus(`Joined #${channelIdFromUrl}.`, 'success', joined.discord_invite ? 20000 : 2500, joined.discord_invite);
                 } else {
                     const data = await res.json();
                     showError(data.error || 'Could not join the group. Try again.');
@@ -209,7 +210,7 @@
             }
         }
 
-        function showJoinStatus(message, kind = 'info', autoHideMs = 0) {
+        function showJoinStatus(message, kind = 'info', autoHideMs = 0, discordUrl = '') {
             const existing = document.getElementById('join-status-banner');
             if (existing) existing.remove();
 
@@ -218,6 +219,13 @@
             banner.className = `join-status-banner ${kind}`;
             banner.setAttribute('role', kind === 'error' ? 'alert' : 'status');
             banner.textContent = message;
+            if (/^https:\/\//.test(discordUrl)) {
+                banner.append(" Join the group's Discord: ");
+                const link = document.createElement('a');
+                link.href = discordUrl; link.target = '_blank'; link.rel = 'noopener noreferrer';
+                link.textContent = discordUrl;
+                banner.append(link, ' then run /router-link there.');
+            }
             document.body.appendChild(banner);
 
             if (autoHideMs > 0) {
@@ -1019,7 +1027,8 @@
                 if (res.ok) {
                     loadFeed(true);
                     loadChannelsSidebar();
-                    showJoinStatus(`Joined #${channelId}.`, 'success', 2500);
+                    const joined = await res.json().catch(() => ({}));
+                    showJoinStatus(`Joined #${channelId}.`, 'success', joined.discord_invite ? 20000 : 2500, joined.discord_invite);
                 } else {
                     const data = await res.json();
                     showError(data.error || 'Could not join the group. Try again.');
