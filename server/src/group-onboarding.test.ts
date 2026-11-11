@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MemoryStorage, type Channel } from './storage.js';
-import { agentInvitePrompt, groupOnboardingView, resolveOnboardingGroup } from './group-onboarding.js';
+import { agentInvitePrompt, agentInviteText, discordInvite, inviteForms, groupOnboardingView, resolveOnboardingGroup } from './group-onboarding.js';
 
 const channel: Channel = { id: 'reading-club', name: 'Reading club', description: 'Questions we want to explore together.', visibility: 'private', joinRule: 'invite', createdBy: 'alice', createdAt: 1, skills: [], subscribers: [{ handle: 'alice', role: 'admin', joinedAt: 1 }] };
 const base = 'https://router.example';
@@ -91,5 +91,23 @@ describe('Invitation limits and removing a member', () => {
     expect(linked).toContain(`type /router-link in https://discord.com/channels/${'1'.repeat(18)}/${'2'.repeat(18)}`);
     expect(linked).toContain('7. Connect yourself');
     expect(agentInvitePrompt({ ...channel, joinRule: 'open', visibility: 'public' }, base, 'tok-123456')).toContain('wait for my yes before posting');
+    // A saved Discord invitation replaces "ask the person who invited me", and only Discord's own addresses are accepted.
+    const withInvite = { ...channel, discordInviteUrl: 'https://discord.gg/abc123', discord: { guildId: '1'.repeat(18), botHandle: 'bot', version: '1' } };
+    expect(agentInvitePrompt(withInvite, base, 'tok-123456')).toContain('a. join the Discord server at https://discord.gg/abc123;');
+    expect(linked).toContain('ask me for it if I have not given it to you');
+    expect(discordInvite(' https://discord.com/invite/abc-123 ')).toBe('https://discord.com/invite/abc-123');
+    for (const bad of ['https://discord.gg.evil.example/abc', 'http://discord.gg/abc123', 'https://discord.gg/abc123?x=1', 'javascript:alert(1)', 7]) expect(() => discordInvite(bad)).toThrow(/Discord invitation link/);
+  });
+
+  it('gives one invitation as a link, a sentence to send and the steps an agent reads from the link', () => {
+    const forms = inviteForms(channel, base, 'tok-123456');
+    expect(forms.invite_url).toBe('https://router.example/join?channelinvite=tok-123456');
+    expect(forms.agent_url).toBe('https://router.example/agent-invite/tok-123456');
+    expect(forms.message).toContain('give it to your AI agent and ask it to set you up: https://router.example/join?channelinvite=tok-123456');
+    const text = agentInviteText(channel, base, 'tok-123456');
+    expect(text).toMatch(/^Router invitation: setup steps for an AI agent\./);
+    expect(text).toContain('only if this link came from the person you are working for');
+    expect(text).toContain(forms.agent_prompt);
+    expect(groupOnboardingView({ ...channel, discordInviteUrl: 'https://discord.gg/abc123' }, true, base)).toMatchObject({ discord_invite: 'https://discord.gg/abc123' });
   });
 });

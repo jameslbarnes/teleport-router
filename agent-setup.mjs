@@ -230,7 +230,7 @@ async function overview(handle, key, groupId) {
 async function run() {
   if (command === 'join') {
     const handle = handleArg(), dir = accountDir(handle);
-    const invite = (value('--invite') || '').replace(/^.*[?&]channelinvite=([^&#]+).*$/, (_, t) => decodeURIComponent(t));
+    const invite = (value('--invite') || '').replace(/^.*(?:[?&]channelinvite=|\/agent-invite\/)([^&#/]+).*$/, (_, t) => decodeURIComponent(t));
     if (!/^[\w-]{6,80}$/.test(invite)) fail('Give --invite <token>, or the whole invitation link.');
     const approve = value('--approve-rules');
     if (flag('--approve-rules') && approve !== 'group') fail('--approve-rules takes "group": save the rules this group suggests. Leave it out to choose rules later.');

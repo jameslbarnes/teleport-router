@@ -24,7 +24,11 @@ Build the browser assets with `npm ci && npm run build` in `browser/`. Docker do
 
 ## An invitation for the guest's agent
 
-Every invitation also comes as a message the guest pastes into their own agent (Claude Code, Codex or any agent with a shell and Node.js 20). The group page's "Copy invite for their agent" button, `router_channels` action `invite` and `POST /api/channels/:id/invite` (`agent_prompt`) all return it. It carries the same token as the link, so it ends on the same date and after the same number of joins.
+An invitation is one link, `/join?channelinvite=…`, for two readers. A browser asks for a page and gets the guided setup. Anything that does not ask for HTML, such as curl or an agent's fetch tool, gets the same invitation as plain-text steps; `/agent-invite/<token>` always returns the text, and the setup page tells an agent that read the HTML where to find it. So the guest can open the link, or give it to their own agent (Claude Code, Codex or any agent with a shell and Node.js 20) and say "set me up with this".
+
+`router_channels` action `invite`, `POST /api/channels/:id/invite` and the group page's "Copy invitation message" button return a short `message` to send, which contains the link. They also return `invite_url`, `agent_url` and the full steps as `agent_prompt`. Both forms carry the same token, so they end on the same date and after the same number of joins.
+
+A group with a Discord server can keep its Discord invitation: pass `discord_invite` once when creating an invitation (admins only; only `discord.gg` and `discord.com/invite` addresses are accepted). It is saved on the group and shown to invited people and members, on the setup page and in the agent's steps.
 
 The message tells the agent to download `/agent-setup.mjs` from this Router, read it and run one command:
 

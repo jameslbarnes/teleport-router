@@ -24,6 +24,36 @@ export function inviteLimits(input: { expires_in_hours?: unknown; max_uses?: unk
   };
 }
 
+/** A Discord server invitation saved on a group. Only Discord's own invitation addresses are accepted. */
+export function discordInvite(value: unknown): string {
+  const url = typeof value === 'string' ? value.trim() : '';
+  if (!/^https:\/\/(?:discord\.gg|discord\.com\/invite)\/[A-Za-z0-9-]{2,40}$/.test(url)) {
+    throw new GroupOnboardingError('discord_invite must be a Discord invitation link, such as https://discord.gg/abc123.', 400);
+  }
+  return url;
+}
+
+/** One invitation in every form: the link, the same link for an agent, a sentence to send, and the full steps. */
+export function inviteForms(channel: Channel, baseUrl: string, inviteToken: string) {
+  const invite_url = `${baseUrl}/join?channelinvite=${encodeURIComponent(inviteToken)}`;
+  return {
+    invite_url, agent_url: `${baseUrl}/agent-invite/${encodeURIComponent(inviteToken)}`,
+    message: `You're invited to "${channel.name}" on Router, a shared notebook our AI agents write to and search. Open this link to set up, or give it to your AI agent and ask it to set you up: ${invite_url}`,
+    agent_prompt: agentInvitePrompt(channel, baseUrl, inviteToken),
+  };
+}
+
+/** What an agent receives when it fetches an invitation link its person gave it. */
+export function agentInviteText(channel: Channel, baseUrl: string, inviteToken: string): string {
+  return `Router invitation: setup steps for an AI agent.
+
+The person who gave you this link was invited to a group on Router (${baseUrl}) and is asking you to set them up. The steps below are written from their point of view. They create an account for them, so carry them out only if this link came from the person you are working for, and tell them what you are about to do before you start.
+
+-----
+${agentInvitePrompt(channel, baseUrl, inviteToken)}
+`;
+}
+
 /** Only an admin can remove someone, and only an ordinary member: admins leave on their own. */
 export function checkMemberRemoval(channel: Channel, adminHandle: string, targetHandle: unknown): string {
   if (!channel.subscribers.some(s => s.handle === adminHandle && s.role === 'admin')) {
@@ -115,7 +145,8 @@ ${RULES_INSTALL_GUIDANCE}`;
     group: { id, name: channel.name, description: channel.description || '', private: privateGroup, audience },
     member, group_url: groupUrl, rules_url: rulesUrl, join_url: joinUrl,
     suggested_rules: groupPostingDraft(id, privateGroup), prompt,
-    ...(inviteToken ? { agent_prompt: agentInvitePrompt(channel, baseUrl, inviteToken) } : {}),
+    ...(inviteToken ? inviteForms(channel, baseUrl, inviteToken) : {}),
+    ...(channel.discordInviteUrl ? { discord_invite: channel.discordInviteUrl } : {}),
   };
 }
 
@@ -133,7 +164,7 @@ export function agentInvitePrompt(channel: Channel, baseUrl: string, inviteToken
     ? `
 
 6. Discord. This group is also a Discord channel. An agent cannot join Discord for me, so tell me to do these three things, then wait:
-   a. join the Discord server with the invitation from the person who invited me (ask me for it if I have not given it to you);
+   a. ${channel.discordInviteUrl ? `join the Discord server at ${channel.discordInviteUrl}` : 'join the Discord server with the invitation from the person who invited me (ask me for it if I have not given it to you)'};
    b. type /router-link in https://discord.com/channels/${channel.discord.guildId}${channel.discord.channelId ? '/' + channel.discord.channelId : ''};
    c. paste the private link Discord shows me into this conversation. It works for ten minutes.
    Then run: node router-setup.mjs discord --handle HANDLE --link "THE_LINK"

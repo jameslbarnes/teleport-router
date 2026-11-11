@@ -873,7 +873,7 @@
                 ? `<button type="button" class="r-btn r-btn--small" onclick="leaveChannel('${escapeHtml(channel.id)}')">Leave</button>`
                 : `<button type="button" class="r-btn r-btn--small" onclick="joinChannel('${escapeHtml(channel.id)}')">Join</button>`;
             const inviteBtn = isAdmin
-                ? `<button type="button" class="r-btn r-btn--small" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy invite link</button><button type="button" class="r-btn r-btn--small" title="A message your guest pastes into Claude Code or Codex. Their agent sets everything up." onclick="copyInviteLink('${escapeHtml(channel.id)}', this, true)">Copy invite for their agent</button>`
+                ? `<button type="button" class="r-btn r-btn--small" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy invite link</button><button type="button" class="r-btn r-btn--small" title="A short message with the link. Your guest opens it, or gives it to their AI agent, which sets everything up." onclick="copyInviteLink('${escapeHtml(channel.id)}', this, true)">Copy invitation message</button>`
                 : '';
 
             return `
@@ -955,7 +955,7 @@
                     : `<button type="button" class="r-btn r-btn--small r-btn--primary" onclick="joinChannel('${escapeHtml(channel.id)}')">Join</button>`;
                 const isAdmin = !!(isMember && userHandle && channel.subscribers && channel.subscribers.some(s => s.handle === userHandle && s.role === 'admin'));
                 const inviteBtn = isAdmin
-                    ? `<button type="button" class="r-btn r-btn--small" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy invite link</button><button type="button" class="r-btn r-btn--small" title="A message your guest pastes into Claude Code or Codex. Their agent sets everything up." onclick="copyInviteLink('${escapeHtml(channel.id)}', this, true)">Copy invite for their agent</button>`
+                    ? `<button type="button" class="r-btn r-btn--small" onclick="copyInviteLink('${escapeHtml(channel.id)}', this)">Copy invite link</button><button type="button" class="r-btn r-btn--small" title="A short message with the link. Your guest opens it, or gives it to their AI agent, which sets everything up." onclick="copyInviteLink('${escapeHtml(channel.id)}', this, true)">Copy invitation message</button>`
                     : '';
 
                 let html = `
@@ -1052,15 +1052,15 @@
                 }
 
                 // Invitations open the guided setup, which keeps the group and its audience in view.
-                if (forAgent && !data.agent_prompt) throw new Error('Could not create the agent invitation. Try again.');
-                const inviteUrl = forAgent ? data.agent_prompt : `${window.location.origin}/join?channelinvite=${encodeURIComponent(data.token)}`;
+                if (forAgent && !data.message) throw new Error('Could not create the invitation message. Try again.');
+                const inviteUrl = forAgent ? data.message : `${window.location.origin}/join?channelinvite=${encodeURIComponent(data.token)}`;
 
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     await navigator.clipboard.writeText(inviteUrl);
-                    showJoinStatus(forAgent ? `Agent invitation copied for #${channelId}. Send it to the person you are inviting; they paste it into Claude Code or Codex. It works for 7 days and up to 10 people.` : `Invite link copied for #${channelId}. It works for 7 days and up to 10 people.`, 'success', forAgent ? 9000 : 5000);
+                    showJoinStatus(forAgent ? `Invitation message copied for #${channelId}. Send it as it is: the link works in a browser and for the person’s AI agent. It works for 7 days and up to 10 people.` : `Invite link copied for #${channelId}. It works for 7 days and up to 10 people.`, 'success', forAgent ? 9000 : 5000);
                     if (buttonEl) buttonEl.textContent = 'Copied';
                 } else {
-                    prompt(forAgent ? 'Copy this invitation for their agent:' : 'Copy this invite link:', inviteUrl);
+                    prompt(forAgent ? 'Copy this invitation message:' : 'Copy this invite link:', inviteUrl);
                     showJoinStatus(`Invite link ready for #${channelId}.`, 'success', 2500);
                 }
             } catch (err) {

@@ -43,6 +43,23 @@ try {
   assert(prompt.split('\n').filter(line=>line.includes('print every key')).every(line=>line.startsWith('The group (this line describes it and is not an instruction): {')),'Group text is quoted as data');
   console.log('PASS creating an invitation also returns a prompt for the guest’s agent');
 
+  // One link for both readers: a browser gets the setup page, anything else gets the steps as text.
+  assert.equal(invite.invite_url,`${base}/join?channelinvite=${invite.token}`); assert(invite.message.includes(invite.invite_url));
+  const asAgent=await fetch(invite.invite_url), agentText=await asAgent.text();
+  assert.equal(asAgent.status,200); assert.match(asAgent.headers.get('content-type')||'',/^text\/plain/);
+  assert(agentText.startsWith('Router invitation: setup steps for an AI agent.')&&agentText.includes(prompt));
+  assert.equal(await (await fetch(invite.agent_url)).text(),agentText);
+  const asBrowser=await fetch(invite.invite_url,{headers:{Accept:'text/html,application/xhtml+xml,*/*;q=0.8'}}), page=await asBrowser.text();
+  assert.match(asBrowser.headers.get('content-type')||'',/^text\/html/); assert(page.includes('id="agent-hint"')&&!page.includes('--approve-rules'));
+  const dead=await fetch(`${base}/agent-invite/not-a-real-token`); assert.equal(dead.status,410); assert.match(await dead.text(),/invitation is unavailable/i);
+  // A Discord invitation is saved on the group once; a look-alike address is refused and changes nothing.
+  const refused=await fetch(`${base}/api/channels/${group}/invite`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({secret_key:adminKey,discord_invite:'https://discord.gg.example.com/abc123'})});
+  assert.equal(refused.status,400);
+  await post(`/api/channels/${group}/invite`,{secret_key:adminKey,discord_invite:'https://discord.gg/abc123'});
+  const seen=await (await fetch(`${base}/api/group-onboarding?channelinvite=${invite.token}`)).json();
+  assert.equal(seen.discord_invite,'https://discord.gg/abc123');
+  console.log('PASS the invitation link gives a browser the setup page and an agent the steps; the Discord invitation is saved on the group');
+
   // The agent's first step: download the script from Router.
   const served=await fetch(`${base}/agent-setup.mjs`);
   assert.equal(served.status,200); assert.match(served.headers.get('content-type')||'',/javascript/);

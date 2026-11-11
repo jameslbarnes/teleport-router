@@ -22,6 +22,7 @@
     <section id="no-invite" hidden></section>
     <section id="account" hidden>
       <h2 id="account-heading" class="r-h2">Pick a name</h2><p id="account-intro">You can read and share group notes without connecting an agent of your own.</p>
+      <p class="r-hint" id="agent-hint">Have an AI agent such as Claude Code or Codex? Give it this page’s address and ask it to set you up; it can do every step here except Discord. For agents: the same steps as plain text are at <code>/agent-invite/</code> followed by the <code>channelinvite</code> value in this address.</p>
       <form id="create-account"><label class="r-label" for="handle">Your handle</label><div class="r-prefix handle"><span>@</span><input class="r-input" id="handle" name="handle" autocomplete="username" pattern="[a-z][a-z0-9_]{2,14}" minlength="3" maxlength="15" required aria-describedby="handle-hint"></div>
         <p class="r-hint" id="handle-hint">Start with a letter. Use 3–15 lowercase letters, numbers or underscores. Other people see this name on your notes.</p><button type="submit" id="create-submit" class="r-btn r-btn--primary">Create account and join</button></form>
       <div id="signed-in" hidden><p id="account-name"></p><button id="join-group" class="r-btn r-btn--primary">Join this group</button></div>
@@ -63,7 +64,7 @@
       <h2 class="r-h2">Use your group from Discord</h2><p id="discord-explanation"></p>
       <div id="discord-start" hidden><a id="open-discord" class="r-btn r-btn--primary" target="_blank" rel="noopener noreferrer">Open Discord</a>
         <p>In the connected server, use <code>/router-link</code> without a code. Its private reply gives you a link back here to confirm your account.</p>
-        <p class="r-hint">Join the Discord server using your host’s invitation first. Discord membership and Router group membership are managed separately.</p></div>
+        <p class="r-hint"><a id="discord-invite" target="_blank" rel="noopener noreferrer" hidden>Join the Discord server first.</a> <span id="discord-invite-missing">Join the Discord server using your host’s invitation first.</span> Discord membership and Router group membership are managed separately.</p></div>
       <div id="discord-confirm" hidden><p id="discord-account"></p>
         <label class="check"><input type="checkbox" id="discord-self">I just ran /router-link myself from the Discord account shown above.</label>
         <p>The bot will be able to save notes you submit, retrieve this group’s notes for you, and check your connection. Replies to private commands are shown only to you; saved notes are shared with the whole Router group, whichever Discord channel you save from.</p>

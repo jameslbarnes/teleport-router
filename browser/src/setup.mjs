@@ -159,6 +159,9 @@ async function showDiscord(back = false) {
   $('unlink-discord').hidden = !discord.grantId;
   $('discord-explanation').textContent = discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'This group is not connected to Discord at the moment. You can finish your Router setup now and connect Discord later.';
   if (discord.configured) $('open-discord').href = discord.channelUrl;
+  // Only Discord's own invitation addresses are linked, whatever the server sent.
+  const serverInvite = /^https:\/\/(?:discord\.gg|discord\.com\/invite)\/[A-Za-z0-9-]{2,40}$/.test(context.discord_invite || '') ? context.discord_invite : '';
+  $('discord-invite').hidden = !serverInvite; $('discord-invite-missing').hidden = !!serverInvite; if (serverInvite) $('discord-invite').href = serverInvite;
   $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. It stays connected while you use it. Without use, it ends on ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
   if (pairing && context.group.private) {
     let pair;
