@@ -35,7 +35,7 @@ const DERIVED_TEXT_MAX = 600_000; // characters after decompression
 const NOTE_MAX = 240, OVERLAP_WORDS = 6, MAX_ENTRIES_PER_RUN = 50, MAX_CONSENT_DAYS = 90;
 /** Fewer people than this and nothing about a run's answers is ever published. */
 export const MIN_PEOPLE = 3;
-const REQUEST_HOURS_DEFAULT = 48, REQUEST_HOURS_MAX = 168, REQUESTS_KEPT = 200;
+const REQUEST_HOURS_DEFAULT = 48, REQUEST_HOURS_MAX = 168, REQUESTS_KEPT = 200, OPEN_REQUESTS_MAX = 100;
 /** An authorization must last until its request's deadline, and never longer than this. */
 export const AUTHORIZATION_MAX_MS = (REQUEST_HOURS_MAX + 24) * 3600_000;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
@@ -70,7 +70,7 @@ export function insightsProgram(model: string) {
       },
     },
     limits: { derivedMaxBytes: DERIVED_MAX, derivedTextMaxChars: DERIVED_TEXT_MAX, entriesPerRun: MAX_ENTRIES_PER_RUN, eachTraceReadOncePerQuestion: true, minPeopleToRelease: MIN_PEOPLE },
-    released: `Each contributor gets their own answers and the draft result, sealed to them. Nothing is published from a run that read fewer than ${MIN_PEOPLE} people's traces, and a result (counts and notes) is published only after every contributor signs approval of its exact text. One veto stops it.`,
+    released: `Each contributor gets only their own answers and notes, sealed to them, and approves or vetoes publishing them. Once everyone has decided, a result (counts and notes) is built from the approved contributions only and published if at least ${MIN_PEOPLE} people approved; otherwise nothing.`,
   };
   return { ...spec, sha256: sha256Hex(canonical(spec)) };
 }
@@ -126,12 +126,13 @@ export interface RunAuthorization {
 }
 export const authorizationMessage = (a: RunAuthorization) => 'Teleport Router: allow one insights run to read these traces\n\n' + canonical(a);
 
-/** What a contributor signs to approve, or veto, publishing one exact result. */
-export interface ResultApproval {
-  v: 1; domain: 'teleport-router/insights-result-approval';
-  run: string; enclave: { appId: string; releaseKey: string }; resultSha256: string; approve: boolean;
+/** What a contributor signs to approve, or veto, publishing their own contribution to one run. `commitment` is the
+ * salted hash their sealed preview carries; nobody without that preview can work out what it commits to. */
+export interface ContributionApproval {
+  v: 1; domain: 'teleport-router/insights-contribution-approval';
+  run: string; enclave: { appId: string; releaseKey: string }; commitment: string; approve: boolean;
 }
-export const approvalMessage = (a: ResultApproval) => 'Teleport Router: decide whether this insights result may be published\n\n' + canonical(a);
+export const approvalMessage = (a: ContributionApproval) => 'Teleport Router: decide whether my contribution to this insights run may be published\n\n' + canonical(a);
 
 /** The text an owner signs. Deterministic, so the server and any client derive the same bytes. */
 export function consentMessage(p: InsightsPolicy): string {
@@ -149,7 +150,7 @@ export function consentMessage(p: InsightsPolicy): string {
     `May read: traces of my published posts in ${p.scope.groups.map(g => '#' + g).join(', ')}`,
     `May be requested by: ${p.triggers.map(t => `@${t.handle} [${t.keyId}]`).join(', ')}`,
     `Leaves the enclave during a run: the trace text, sent to the ${p.egress.provider} (model ${p.egress.model})`,
-    `Comes out: my own answers and the draft result, sealed to me; a published result only with ${MIN_PEOPLE} or more people, after every contributor approves it`,
+    `Comes out: my own answers, sealed to me; a published result built only from contributions their owners approved, and only with ${MIN_PEOPLE} or more of them`,
     `Limits: at most ${p.limits.maxTracesPerRun} of my traces per run; each trace read once per question`,
     `Valid from ${p.issuedAt} until ${p.expiresAt}. I can revoke it at any time; revoking stops later runs only.`,
     `Policy ID: ${p.policyId}`,
@@ -162,7 +163,7 @@ export interface EnclaveInfo { release_key: string; app_id: string; program_sha2
 export interface SealedPreview { did: string; meta: PartMeta; ciphertext: string }
 export interface EnclaveClient {
   info(): Promise<EnclaveInfo>;
-  run(input: unknown): Promise<{ run: string; status: string; result_sha256: string | null; contributors: number; skipped: Record<string, number>; previews: SealedPreview[] }>;
+  run(input: unknown): Promise<{ run: string; status: string; contributors: number; skipped: Record<string, number>; previews: SealedPreview[] }>;
   decide(input: unknown): Promise<{ run: string; status: string; published?: unknown }>;
 }
 
@@ -182,7 +183,7 @@ interface RunRequest {
   minPeople: number; deadline: string;
   answers: Map<string, { answer: 'yes' | 'no'; at: string; authorization?: SignedAuthorization }>;
   status: RequestStatus; closedAt: string | null;
-  run: { status: string; resultSha256: string | null; contributors: string[]; skipped: Record<string, number>; published: unknown | null } | null;
+  run: { status: string; contributors: string[]; decided: number; skipped: Record<string, number>; published: unknown | null } | null;
 }
 
 export interface ReleaseDeps {
@@ -279,7 +280,7 @@ export function insightsRelease(deps: ReleaseDeps) {
       people_asked: new Set(r.entries.map(e => e.owner)).size, answered: answers.length,
       agreed: answers.filter(a => a.answer === 'yes').length, min_people: r.minPeople, deadline: r.deadline,
       status: r.status, closed_at: r.closedAt,
-      run: r.run ? { status: r.run.status, result_sha256: r.run.resultSha256, contributors: r.run.contributors.length, skipped: r.run.skipped, published: r.run.published } : null };
+      run: r.run ? { status: r.run.status, contributors: r.run.contributors.length, decided: r.run.decided, skipped: r.run.skipped, published: r.run.published } : null };
   }
 
   async function readPart(store: GroupStore, entryId: string, part: 'full' | 'derived', meta: StoredPart, upload?: string): Promise<Buffer> {
@@ -296,6 +297,11 @@ export function insightsRelease(deps: ReleaseDeps) {
     return raw === null ? null : JSON.parse(raw);
   }
 
+  async function inScope(entryId: string, policy: InsightsPolicy) {
+    const entry = await deps.getEntry(entryId);
+    return !!entry && !(entry.publishAt && entry.publishAt > now()) && policy.scope.groups.some(g => (entry.to || []).includes('#' + g));
+  }
+
   /** The authorization an owner would sign for one request: their posts in it that have an extraction copy under their consent. */
   async function toSign(r: RunRequest, user: ConsentUser): Promise<{ body: RunAuthorization; message: string } | { error: string }> {
     const e = needEnclave();
@@ -304,11 +310,13 @@ export function insightsRelease(deps: ReleaseDeps) {
     const store = await deps.storeFor(binding(user));
     const entries: RunAuthorization['entries'] = [];
     for (const item of r.entries.filter(x => x.owner === user.handle)) {
+      // Only posts in the groups the consent names.
+      if (!await inScope(item.entryId, state.policy)) continue;
       const record = await traceRecord(store, item.entryId);
       if (record?.derived && record.ownerDid === user.tinycloud!.ownerDid && record.derived.policyId === state.policy.policyId)
         entries.push({ entryId: item.entryId, derivedSha256: record.derived.sha256 });
     }
-    if (!entries.length) return { error: 'none of your chosen posts has an extraction copy under your current consent' };
+    if (!entries.length) return { error: 'none of your chosen posts is in a group your consent names and has an extraction copy under it' };
     const body: RunAuthorization = { v: 1, domain: 'teleport-router/insights-run-authorization', run: r.requestId,
       enclave: { appId: e.appId, releaseKey: e.releaseKey }, policyId: state.policy.policyId,
       question: { template: r.template, params: r.params, sha256: r.questionSha256 }, entries,
@@ -333,9 +341,13 @@ export function insightsRelease(deps: ReleaseDeps) {
         const user = await deps.getUser(handle) as ConsentUser | null;
         const authorization = r.answers.get(handle)?.authorization;
         if (!user?.tinycloud?.ownerPublicKey || !user.insightsConsent || !authorization) continue;
+        // Checked again now: a consent revoked, expired or replaced since the yes counts for nothing.
+        const state = consentState(user);
+        if (!state.active || state.policy.policyId !== authorization.body.policyId) continue;
         const store = await deps.storeFor(user.tinycloud);
         const traces: unknown[] = [];
         for (const item of authorization.body.entries) {
+          if (!await inScope(item.entryId, state.policy)) continue;
           const record = await traceRecord(store, item.entryId);
           if (!record?.derived) continue;
           traces.push({ entryId: item.entryId, meta: record.derived, ciphertext: (await readPart(store, item.entryId, 'derived', record.derived, record.upload)).toString('base64') });
@@ -352,10 +364,10 @@ export function insightsRelease(deps: ReleaseDeps) {
         if (!user?.tinycloud) continue;
         await (await deps.storeFor(user.tinycloud)).put(`insights/previews/${r.requestId}`, canonical({ run: r.requestId, at: iso(now()), meta: p.meta, ciphertext: p.ciphertext }));
       }
-      r.run = { status: out.status, resultSha256: out.result_sha256, contributors: out.previews.map(p => p.did), skipped: out.skipped, published: null };
+      r.run = { status: out.status, contributors: out.previews.map(p => p.did), decided: 0, skipped: out.skipped, published: null };
     } catch (err) {
       r.status = 'failed';
-      r.run = { status: 'failed', resultSha256: null, contributors: [], skipped: { [err instanceof Error ? err.message.slice(0, 80) : 'error']: 1 }, published: null };
+      r.run = { status: 'failed', contributors: [], decided: 0, skipped: { [err instanceof Error ? err.message.slice(0, 80) : 'error']: 1 }, published: null };
     }
     r.closedAt = iso(now());
   }
@@ -537,6 +549,7 @@ export function insightsRelease(deps: ReleaseDeps) {
         entries.push({ entryId, owner: entry.handle });
       }
       if (new Set(entries.map(e => e.owner)).size < MIN_PEOPLE) throw new Error(`A run request needs published posts from at least ${MIN_PEOPLE} people.`);
+      if ([...requests.values()].filter(x => x.status === 'open').length >= OPEN_REQUESTS_MAX) throw new Error('Too many requests are open. Try again after some close.');
       const t = now();
       const r: RunRequest = { requestId: randomUUID(), createdAt: iso(t), createdBy: trigger.handle, template: q.name, params: q.params,
         questionSha256: q.questionSha256, program: { name: program.name, version: program.version, sha256: program.sha256 },
@@ -623,6 +636,7 @@ export function insightsRelease(deps: ReleaseDeps) {
       if (!r?.run || !did || !r.run.contributors.includes(did)) throw new Error('No run of yours with that id.');
       const out = await e.client.decide({ run: r.requestId, did, approval });
       r.run.status = out.status;
+      if (typeof (out as any).decided === 'number') r.run.decided = (out as any).decided;
       if (out.published) r.run.published = out.published;
       return publicRequest(r);
     },

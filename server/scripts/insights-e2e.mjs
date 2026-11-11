@@ -17,7 +17,7 @@ import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {sealPart,openPart} from '../dist/trace-envelope.js';
 import {canonical} from '../dist/author-records.js';
 import {consentMessage,authorizationMessage,approvalMessage} from '../dist/insights-release.js';
-import {openPreview} from '../dist/insights-enclave.js';
+import {openPreview,contributionCommitment} from '../dist/insights-enclave.js';
 
 const host=process.env.TINYCLOUD_HOST||'https://tee.node.tinycloud.xyz';
 const port=19000+Math.floor(Math.random()*2000), base=`http://127.0.0.1:${port}`;
@@ -156,27 +156,27 @@ try {
     answered=await post('/api/insights/requests/answer',{secret_key:p.secretKey,request_id:created.request_id,answer:'yes',
       authorization:{body,signature:await p.wallet.signMessage(authorizationMessage(body))}});
   }
-  assert.equal(answered.status,'started'); assert.equal(answered.run.status,'awaiting_approval'); assert.equal(answered.run.contributors,3);
+  assert.equal(answered.status,'started'); assert.equal(answered.run.status,'awaiting_decisions'); assert.equal(answered.run.contributors,3);
   const routerView=await post('/api/insights/runs/get',{secret_key:agentKey,run_id:created.request_id});
   assert(!/would_have_helped|not_applicable|trial run/.test(JSON.stringify(routerView)),'Router holds no readable answers');
   console.log('PASS a registered request started when all 3 owners signed; Router holds only sealed previews');
 
-  // Each contributor opens their own preview, checks it, and signs approval of the exact draft.
+  // Each contributor opens their own preview, which holds only their own answers, checks it, and approves their contribution.
   let decided;
   for(const p of Object.values(people)) {
     const sealed=await post('/api/insights/runs/preview',{secret_key:p.secretKey,run_id:created.request_id});
     const preview=openPreview(sealed,p.ownerDid,created.request_id,p.ownerKey);
-    assert.equal(verifyMessage(canonical(preview.body),preview.signature),preview.signer);
-    assert.deepEqual(preview.body.your_items.map(i=>i.entryId),[p.entryId]);
-    assert.equal(preview.body.draft.people,3); assert.equal(preview.body.draft.traces_read,3);
-    if(!realModel) assert.deepEqual(preview.body.draft.applies,{yes:1,no:2});
-    const body={v:1,domain:'teleport-router/insights-result-approval',run:created.request_id,enclave:preview.body.enclave,resultSha256:preview.body.result_sha256,approve:true};
+    assert.equal(verifyMessage(canonical(preview.body),preview.signature),preview.signer); assert.equal(preview.signer,info.enclave.signer);
+    assert.deepEqual(preview.body.your_items.map(i=>i.entryId),[p.entryId]); assert.equal(preview.body.draft,undefined);
+    assert.equal(preview.body.commitment,contributionCommitment(created.request_id,p.ownerDid,preview.body.salt,preview.body.your_items));
+    const body={v:1,domain:'teleport-router/insights-contribution-approval',run:created.request_id,enclave:preview.body.enclave,commitment:preview.body.commitment,approve:true};
     decided=await post('/api/insights/runs/decide',{secret_key:p.secretKey,run_id:created.request_id,approval:{body,signature:await p.wallet.signMessage(approvalMessage(body))}});
   }
   assert.equal(decided.run.status,'published');
   const published=decided.run.published;
   assert.equal(verifyMessage(canonical(published.body),published.signature),published.signer);
-  assert.equal(published.body.approvals,3); assert.equal(published.body.people,3);
+  assert.equal(published.body.people,3); assert.equal(published.body.traces_read,3);
+  if(!realModel) assert.deepEqual(published.body.applies,{yes:1,no:2});
   assert(!Object.values(people).some(p=>JSON.stringify(published).includes(p.handle)||JSON.stringify(published).includes(p.entryId)),'The published result names nobody');
   console.log(`PASS published after all 3 approved: applies ${JSON.stringify(published.body.applies)}, effect ${JSON.stringify(published.body.effect)}, notes ${JSON.stringify(published.body.notes)}`);
 

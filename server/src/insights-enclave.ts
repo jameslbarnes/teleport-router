@@ -11,28 +11,36 @@
  * The owner's agent signs that authorization under the owner's standing rules; it is what checks
  * scope (which posts, which groups) before signing.
  *
- * Nothing about the answers leaves in plaintext. Each contributor gets a preview sealed to their own
- * key: their answers, their notes, and the draft result. The result is published, signed by the
- * release key, only after every contributor has signed approval of its exact hash, and only when at
- * least MIN_PEOPLE distinct owners contributed. A veto stops it.
+ * Each contributor sees only their own contribution, never anyone else's: their preview, sealed to
+ * them, holds their answers and notes and a commitment to them salted with a secret only that preview
+ * carries. Each contributor then signs approval, or a veto, of their own contribution by that
+ * commitment. Once everyone has decided, the result is built from the approved contributions only and
+ * published, signed by the release key, if at least MIN_PEOPLE approved; otherwise nothing comes out.
+ * Distinct keys are not proof of distinct people: someone who controls the other contributors could
+ * subtract their own answers from a published count. That limit is disclosed.
  *
- * Disclosed limits of this version: run state and read-once markers live in memory, so they hold
- * only within one running enclave. Who can upgrade this code is the deployment's upgrade policy,
- * named in every consent. The model provider sees the trace text it is sent.
+ * Other disclosed limits of this version: run state and read-once markers live in memory, so they hold
+ * only within one running enclave, and a contributor who never decides holds publication up. Who can
+ * upgrade this code is the deployment's upgrade policy, named in every consent. The model provider sees
+ * the trace text it is sent.
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { computeAddress, verifyMessage, Wallet } from 'ethers';
 import { canonical } from './author-records.js';
 import { approvalMessage, authorizationMessage, AUTHORIZATION_MAX_MS, checkUpgradePolicy, consentMessage, insightsProgram, MIN_PEOPLE, parseAnswer, questionSha256,
-  type InsightsPolicy, type ResultApproval, type RunAuthorization, type UpgradePolicy } from './insights-release.js';
+  type InsightsPolicy, type ContributionApproval, type RunAuthorization, type UpgradePolicy } from './insights-release.js';
 import { checkPartMeta, compressPublicKey, openPart, publicKeyOf, sealPart, sha256Hex, type PartMeta } from './trace-envelope.js';
 
+export { authorizationMessage, approvalMessage, questionSha256, type RunAuthorization, type ContributionApproval } from './insights-release.js';
+
 const DERIVED_MAX = 400 * 1024, DERIVED_TEXT_MAX = 600_000, MAX_OWNERS = 50, MAX_ENTRIES = 50;
+const RUNS_KEPT = 500, READ_MARKERS_KEPT = 200_000;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 const didAddress = (did: unknown) => typeof did === 'string' ? /^did:pkh:eip155:1:(0x[\da-fA-F]{40})$/.exec(did)?.[1]?.toLowerCase() : undefined;
 
-export { authorizationMessage, approvalMessage, questionSha256, type RunAuthorization, type ResultApproval } from './insights-release.js';
+/** The commitment a contributor approves: their own items, salted with a secret only their preview carries. */
+export const contributionCommitment = (run: string, did: string, salt: string, items: unknown) => sha256Hex(canonical({ run, did: did.toLowerCase(), salt, items }));
 
 export interface EnclaveDeps {
   releasePrivateKey: string; appId: string; model: string; upgrades?: UpgradePolicy;
@@ -50,11 +58,12 @@ interface OwnerInput {
   traces?: { entryId?: unknown; meta?: unknown; ciphertext?: unknown }[];
 }
 type Answer = { applies: string; effect: string; cost: string };
-interface Contribution { did: string; publicKey: string; items: { entryId: string; traceSha256: string; answer: Answer; note: string }[] }
+type Item = { entryId: string; traceSha256: string; answer: Answer; note: string };
+interface Contribution { did: string; publicKey: string; items: Item[]; commitment: string }
+type RunStatus = 'running' | 'awaiting_decisions' | 'published' | 'withheld';
 interface EnclaveRun {
   run: string; at: string; questionSha256: string; template: string; params: Record<string, string>;
-  contributors: Contribution[]; draft: Record<string, unknown> | null; resultSha256: string | null;
-  decisions: Map<string, boolean>; status: 'withheld' | 'awaiting_approval' | 'published' | 'vetoed'; published: unknown | null;
+  contributors: Contribution[]; decisions: Map<string, boolean>; status: RunStatus; published: unknown | null;
 }
 
 export function insightsEnclave(deps: EnclaveDeps) {
@@ -66,9 +75,14 @@ export function insightsEnclave(deps: EnclaveDeps) {
   const enclave = { appId: deps.appId, releaseKey };
   const runs = new Map<string, EnclaveRun>();
   const readOnce = new Set<string>();
+  let busy = false;
   /** What the attestation binds: this key, this program, this policy, this app. */
   const identity = { release_key: releaseKey, app_id: deps.appId, program_sha256: program.sha256, upgrades, min_people: MIN_PEOPLE };
   const identitySha256 = sha256Hex(canonical(identity));
+  const reportData = Buffer.alloc(64);
+  Buffer.from(identitySha256, 'hex').copy(reportData);
+  // The quote attests a fixed identity, so one is enough; asking the hardware on every request is not.
+  let quoted: Promise<unknown | null> | null = null;
 
   function checkOwner(o: OwnerInput, question: { template: string; params: Record<string, string>; sha256: string }, run: string) {
     const address = didAddress(o.did);
@@ -102,21 +116,49 @@ export function insightsEnclave(deps: EnclaveDeps) {
     return { address, publicKey, policy: p, allowed };
   }
 
+  function remember(r: EnclaveRun) {
+    // Bounded memory: forget the oldest finished runs first; refuse new runs if everything kept is still open.
+    if (runs.size >= RUNS_KEPT) {
+      const oldest = [...runs.values()].find(x => x.status === 'published' || x.status === 'withheld');
+      if (!oldest) throw new Error('Too many runs are waiting for decisions. Try again later.');
+      runs.delete(oldest.run);
+    }
+    runs.set(r.run, r);
+  }
+  function markRead(marker: string) {
+    if (readOnce.size >= READ_MARKERS_KEPT) readOnce.delete(readOnce.values().next().value as string);
+    readOnce.add(marker);
+  }
+
+  function publishIfDecided(r: EnclaveRun) {
+    if (r.status !== 'awaiting_decisions' || !r.contributors.every(c => r.decisions.has(c.did))) return;
+    const approved = r.contributors.filter(c => r.decisions.get(c.did) === true);
+    if (approved.length < MIN_PEOPLE) { r.status = 'withheld'; return; }
+    const items = approved.flatMap(c => c.items);
+    const count = (field: keyof Answer) => items.reduce<Record<string, number>>((acc, i) => { acc[i.answer[field]] = (acc[i.answer[field]] || 0) + 1; return acc; }, {});
+    // Built from approved contributions only, with no owner, post or order that could point to either.
+    const body = { run: r.run, question_sha256: r.questionSha256, template: r.template, params: r.params,
+      program: { name: program.name, version: program.version, sha256: program.sha256 }, released: true,
+      people: approved.length, people_where_it_applies: approved.filter(c => c.items.some(i => i.answer.applies === 'yes')).length,
+      traces_read: items.length, applies: count('applies'), effect: count('effect'), cost: count('cost'),
+      notes: [...new Set(items.map(i => i.note).filter(Boolean))].sort(), enclave, published_at: new Date(now()).toISOString() };
+    r.published = { body, signature: signer.signMessageSync(canonical(body)), signer: signer.address };
+    r.status = 'published';
+  }
+
   return {
     program, releaseKey,
 
     /** Public: what an owner's client checks before trusting this enclave. */
     async info() {
-      const reportData = Buffer.alloc(64);
-      Buffer.from(identitySha256, 'hex').copy(reportData);
-      const quote = deps.quote ? await deps.quote(reportData).catch(() => null) : null;
+      if (!quoted) quoted = deps.quote ? deps.quote(reportData).catch(() => null) : Promise.resolve(null);
       return { ...identity, program, identity_sha256: identitySha256, report_data: reportData.toString('hex'),
-        build: deps.build, quote, key_binding: upgrades.by === 'timelock'
+        build: deps.build, quote: await quoted, signer: signer.address, key_binding: upgrades.by === 'timelock'
           ? `app identity, with new code only through a public ${upgrades.delayHours}-hour timelock on ${upgrades.chain}`
           : 'app identity: any build the operator deploys can use this key' };
     },
 
-    /** One run. Returns only sealed previews and hashes; nothing readable about anyone's answers. */
+    /** One run. Returns only sealed previews and counts; nothing readable about anyone's answers. */
     async run(input: { run?: unknown; template?: unknown; params?: unknown; owners?: unknown }) {
       if (!validId(input.run)) throw new Error('run must be an id');
       if (runs.has(input.run)) throw new Error('This run has already happened.');
@@ -128,108 +170,104 @@ export function insightsEnclave(deps: EnclaveDeps) {
         if (typeof value !== 'string' || !value.trim() || value.length > rule.maxChars || !/^[A-Za-z0-9 ,.;:'()\/-]+$/.test(value)) throw new Error(`Bad ${name}`);
         params[name] = value.trim();
       }
-      const question = { template: input.template, params, sha256: questionSha256(program.sha256, input.template, params) };
       const owners = Array.isArray(input.owners) ? input.owners as OwnerInput[] : [];
       if (!owners.length || owners.length > MAX_OWNERS) throw new Error(`owners must list 1 to ${MAX_OWNERS} people`);
-      const seen = new Set<string>();
-      const contributors: Contribution[] = [];
+      if (busy) throw new Error('Another run is in progress. Try again later.');
+      const question = { template: input.template, params, sha256: questionSha256(program.sha256, input.template, params) };
+      // Reserve the run before any await, so a duplicate request cannot run it twice.
+      const r: EnclaveRun = { run: input.run, at: new Date(now()).toISOString(), questionSha256: question.sha256, template: question.template, params,
+        contributors: [], decisions: new Map(), status: 'running', published: null };
+      remember(r);
+      busy = true;
       const skipped: Record<string, number> = {};
       const skip = (reason: string) => { skipped[reason] = (skipped[reason] || 0) + 1; };
-      let entriesTotal = 0;
-
-      for (const o of owners) {
-        let checked: ReturnType<typeof checkOwner>;
-        try { checked = checkOwner(o, question, input.run); } catch { skip('not_authorized'); continue; }
-        if (seen.has(checked.address)) { skip('duplicate_owner'); continue; }
-        seen.add(checked.address);
-        const contribution: Contribution = { did: o.did as string, publicKey: checked.publicKey, items: [] };
-        for (const t of Array.isArray(o.traces) ? o.traces : []) {
-          if (++entriesTotal > MAX_ENTRIES) { skip('too_many_entries'); break; }
-          if (!validId(t.entryId) || !checked.allowed.has(t.entryId)) { skip('entry_not_authorized'); continue; }
-          let log = '';
-          try {
-            const meta: PartMeta = checkPartMeta(t.meta, ['owner', 'release']);
-            if (typeof t.ciphertext !== 'string') throw new Error('ciphertext');
-            const ciphertext = Buffer.from(t.ciphertext, 'base64');
-            const traceSha256 = sha256Hex(ciphertext);
-            if (ciphertext.length > DERIVED_MAX || traceSha256 !== meta.sha256 || traceSha256 !== checked.allowed.get(t.entryId)) { skip('trace_changed'); continue; }
-            const marker = `${question.sha256}:${traceSha256}`;
-            if (readOnce.has(marker)) { skip('already_read_for_this_question'); continue; }
-            readOnce.add(marker);
-            const packed = openPart(meta, ciphertext, { ownerDid: o.did as string, entryId: t.entryId }, 'derived', 'release', deps.releasePrivateKey);
-            log = gunzipSync(packed, { maxOutputLength: DERIVED_TEXT_MAX * 4 }).toString('utf8').slice(0, DERIVED_TEXT_MAX);
-            packed.fill(0);
-            const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 400,
-              user: template.user.replace('{skill}', params.skill).replace('{when}', params.when).replace('{log}', () => log) });
-            const parsed = parseAnswer(reply, template.output, log);
-            contribution.items.push({ entryId: t.entryId, traceSha256, answer: parsed.answer, note: parsed.note });
-          } catch { skip('unreadable_or_failed'); } finally { log = ''; }
+      try {
+        const seen = new Set<string>();
+        let entriesTotal = 0;
+        for (const o of owners) {
+          let checked: ReturnType<typeof checkOwner>;
+          try { checked = checkOwner(o, question, r.run); } catch { skip('not_authorized'); continue; }
+          if (seen.has(checked.address)) { skip('duplicate_owner'); continue; }
+          seen.add(checked.address);
+          const items: Item[] = [];
+          const done = new Set<string>();
+          for (const t of Array.isArray(o.traces) ? o.traces : []) {
+            if (++entriesTotal > MAX_ENTRIES) { skip('too_many_entries'); break; }
+            if (!validId(t.entryId) || !checked.allowed.has(t.entryId)) { skip('entry_not_authorized'); continue; }
+            if (done.has(t.entryId)) { skip('duplicate_entry'); continue; }
+            done.add(t.entryId);
+            let log = '';
+            try {
+              const meta: PartMeta = checkPartMeta(t.meta, ['owner', 'release']);
+              if (typeof t.ciphertext !== 'string') throw new Error('ciphertext');
+              const ciphertext = Buffer.from(t.ciphertext, 'base64');
+              const traceSha256 = sha256Hex(ciphertext);
+              if (ciphertext.length > DERIVED_MAX || traceSha256 !== meta.sha256 || traceSha256 !== checked.allowed.get(t.entryId)) { skip('trace_changed'); continue; }
+              const marker = `${question.sha256}:${traceSha256}`;
+              if (readOnce.has(marker)) { skip('already_read_for_this_question'); continue; }
+              const packed = openPart(meta, ciphertext, { ownerDid: o.did as string, entryId: t.entryId }, 'derived', 'release', deps.releasePrivateKey);
+              log = gunzipSync(packed, { maxOutputLength: DERIVED_TEXT_MAX * 4 }).toString('utf8').slice(0, DERIVED_TEXT_MAX);
+              packed.fill(0);
+              const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 400,
+                user: template.user.replace('{skill}', params.skill).replace('{when}', params.when).replace('{log}', () => log) });
+              const parsed = parseAnswer(reply, template.output, log);
+              // Consumed only once it produced an answer: a failed attempt can be retried.
+              markRead(marker);
+              items.push({ entryId: t.entryId, traceSha256, answer: parsed.answer, note: parsed.note });
+            } catch { skip('unreadable_or_failed'); } finally { log = ''; }
+          }
+          if (items.length) r.contributors.push({ did: o.did as string, publicKey: checked.publicKey, items, commitment: '' });
         }
-        if (contribution.items.length) contributors.push(contribution);
-      }
-
-      const r: EnclaveRun = { run: input.run, at: new Date(now()).toISOString(), questionSha256: question.sha256, template: question.template, params,
-        contributors, draft: null, resultSha256: null, decisions: new Map(), status: 'withheld', published: null };
-      runs.set(r.run, r);
-      if (contributors.length >= MIN_PEOPLE) {
-        const items = contributors.flatMap(c => c.items);
-        const count = (field: keyof Answer) => items.reduce<Record<string, number>>((acc, i) => { acc[i.answer[field]] = (acc[i.answer[field]] || 0) + 1; return acc; }, {});
-        // The draft carries no owner, post or order that could point to either.
-        r.draft = { run: r.run, question_sha256: r.questionSha256, template: r.template, params, program: { name: program.name, version: program.version, sha256: program.sha256 },
-          people: contributors.length, people_where_it_applies: contributors.filter(c => c.items.some(i => i.answer.applies === 'yes')).length,
-          traces_read: items.length, applies: count('applies'), effect: count('effect'), cost: count('cost'),
-          notes: [...new Set(items.map(i => i.note).filter(Boolean))].sort() };
-        r.resultSha256 = sha256Hex(canonical(r.draft));
-        r.status = 'awaiting_approval';
-      }
-      // Each contributor's preview is sealed to them: their own answers, and the draft everyone must approve.
-      const previews = await Promise.all(contributors.map(async c => {
-        const body = { v: 1, kind: 'router-insights-preview', run: r.run, at: r.at, enclave, question, program: r.draft ? (r.draft as any).program : { sha256: program.sha256 },
-          build: deps.build, sent_to: `Anthropic API (${program.model})`, your_items: c.items, draft: r.draft, result_sha256: r.resultSha256,
-          withheld: r.draft ? null : `fewer than ${MIN_PEOPLE} people contributed` };
-        const signature = await signer.signMessage(canonical(body));
-        const sealed = sealPart(Buffer.from(canonical({ body, signature, signer: signer.address })), { ownerDid: c.did, entryId: `run-${r.run}` }, 'preview', { owner: c.publicKey });
-        return { did: c.did, meta: sealed.meta, ciphertext: sealed.ciphertext.toString('base64') };
-      }));
-      return { run: r.run, status: r.status, result_sha256: r.resultSha256, contributors: contributors.length, skipped, previews };
+        r.status = r.contributors.length >= MIN_PEOPLE ? 'awaiting_decisions' : 'withheld';
+        // Each contributor sees only their own contribution, committed to with a salt only their preview carries.
+        const previews = r.contributors.map(c => {
+          const salt = randomBytes(32).toString('hex');
+          c.commitment = contributionCommitment(r.run, c.did, salt, c.items);
+          const body = { v: 1, kind: 'router-insights-preview', run: r.run, at: r.at, enclave, question,
+            program: { name: program.name, version: program.version, sha256: program.sha256 }, build: deps.build, sent_to: `Anthropic API (${program.model})`,
+            your_items: c.items, salt, commitment: c.commitment, contributors: r.contributors.length, min_people: MIN_PEOPLE,
+            withheld: r.status === 'withheld' ? `fewer than ${MIN_PEOPLE} people contributed` : null };
+          const signature = signer.signMessageSync(canonical(body));
+          const sealed = sealPart(Buffer.from(canonical({ body, signature, signer: signer.address })), { ownerDid: c.did, entryId: `run-${r.run}` }, 'preview', { owner: c.publicKey });
+          return { did: c.did, meta: sealed.meta, ciphertext: sealed.ciphertext.toString('base64') };
+        });
+        return { run: r.run, status: r.status, contributors: r.contributors.length, skipped, previews };
+      } catch (err) {
+        r.status = 'withheld';
+        throw err;
+      } finally { busy = false; }
     },
 
-    /** A contributor's signed approval or veto of the exact draft. Publishes once everyone has approved. */
-    async decide(input: { run?: unknown; did?: unknown; approval?: { body?: ResultApproval; signature?: unknown } }) {
+    /** A contributor's signed approval or veto of their own contribution. Publishes once everyone has decided. */
+    async decide(input: { run?: unknown; did?: unknown; approval?: { body?: ContributionApproval; signature?: unknown } }) {
       const r = typeof input.run === 'string' ? runs.get(input.run) : undefined;
       if (!r) throw new Error('No such run.');
       const c = r.contributors.find(x => x.did === input.did);
       if (!c) throw new Error('Only contributors to this run can decide.');
-      if (r.status !== 'awaiting_approval') throw new Error(`This run is ${r.status.replace(/_/g, ' ')}.`);
+      if (r.status !== 'awaiting_decisions') throw new Error(`This run is ${r.status.replace(/_/g, ' ')}.`);
+      if (r.decisions.has(c.did)) throw new Error('You have already decided on this run.');
       const a = input.approval?.body;
       let by = '';
       try { by = a ? verifyMessage(approvalMessage(a), String(input.approval?.signature)).toLowerCase() : ''; } catch { /* below */ }
-      if (!a || by !== didAddress(c.did) || a.v !== 1 || a.domain !== 'teleport-router/insights-result-approval' || a.run !== r.run
-        || a.enclave?.appId !== deps.appId || a.enclave?.releaseKey !== releaseKey || a.resultSha256 !== r.resultSha256 || typeof a.approve !== 'boolean')
-        throw new Error('That decision is not a valid signature over this result.');
+      if (!a || by !== didAddress(c.did) || a.v !== 1 || a.domain !== 'teleport-router/insights-contribution-approval' || a.run !== r.run
+        || a.enclave?.appId !== deps.appId || a.enclave?.releaseKey !== releaseKey || a.commitment !== c.commitment || typeof a.approve !== 'boolean')
+        throw new Error('That decision is not a valid signature over your contribution to this run.');
       r.decisions.set(c.did, a.approve);
-      if (!a.approve) { r.status = 'vetoed'; return { run: r.run, status: r.status }; }
-      if (r.contributors.every(x => r.decisions.get(x.did) === true)) {
-        const body = { ...r.draft, released: true, approvals: r.contributors.length, enclave, published_at: new Date(now()).toISOString() };
-        r.published = { body, signature: await signer.signMessage(canonical(body)), signer: signer.address };
-        r.status = 'published';
-      }
-      return { run: r.run, status: r.status, approved: [...r.decisions.values()].filter(Boolean).length, contributors: r.contributors.length, published: r.published };
+      publishIfDecided(r);
+      return { run: r.run, status: r.status, decided: r.decisions.size, contributors: r.contributors.length, published: r.published };
     },
 
     /** Public: a run's status, and its result once published. */
     status(run: unknown) {
       const r = typeof run === 'string' ? runs.get(run) : undefined;
       if (!r) return null;
-      return { run: r.run, at: r.at, status: r.status, question_sha256: r.questionSha256, result_sha256: r.resultSha256,
+      return { run: r.run, at: r.at, status: r.status, question_sha256: r.questionSha256,
         contributors: r.contributors.length, decided: r.decisions.size, published: r.published };
     },
   };
 }
 
-/** For owners' clients: open a preview sealed to them. */
+/** For owners' clients: open a preview sealed to them. Check its signature against the release key you checked. */
 export function openPreview(sealed: { meta: PartMeta; ciphertext: string }, ownerDid: string, run: string, ownerPrivateKey: string) {
   return JSON.parse(openPart(sealed.meta, Buffer.from(sealed.ciphertext, 'base64'), { ownerDid, entryId: `run-${run}` }, 'preview', 'owner', ownerPrivateKey).toString('utf8'));
 }
-
-export const newRunId = () => randomUUID();

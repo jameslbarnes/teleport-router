@@ -3,7 +3,7 @@ import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { testWallet, versionedMemoryStore } from './author-test-fixtures.js';
 import { insightsRelease, parseAnswer, insightsProgram, checkUpgradePolicy, approvalMessage, authorizationMessage, MIN_PEOPLE,
-  type InsightsPolicy, type UpgradePolicy, type EnclaveClient, type ResultApproval } from './insights-release.js';
+  type InsightsPolicy, type UpgradePolicy, type EnclaveClient, type ContributionApproval } from './insights-release.js';
 import { insightsEnclave, openPreview } from './insights-enclave.js';
 import { sealPart, openPart, publicKeyOf } from './trace-envelope.js';
 import type { JournalEntry, User } from './storage.js';
@@ -64,12 +64,12 @@ async function world(opts: { upgrades?: UpgradePolicy; noEnclave?: boolean } = {
     if (!body) throw new Error(mine?.to_sign?.error || 'nothing to sign');
     return release.answerRequest(p.user, requestId, 'yes', { body, signature: await p.wallet.signMessage(authorizationMessage(body)) });
   };
-  /** What an owner's agent does after a run: open its sealed preview and sign approval, or a veto, of the exact draft. */
+  /** What an owner's agent does after a run: open its sealed preview and sign approval, or a veto, of its own contribution. */
   const decide = async (p: Person, requestId: string, approve = true) => {
     const sealed = await release.getPreview(p.user, requestId);
     const preview = openPreview(sealed, p.user.tinycloud!.ownerDid, requestId, p.wallet.privateKey);
-    const body: ResultApproval = { v: 1, domain: 'teleport-router/insights-result-approval', run: requestId,
-      enclave: preview.body.enclave, resultSha256: preview.body.result_sha256, approve };
+    const body: ContributionApproval = { v: 1, domain: 'teleport-router/insights-contribution-approval', run: requestId,
+      enclave: preview.body.enclave, commitment: preview.body.commitment, approve };
     return { preview, status: await release.decide(p.user, requestId, { body, signature: await p.wallet.signMessage(approvalMessage(body)) }) };
   };
   const setup = async (names: string[], opts2: { consent?: string[]; triggers?: string[] } = {}) => {
@@ -172,7 +172,7 @@ describe('Private traces and insights runs', () => {
   });
 
   describe('run requests', () => {
-    it('are registered in public; owners sign; the run starts once everyone has answered and publishes only after all contributors approve', async () => {
+    it('are registered in public; owners sign; the run starts once everyone has answered and publishes once every contributor has decided', async () => {
       const w = await world();
       const { agent, people, posts } = await w.setup(['alice', 'bob', 'carol', 'dave']);
       await expect(w.release.createRequest(agent.user, { ...question, entry_ids: posts.slice(0, 2) })).rejects.toThrow(`at least ${MIN_PEOPLE} people`);
@@ -194,7 +194,7 @@ describe('Private traces and insights runs', () => {
 
       // The last answer starts the run over the posts of those who said yes. Router's view has no answers in it.
       const last = await w.authorize(people.dave, id);
-      expect(last).toMatchObject({ status: 'started', answered: 4, agreed: 3, run: { status: 'awaiting_approval', contributors: 3, published: null } });
+      expect(last).toMatchObject({ status: 'started', answered: 4, agreed: 3, run: { status: 'awaiting_decisions', contributors: 3, published: null } });
       expect(w.calls).toHaveLength(3);
       expect(JSON.stringify(w.release.runStatus(id))).not.toMatch(/would_have_helped|not_applicable|trial run/);
       await expect(w.release.answerRequest(people.bob.user, id, 'yes')).rejects.toThrow('no longer open');
@@ -202,22 +202,23 @@ describe('Private traces and insights runs', () => {
       // Each contributor opens their own sealed preview; Bob, who said no, has none.
       const { preview, status: afterAlice } = await w.decide(people.alice, id);
       expect(preview.body.your_items).toMatchObject([{ entryId: 'post-1', answer: { applies: 'yes' } }]);
-      expect(preview.body.draft).toMatchObject({ people: 3, traces_read: 3, applies: { yes: 1, no: 2 } });
-      expect(afterAlice).toMatchObject({ run: { status: 'awaiting_approval', published: null } });
+      expect(preview.body.draft).toBeUndefined();
+      expect(JSON.stringify(preview.body)).not.toMatch(/post-2|post-3|post-4/);
+      expect(afterAlice).toMatchObject({ run: { status: 'awaiting_decisions', decided: 1, published: null } });
       expect(await w.release.getPreview(people.bob.user, id)).toBeNull();
       await expect(w.decide(people.bob, id)).rejects.toThrow();
 
       await w.decide(people.carol, id);
       const { status: done } = await w.decide(people.dave, id);
       expect(done.run).toMatchObject({ status: 'published' });
-      expect((done.run!.published as any).body).toMatchObject({ released: true, approvals: 3, people: 3, applies: { yes: 1, no: 2 },
+      expect((done.run!.published as any).body).toMatchObject({ released: true, people: 3, applies: { yes: 1, no: 2 },
         notes: ['A tiny trial run first would have exposed the mistake early.'] });
       expect(JSON.stringify(w.release.runStatus(id))).not.toMatch(/alice|bob|carol|dave/);
       expect(JSON.stringify((done.run!.published as any).body)).not.toMatch(/post-/);
       expect(await w.release.receipts(people.alice.user)).toHaveLength(1);
     });
 
-    it('a veto stops publication, and a yes needs a current consent naming the requester and an authorization that matches', async () => {
+    it('a veto leaves a contribution out, and a yes needs a current consent naming the requester and an authorization that matches', async () => {
       const w = await world();
       const { agent, people, posts } = await w.setup(['alice', 'bob', 'carol', 'dave'], { consent: ['alice', 'bob', 'carol'] });
       const { request_id: id } = await w.release.createRequest(agent.user, { ...question, entry_ids: posts });
@@ -234,11 +235,12 @@ describe('Private traces and insights runs', () => {
       for (const p of [people.alice, people.bob, people.carol]) await w.authorize(p, id);
       expect(w.release.runStatus(id)).toMatchObject({ status: 'open' });   // Dave has not answered
       await w.release.answerRequest(people.dave.user, id, 'no');
-      expect(w.release.runStatus(id)).toMatchObject({ status: 'started', run: { status: 'awaiting_approval', contributors: 3 } });
+      expect(w.release.runStatus(id)).toMatchObject({ status: 'started', run: { status: 'awaiting_decisions', contributors: 3 } });
       await w.decide(people.alice, id);
       const { status } = await w.decide(people.bob, id, false);
-      expect(status.run).toMatchObject({ status: 'vetoed', published: null });
-      await expect(w.decide(people.carol, id)).rejects.toThrow('vetoed');
+      expect(status.run).toMatchObject({ status: 'awaiting_decisions', decided: 2, published: null });
+      const { status: end } = await w.decide(people.carol, id);
+      expect(end.run).toMatchObject({ status: 'withheld', published: null });   // two approvals are fewer than three
 
       // A consent that names a different requester does not allow a yes.
       const other = await world();
@@ -260,11 +262,29 @@ describe('Private traces and insights runs', () => {
       expect(w.release.listRequests().map(r => r.status)).toEqual(['open', 'open']);
       w.advance(24 * 3600_000);
       await w.release.checkRequests();
-      expect(w.release.runStatus(first.request_id)).toMatchObject({ status: 'started', agreed: 3, run: { status: 'awaiting_approval', contributors: 3 } });
+      expect(w.release.runStatus(first.request_id)).toMatchObject({ status: 'started', agreed: 3, run: { status: 'awaiting_decisions', contributors: 3 } });
       expect(w.release.runStatus(second.request_id)).toMatchObject({ status: 'expired', run: null });
       expect(w.calls).toHaveLength(3);
       await expect(w.release.createRequest(agent.user, { ...question, entry_ids: posts, deadline_hours: 500 })).rejects.toThrow('deadline_hours');
     });
+  });
+
+  it('rechecks consent and group scope when a run starts', async () => {
+    const w = await world();
+    const { agent, people, posts } = await w.setup(['alice', 'bob', 'carol', 'dave']);
+    // Dave's post is outside the groups his consent names, so it is not his to authorize here.
+    w.post('post-outside', 'dave', ['#elsewhere']);
+    const outside = await w.release.createRequest(agent.user, { ...question, entry_ids: [posts[0], posts[1], 'post-outside'] });
+    await expect(w.authorize(people.dave, outside.request_id)).rejects.toThrow('consent names');
+
+    // Alice says yes, then revokes before the run starts: her trace is not read.
+    const { request_id: id } = await w.release.createRequest(agent.user, { ...question, entry_ids: posts });
+    for (const p of [people.alice, people.bob, people.carol]) await w.authorize(p, id);
+    await w.release.revokeConsent(people.alice.user);
+    const started = await w.authorize(people.dave, id);
+    expect(started.run).toMatchObject({ status: 'awaiting_decisions', contributors: 3 });
+    expect(w.calls.some(c => c.includes('timeout'))).toBe(false);   // only Alice's log mentions a timeout
+    expect(await w.release.getPreview(people.alice.user, id)).toBeNull();
   });
 
   it('accepts only the fixed answer shape and drops notes that could carry log content', () => {

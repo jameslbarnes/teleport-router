@@ -79,8 +79,8 @@ const send = (res: ServerResponse, status: number, body: unknown) => {
 };
 
 createServer(async (req, res) => {
-  const url = new URL(req.url || '/', 'http://enclave');
   try {
+    const url = new URL(req.url || '/', 'http://enclave');
     if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true });
     if (req.method === 'GET' && url.pathname === '/info') return send(res, 200, await enclave.info());
     if (req.method === 'GET' && url.pathname.startsWith('/runs/')) {
