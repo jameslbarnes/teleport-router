@@ -5,10 +5,16 @@
  * that key only under a consent the owner signed: a named program, a scope of posts, the
  * accounts that may start a run, the outside model, and an expiry.
  *
- * What this does NOT yet enforce: the release key comes from the enclave's key service and
- * follows the app identity, so any build the operator deploys can use it. The consent text
- * says so. Binding the key to an approved code measurement is a deployment decision, not
- * something this module can do from inside.
+ * Who can change the code that holds the release key is a deployment matter: the key comes from
+ * the enclave's key service and follows the app identity. The consent names the upgrade policy
+ * the deployment declares: the operator (local tests), or a public timelock on the app's
+ * contract (the MVP's own app, decided Nov 11). This module cannot check that policy from
+ * inside; an owner's agent checks the attestation and the contract on chain.
+ *
+ * Runs are registered before they start: a request names the question, the chosen posts and
+ * a deadline, each owner answers yes or no, and the run starts when everyone has answered, or
+ * at the deadline if enough agreed. Nothing about anyone's answers comes out of a run that read
+ * fewer than MIN_PEOPLE people's traces.
  */
 import { randomUUID } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
@@ -24,6 +30,9 @@ const FULL_MAX = 6 * 1024 * 1024; // ciphertext bytes
 const DERIVED_MAX = 400 * 1024;
 const DERIVED_TEXT_MAX = 600_000; // characters after decompression
 const NOTE_MAX = 240, OVERLAP_WORDS = 6, MAX_ENTRIES_PER_RUN = 50, MAX_CONSENT_DAYS = 90;
+/** Fewer people than this and a run releases nothing about their answers. */
+export const MIN_PEOPLE = 3;
+const REQUEST_HOURS_DEFAULT = 48, REQUEST_HOURS_MAX = 168, REQUESTS_KEPT = 200;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 const groupId = (g: unknown): g is string => typeof g === 'string' && /^[a-z0-9][a-z0-9-]{1,40}$/.test(g);
 
@@ -55,18 +64,39 @@ export function insightsProgram(model: string) {
         },
       },
     },
-    limits: { derivedMaxBytes: DERIVED_MAX, derivedTextMaxChars: DERIVED_TEXT_MAX, entriesPerRun: MAX_ENTRIES_PER_RUN, eachTraceReadOncePerQuestion: true },
-    released: 'Counts by answer, at once. Notes only after their owner approves each one. A signed receipt goes to every owner whose trace was read.',
+    limits: { derivedMaxBytes: DERIVED_MAX, derivedTextMaxChars: DERIVED_TEXT_MAX, entriesPerRun: MAX_ENTRIES_PER_RUN, eachTraceReadOncePerQuestion: true, minPeopleToRelease: MIN_PEOPLE },
+    released: `Nothing from a run that read fewer than ${MIN_PEOPLE} people's traces. Otherwise counts by answer, at once, and notes only after their owner approves each one. A signed receipt goes to every owner whose trace was read.`,
   };
   return { ...spec, sha256: sha256Hex(canonical(spec)) };
 }
 export type InsightsProgram = ReturnType<typeof insightsProgram>;
 
+/** Who can put new code behind the release key, as the deployment declares it. */
+export type UpgradePolicy =
+  | { by: 'operator' }
+  | { by: 'timelock'; chain: string; appContract: string; timelock: string; delayHours: number };
+
+export function checkUpgradePolicy(input: unknown): UpgradePolicy {
+  const u = input as Record<string, unknown> | null;
+  const address = (a: unknown) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
+  if (u && u.by === 'operator' && Object.keys(u).length === 1) return { by: 'operator' };
+  if (u && u.by === 'timelock' && Object.keys(u).length === 5 && typeof u.chain === 'string' && /^[a-z0-9-]{2,32}$/.test(u.chain)
+    && address(u.appContract) && address(u.timelock) && Number.isInteger(u.delayHours) && (u.delayHours as number) >= 24 && (u.delayHours as number) <= 720)
+    return { by: 'timelock', chain: u.chain, appContract: (u.appContract as string).toLowerCase(), timelock: (u.timelock as string).toLowerCase(), delayHours: u.delayHours as number };
+  throw new Error('The upgrade policy must be the operator, or a timelock with a chain, app contract and timelock addresses, and 24 to 720 hours of delay.');
+}
+
+function upgradesLine(u: UpgradePolicy): string {
+  return u.by === 'timelock'
+    ? `Code updates: only through a public ${u.delayHours}-hour timelock on ${u.chain} (app contract ${u.appContract}, timelock ${u.timelock}). New code can use the release key only after it has been public that long, and I can revoke before then. This permission is not tied to one code version.`
+    : 'Code updates: approved by the operator of this Router, not by me. This permission is not tied to one code version.';
+}
+
 export interface InsightsPolicy {
   v: 1; domain: 'teleport-router/insights-consent'; server: string; policyId: string;
   owner: { handle: string; did: string };
   program: { name: string; version: number; sha256: string };
-  enclave: { appId: string; releaseKey: string; upgrades: 'operator' };
+  enclave: { appId: string; releaseKey: string; upgrades: UpgradePolicy };
   scope: { groups: string[] };
   triggers: { handle: string; keyId: string }[];
   egress: { provider: 'Anthropic API'; model: string };
@@ -85,7 +115,17 @@ interface RunItem { entryId: string; owner: string; traceSha256: string; answer:
 interface RunRecord {
   runId: string; at: string; trigger: string; template: string; params: Record<string, string>; questionSha256: string;
   program: { name: string; version: number; sha256: string }; build: { gitSha: string | null; imageDigest: string | null };
-  items: RunItem[]; skipped: Record<string, number>;
+  items: RunItem[]; skipped: Record<string, number>; requestId?: string;
+}
+type RequestStatus = 'open' | 'started' | 'not_enough_people' | 'expired' | 'failed';
+/** A run registered before it starts. Who answered what stays private; only counts are public. */
+interface RunRequest {
+  requestId: string; createdAt: string; createdBy: string; template: string; params: Record<string, string>; questionSha256: string;
+  program: { name: string; version: number; sha256: string };
+  entries: { entryId: string; owner: string }[];
+  minPeople: number; deadline: string;
+  answers: Map<string, { answer: 'yes' | 'no'; at: string }>;
+  status: RequestStatus; runId: string | null; closedAt: string | null;
 }
 
 /** The text an owner signs. Deterministic, so the server and any client derive the same bytes. */
@@ -100,7 +140,7 @@ export function consentMessage(p: InsightsPolicy): string {
     `Program SHA-256: ${p.program.sha256}`,
     `Runs only inside: the enclave of ${p.server} (app ${p.enclave.appId})`,
     `Enclave release key: ${p.enclave.releaseKey}`,
-    'Code updates: approved by the operator of this Router, not by me. This permission is not tied to one code version.',
+    upgradesLine(p.enclave.upgrades),
     `May read: traces of my published posts in ${p.scope.groups.map(g => '#' + g).join(', ')}`,
     `May be started by: ${p.triggers.map(t => `@${t.handle} [${t.keyId}]`).join(', ')}`,
     `Leaves the enclave during a run: the trace text, sent to the ${p.egress.provider} (model ${p.egress.model})`,
@@ -117,6 +157,8 @@ export interface ReleaseDeps {
   releasePrivateKey: string | null; appId: string; baseUrl: string;
   build: { gitSha: string | null; imageDigest: string | null };
   model: string;
+  /** Who can put new code behind the release key. Consents name it; the default is the operator. */
+  upgrades?: UpgradePolicy;
   getUser(handle: string): Promise<User | null>;
   updateUser(handle: string, updates: Record<string, unknown>): Promise<User | null>;
   getEntry(id: string): Promise<JournalEntry | null>;
@@ -132,7 +174,10 @@ export function insightsRelease(deps: ReleaseDeps) {
   const releaseKey = deps.releasePrivateKey ? publicKeyOf(deps.releasePrivateKey) : null;
   const signer = deps.releasePrivateKey ? new Wallet(deps.releasePrivateKey) : null;
   const needRelease = () => { if (!releaseKey || !signer || !deps.releasePrivateKey) throw new Error('Insights runs are not enabled on this server.'); return { releaseKey, signer, privateKey: deps.releasePrivateKey }; };
+  const upgrades = checkUpgradePolicy(deps.upgrades || { by: 'operator' });
   const runs = new Map<string, RunRecord>();
+  const requests = new Map<string, RunRequest>();
+  const iso = (t: number) => new Date(t).toISOString();
   const keyId = (user: User) => user.secretKeyHash.slice(0, 16);
   const ownerAddress = (did: string) => /^did:pkh:eip155:1:(0x[\da-fA-F]{40})$/.exec(did)?.[1]?.toLowerCase();
 
@@ -152,7 +197,114 @@ export function insightsRelease(deps: ReleaseDeps) {
     if (Date.parse(p.expiresAt) <= now()) return { active: false, reason: 'expired' };
     if (p.program.sha256 !== program.sha256) return { active: false, reason: 'program_changed' };
     if (p.enclave.releaseKey !== releaseKey || p.enclave.appId !== deps.appId) return { active: false, reason: 'enclave_changed' };
+    if (canonical(p.enclave.upgrades ?? null) !== canonical(upgrades)) return { active: false, reason: 'upgrade_policy_changed' };
     return { active: true, policy: p };
+  }
+
+  /** The fixed question a run or request asks, and the published posts it would read. */
+  function parseQuestion(input: { template?: unknown; params?: unknown; entry_ids?: unknown }) {
+    const name = input.template;
+    const template = typeof name === 'string' ? program.templates[name as keyof typeof program.templates] : undefined;
+    if (!template || typeof name !== 'string') throw new Error(`template must be one of: ${Object.keys(program.templates).join(', ')}`);
+    const params: Record<string, string> = {};
+    for (const [param, rule] of Object.entries(template.params)) {
+      const value = (input.params as any)?.[param];
+      if (typeof value !== 'string' || !value.trim() || value.length > rule.maxChars || !/^[A-Za-z0-9 ,.;:'()\/-]+$/.test(value))
+        throw new Error(`${param} must be 1 to ${rule.maxChars} characters: ${template.paramCharset}`);
+      params[param] = value.trim();
+    }
+    const ids = Array.isArray(input.entry_ids) ? [...new Set(input.entry_ids)] : [];
+    if (!ids.length || ids.length > MAX_ENTRIES_PER_RUN || !ids.every(validId)) throw new Error(`entry_ids must list 1 to ${MAX_ENTRIES_PER_RUN} posts`);
+    return { name, template, params, ids: ids as string[], questionSha256: sha256Hex(canonical({ program: program.sha256, template: name, params })) };
+  }
+
+  function publicRequest(r: RunRequest) {
+    const answers = [...r.answers.values()];
+    return { request_id: r.requestId, created_at: r.createdAt, created_by: r.createdBy, template: r.template, params: r.params,
+      question_sha256: r.questionSha256, program: r.program, posts: r.entries.map(e => e.entryId),
+      people_asked: new Set(r.entries.map(e => e.owner)).size, answered: answers.length,
+      agreed: answers.filter(a => a.answer === 'yes').length, min_people: r.minPeople, deadline: r.deadline,
+      status: r.status, run_id: r.runId, closed_at: r.closedAt };
+  }
+
+  /** Start or close a request once everyone has answered, or at its deadline. A decline counts as an answer. */
+  async function settle(r: RunRequest) {
+    if (r.status !== 'open') return;
+    const owners = [...new Set(r.entries.map(e => e.owner))];
+    const yes = owners.filter(o => r.answers.get(o)?.answer === 'yes');
+    const everyone = owners.every(o => r.answers.has(o));
+    if (!everyone && now() < Date.parse(r.deadline)) return;
+    if (yes.length < r.minPeople) { r.status = everyone ? 'not_enough_people' : 'expired'; r.closedAt = iso(now()); return; }
+    // Set before any await, so two answers arriving together cannot start the run twice.
+    r.status = 'started';
+    try {
+      const trigger = await deps.getUser(r.createdBy);
+      if (!trigger) throw new Error('The requester no longer exists.');
+      const ids = r.entries.filter(e => yes.includes(e.owner)).map(e => e.entryId);
+      const result = await runQuestion(trigger, parseQuestion({ template: r.template, params: r.params, entry_ids: ids }), r.requestId);
+      r.runId = result.run_id;
+    } catch { r.status = 'failed'; }
+    r.closedAt = iso(now());
+  }
+
+  /** One run of one approved question over chosen posts. Reads only what each owner's consent allows. */
+  async function runQuestion(trigger: User, q: ReturnType<typeof parseQuestion>, requestId?: string) {
+    const release = needRelease();
+    if (!deps.complete) throw new Error('No model is configured for insights runs on this server.');
+    const { template, params, ids, questionSha256 } = q;
+    const run: RunRecord = { runId: randomUUID(), at: iso(now()), trigger: trigger.handle, template: q.name, params,
+      questionSha256, program: { name: program.name, version: program.version, sha256: program.sha256 }, build: deps.build, items: [], skipped: {},
+      ...(requestId ? { requestId } : {}) };
+    const skip = (reason: string) => { run.skipped[reason] = (run.skipped[reason] || 0) + 1; };
+    const perOwner = new Map<string, number>();
+    const owners = new Map<string, ConsentUser>();
+
+    for (const entryId of ids) {
+      const entry = await deps.getEntry(entryId);
+      if (!entry || !entry.handle || (entry.publishAt && entry.publishAt > now())) { skip('not_a_published_post'); continue; }
+      const owner = owners.get(entry.handle) || await deps.getUser(entry.handle) as ConsentUser | null;
+      if (!owner?.tinycloud) { skip('no_trace'); continue; }
+      owners.set(owner.handle, owner);
+      const state = consentState(owner);
+      if (!state.active) { skip('no_consent'); continue; }
+      const policy = state.policy;
+      if (!policy.triggers.some(t => t.handle === trigger.handle && t.keyId === keyId(trigger))) { skip('trigger_not_allowed'); continue; }
+      if (!policy.scope.groups.some(g => (entry.to || []).includes('#' + g))) { skip('out_of_scope'); continue; }
+      if ((perOwner.get(owner.handle) || 0) >= policy.limits.maxTracesPerRun) { skip('owner_limit'); continue; }
+      let log = '', traceSha256 = '';
+      try {
+        const store = await deps.storeFor(owner.tinycloud);
+        const record = await traceRecord(store, entryId);
+        if (!record?.derived || record.ownerDid !== owner.tinycloud.ownerDid || record.derived.policyId !== policy.policyId) { skip('no_trace'); continue; }
+        // Read-once per question: repeated or overlapping runs cannot be used to probe one trace.
+        try { await store.put(`insights/reads/${questionSha256.slice(0, 24)}-${entryId}`, run.runId, { ifNoneMatch: '*' }); }
+        catch (err) { if (err instanceof GroupStoreConflictError) { skip('already_read_for_this_question'); continue; } throw err; }
+        const ciphertext = await readPart(store, entryId, 'derived', record.derived, record.upload);
+        const packed = openPart(record.derived, ciphertext, context(owner.tinycloud, entryId), 'derived', 'release', release.privateKey);
+        log = gunzipSync(packed, { maxOutputLength: DERIVED_TEXT_MAX * 4 }).toString('utf8').slice(0, DERIVED_TEXT_MAX);
+        packed.fill(0);
+        traceSha256 = record.derived.sha256;
+      } catch { skip('unreadable_trace'); continue; }
+      perOwner.set(owner.handle, (perOwner.get(owner.handle) || 0) + 1);
+      let item: RunItem;
+      try {
+        const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 400,
+          user: template.user.replace('{skill}', params.skill).replace('{when}', params.when).replace('{log}', () => log) });
+        const parsed = parseAnswer(reply, template.output, log);
+        item = { entryId, owner: owner.handle, traceSha256, answer: parsed.answer, note: parsed.note, noteStatus: parsed.note ? 'pending' : 'none' };
+      } catch { skip('model_failed'); continue; } finally { log = ''; }
+      run.items.push(item);
+    }
+
+    // A read without a delivered receipt releases nothing for that owner.
+    for (const [handle, owner] of owners) {
+      const mine = run.items.filter(i => i.owner === handle);
+      if (!mine.length) continue;
+      try { await writeReceipt(owner, run, mine); }
+      catch { run.items = run.items.filter(i => i.owner !== handle); skip('receipt_failed'); }
+    }
+    runs.set(run.runId, run);
+    return summary(run);
   }
 
   async function readPart(store: GroupStore, entryId: string, part: 'full' | 'derived', meta: StoredPart, upload?: string): Promise<Buffer> {
@@ -180,8 +332,10 @@ export function insightsRelease(deps: ReleaseDeps) {
 
     info() {
       return { program, release_key: releaseKey, app_id: deps.appId, git_sha: deps.build.gitSha, image_digest: deps.build.imageDigest,
-        key_binding: 'app identity: any build the operator deploys can use this key',
-        model_configured: !!deps.complete };
+        key_binding: upgrades.by === 'timelock'
+          ? `app identity, with new code only through a public ${upgrades.delayHours}-hour timelock on ${upgrades.chain} (timelock ${upgrades.timelock})`
+          : 'app identity: any build the operator deploys can use this key',
+        upgrades, min_people: MIN_PEOPLE, model_configured: !!deps.complete };
     },
 
     /** A policy for this owner to read and sign. Nothing is saved. */
@@ -207,7 +361,7 @@ export function insightsRelease(deps: ReleaseDeps) {
         v: 1, domain: 'teleport-router/insights-consent', server: deps.baseUrl, policyId: randomUUID(),
         owner: { handle: user.handle, did: b.ownerDid },
         program: { name: program.name, version: program.version, sha256: program.sha256 },
-        enclave: { appId: deps.appId, releaseKey, upgrades: 'operator' },
+        enclave: { appId: deps.appId, releaseKey, upgrades },
         scope: { groups: groups as string[] }, triggers,
         egress: { provider: 'Anthropic API', model: program.model },
         limits: { maxTracesPerRun: maxTraces },
@@ -224,7 +378,7 @@ export function insightsRelease(deps: ReleaseDeps) {
       if (!p || p.v !== 1 || p.domain !== 'teleport-router/insights-consent' || p.server !== deps.baseUrl
         || p.owner?.handle !== user.handle || p.owner?.did !== b.ownerDid
         || p.program?.name !== program.name || p.program?.version !== program.version || p.program?.sha256 !== program.sha256
-        || p.enclave?.appId !== deps.appId || p.enclave?.releaseKey !== releaseKey || p.enclave?.upgrades !== 'operator'
+        || p.enclave?.appId !== deps.appId || p.enclave?.releaseKey !== releaseKey || canonical(p.enclave?.upgrades ?? null) !== canonical(upgrades)
         || !Array.isArray(p.scope?.groups) || !p.scope.groups.length || p.scope.groups.length > 8 || !p.scope.groups.every(groupId)
         || !Array.isArray(p.triggers) || !p.triggers.length || p.triggers.length > 8
         || !p.triggers.every(x => x && typeof x.handle === 'string' && /^[a-f0-9]{16}$/.test(x.keyId || ''))
@@ -332,74 +486,72 @@ export function insightsRelease(deps: ReleaseDeps) {
       return (await store.list('traces/')).filter(k => /^traces\/[\w-]+\/meta$/.test(k)).map(k => k.slice('traces/'.length, -'/meta'.length));
     },
 
-    /** One run of one approved question over chosen posts. Reads only what each owner's consent allows. */
+    /** A run started directly by an account the owners' consents name. Local tests; the MVP app uses requests. */
     async run(trigger: User, input: { template?: unknown; params?: unknown; entry_ids?: unknown }) {
-      const release = needRelease();
+      needRelease();
       if (!deps.complete) throw new Error('No model is configured for insights runs on this server.');
-      const template = program.templates[input.template as keyof typeof program.templates];
-      if (!template || typeof input.template !== 'string') throw new Error(`template must be one of: ${Object.keys(program.templates).join(', ')}`);
-      const params: Record<string, string> = {};
-      for (const [name, rule] of Object.entries(template.params)) {
-        const value = (input.params as any)?.[name];
-        if (typeof value !== 'string' || !value.trim() || value.length > rule.maxChars || !/^[A-Za-z0-9 ,.;:'()\/-]+$/.test(value))
-          throw new Error(`${name} must be 1 to ${rule.maxChars} characters: ${template.paramCharset}`);
-        params[name] = value.trim();
-      }
-      const ids = Array.isArray(input.entry_ids) ? [...new Set(input.entry_ids)] : [];
-      if (!ids.length || ids.length > MAX_ENTRIES_PER_RUN || !ids.every(validId)) throw new Error(`entry_ids must list 1 to ${MAX_ENTRIES_PER_RUN} posts`);
-      const questionSha256 = sha256Hex(canonical({ program: program.sha256, template: input.template, params }));
-      const run: RunRecord = { runId: randomUUID(), at: new Date(now()).toISOString(), trigger: trigger.handle, template: input.template, params,
-        questionSha256, program: { name: program.name, version: program.version, sha256: program.sha256 }, build: deps.build, items: [], skipped: {} };
-      const skip = (reason: string) => { run.skipped[reason] = (run.skipped[reason] || 0) + 1; };
-      const perOwner = new Map<string, number>();
-      const owners = new Map<string, ConsentUser>();
+      return runQuestion(trigger, parseQuestion(input));
+    },
 
-      for (const entryId of ids as string[]) {
+    /** Register a run before it starts: the question, the chosen published posts, and a deadline. */
+    async createRequest(trigger: User, input: { template?: unknown; params?: unknown; entry_ids?: unknown; deadline_hours?: unknown }) {
+      needRelease();
+      if (!deps.complete) throw new Error('No model is configured for insights runs on this server.');
+      const q = parseQuestion(input);
+      const hours = input.deadline_hours === undefined ? REQUEST_HOURS_DEFAULT : Number(input.deadline_hours);
+      if (!Number.isInteger(hours) || hours < 1 || hours > REQUEST_HOURS_MAX) throw new Error(`deadline_hours must be 1 to ${REQUEST_HOURS_MAX}`);
+      const entries: RunRequest['entries'] = [];
+      let notPublished = 0;
+      for (const entryId of q.ids) {
         const entry = await deps.getEntry(entryId);
-        if (!entry || !entry.handle || (entry.publishAt && entry.publishAt > now())) { skip('not_a_published_post'); continue; }
-        const owner = owners.get(entry.handle) || await deps.getUser(entry.handle) as ConsentUser | null;
-        if (!owner?.tinycloud) { skip('no_trace'); continue; }
-        owners.set(owner.handle, owner);
-        const state = consentState(owner);
-        if (!state.active) { skip('no_consent'); continue; }
-        const policy = state.policy;
-        if (!policy.triggers.some(t => t.handle === trigger.handle && t.keyId === keyId(trigger))) { skip('trigger_not_allowed'); continue; }
-        if (!policy.scope.groups.some(g => (entry.to || []).includes('#' + g))) { skip('out_of_scope'); continue; }
-        if ((perOwner.get(owner.handle) || 0) >= policy.limits.maxTracesPerRun) { skip('owner_limit'); continue; }
-        let log = '', traceSha256 = '';
-        try {
-          const store = await deps.storeFor(owner.tinycloud);
-          const record = await traceRecord(store, entryId);
-          if (!record?.derived || record.ownerDid !== owner.tinycloud.ownerDid || record.derived.policyId !== policy.policyId) { skip('no_trace'); continue; }
-          // Read-once per question: repeated or overlapping runs cannot be used to probe one trace.
-          try { await store.put(`insights/reads/${questionSha256.slice(0, 24)}-${entryId}`, run.runId, { ifNoneMatch: '*' }); }
-          catch (err) { if (err instanceof GroupStoreConflictError) { skip('already_read_for_this_question'); continue; } throw err; }
-          const ciphertext = await readPart(store, entryId, 'derived', record.derived, record.upload);
-          const packed = openPart(record.derived, ciphertext, context(owner.tinycloud, entryId), 'derived', 'release', release.privateKey);
-          log = gunzipSync(packed, { maxOutputLength: DERIVED_TEXT_MAX * 4 }).toString('utf8').slice(0, DERIVED_TEXT_MAX);
-          packed.fill(0);
-          traceSha256 = record.derived.sha256;
-        } catch { skip('unreadable_trace'); continue; }
-        perOwner.set(owner.handle, (perOwner.get(owner.handle) || 0) + 1);
-        let item: RunItem;
-        try {
-          const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 400,
-            user: template.user.replace('{skill}', params.skill).replace('{when}', params.when).replace('{log}', () => log) });
-          const parsed = parseAnswer(reply, template.output, log);
-          item = { entryId, owner: owner.handle, traceSha256, answer: parsed.answer, note: parsed.note, noteStatus: parsed.note ? 'pending' : 'none' };
-        } catch { skip('model_failed'); continue; } finally { log = ''; }
-        run.items.push(item);
+        if (!entry || !entry.handle || (entry.publishAt && entry.publishAt > now())) { notPublished++; continue; }
+        entries.push({ entryId, owner: entry.handle });
       }
+      if (new Set(entries.map(e => e.owner)).size < MIN_PEOPLE) throw new Error(`A run request needs published posts from at least ${MIN_PEOPLE} people.`);
+      const t = now();
+      const r: RunRequest = { requestId: randomUUID(), createdAt: iso(t), createdBy: trigger.handle, template: q.name, params: q.params,
+        questionSha256: q.questionSha256, program: { name: program.name, version: program.version, sha256: program.sha256 },
+        entries, minPeople: MIN_PEOPLE, deadline: iso(t + hours * 3600_000), answers: new Map(), status: 'open', runId: null, closedAt: null };
+      requests.set(r.requestId, r);
+      // Keep memory bounded: forget the oldest closed requests first.
+      for (const old of [...requests.values()].filter(x => x.status !== 'open')) { if (requests.size <= REQUESTS_KEPT) break; requests.delete(old.requestId); }
+      return { ...publicRequest(r), posts_not_published: notPublished };
+    },
 
-      // A read without a delivered receipt releases nothing for that owner.
-      for (const [handle, owner] of owners) {
-        const mine = run.items.filter(i => i.owner === handle);
-        if (!mine.length) continue;
-        try { await writeReceipt(owner, run, mine); }
-        catch { run.items = run.items.filter(i => i.owner !== handle); skip('receipt_failed'); }
+    /** The public register of requests: the question, the posts, counts of answers, never who said what. */
+    listRequests() {
+      return [...requests.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50).map(publicRequest);
+    },
+
+    /** Requests that involve the caller's posts, with the caller's own answer. */
+    myRequests(user: User) {
+      return [...requests.values()].filter(r => r.entries.some(e => e.owner === user.handle))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50)
+        .map(r => ({ ...publicRequest(r), your_posts: r.entries.filter(e => e.owner === user.handle).map(e => e.entryId),
+          your_answer: r.answers.get(user.handle)?.answer || null }));
+    },
+
+    /** An owner's yes or no for all of their posts in one request. A yes needs a current consent naming the requester. */
+    async answerRequest(user: ConsentUser, requestId: unknown, answer: unknown) {
+      const r = typeof requestId === 'string' ? requests.get(requestId) : undefined;
+      if (!r || !r.entries.some(e => e.owner === user.handle)) throw new Error('No such request involves your posts.');
+      if (r.status !== 'open') throw new Error(`This request is no longer open (${r.status.replace(/_/g, ' ')}).`);
+      if (answer !== 'yes' && answer !== 'no') throw new Error('answer must be "yes" or "no"');
+      if (answer === 'yes') {
+        const state = consentState(user);
+        if (!state.active) throw new Error(`You have no current insights consent (${state.reason.replace(/_/g, ' ')}). Sign one first; it names who may start runs.`);
+        const requester = await deps.getUser(r.createdBy);
+        if (!requester || !state.policy.triggers.some(t => t.handle === requester.handle && t.keyId === keyId(requester)))
+          throw new Error(`Your consent does not allow runs started by @${r.createdBy}.`);
       }
-      runs.set(run.runId, run);
-      return summary(run);
+      r.answers.set(user.handle, { answer, at: iso(now()) });
+      await settle(r);
+      return { ...publicRequest(r), your_answer: answer };
+    },
+
+    /** Close or start requests whose deadline has passed. The server calls this every minute. */
+    async checkRequests() {
+      for (const r of [...requests.values()]) if (r.status === 'open' && now() >= Date.parse(r.deadline)) await settle(r);
     },
 
     getRun(user: User, runId: unknown) {
@@ -446,10 +598,14 @@ export function insightsRelease(deps: ReleaseDeps) {
   function summary(run: RunRecord) {
     const count = (field: keyof Answer) => run.items.reduce<Record<string, number>>((acc, i) => { acc[i.answer[field]] = (acc[i.answer[field]] || 0) + 1; return acc; }, {});
     const people = (pick: (i: RunItem) => boolean) => new Set(run.items.filter(pick).map(i => i.owner)).size;
+    const head = { run_id: run.runId, at: run.at, started_by: run.trigger, template: run.template, params: run.params,
+      question_sha256: run.questionSha256, program: run.program, build: run.build, ...(run.requestId ? { request_id: run.requestId } : {}) };
+    // Too few people for counts or notes to hide who said what: nothing about the answers comes out.
+    // Each owner still has their own answers in their receipt.
+    if (people(() => true) < MIN_PEOPLE) return { ...head, released: false as const, withheld: `fewer than ${MIN_PEOPLE} people's traces were read`, skipped: run.skipped };
     // Approved notes carry no owner and no post, and come out in a fixed order unrelated to either.
     const notes = run.items.filter(i => i.noteStatus === 'approved').map(i => i.note).sort();
-    return { run_id: run.runId, at: run.at, started_by: run.trigger, template: run.template, params: run.params,
-      question_sha256: run.questionSha256, program: run.program, build: run.build,
+    return { ...head, released: true as const,
       traces_read: run.items.length, people: people(() => true),
       people_where_it_applies: people(i => i.answer.applies === 'yes'),
       applies: count('applies'), effect: count('effect'), cost: count('cost'),

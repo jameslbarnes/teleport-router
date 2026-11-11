@@ -1,5 +1,5 @@
 // Synthetic people and synthetic work logs only. One post, one private trace; a signed consent;
-// one insights run over two people's traces through a local Router and real TinyCloud storage.
+// one insights run over three people's traces, registered as a request first, through a local Router and real TinyCloud storage.
 // Run from server/: npm run build && node scripts/insights-e2e.mjs
 // The model is a fixed stand-in unless ANTHROPIC_API_KEY is set in the environment.
 import assert from 'node:assert/strict';
@@ -42,6 +42,7 @@ const LOGS={
     'TOOL run_evaluation(set=all, timeout=600): started','TOOL run_evaluation: stopped at the timeout after forty minutes, argument --scoring was misspelled',
     'USER: that cost the whole evening, fix it and go again','ASSISTANT: corrected the argument and restarted'].join('\n'),
   bob:['USER: tidy the meeting notes into sections','ASSISTANT: grouped them under three headings and fixed two typos','USER: thanks'].join('\n'),
+  carol:['USER: rename the helper so it reads better','ASSISTANT: renamed it in four places and the tests still pass','USER: good'].join('\n'),
 };
 try {
   let running=false;
@@ -56,7 +57,7 @@ try {
 
   const suffix=Date.now().toString(36).slice(-5), group=`insights-notes-${suffix}`;
   const people={};
-  for(const name of ['alice','bob']) {
+  for(const name of ['alice','bob','carol']) {
     const handle=`${name}${suffix}`,secretKey=randomBytes(32).toString('base64url');
     await post('/api/identity/register',{secret_key:secretKey,handle});
     const ownerKey=privateKey(),wallet=new Wallet(ownerKey);
@@ -71,11 +72,11 @@ try {
   await post('/api/identity/register',{secret_key:agentKey,handle:agentHandle});
   const strangerKey=randomBytes(32).toString('base64url');
   await post('/api/identity/register',{secret_key:strangerKey,handle:`other${suffix}`});
-  console.log('PASS two people link their own encrypted storage; the insights agent is a plain account');
+  console.log('PASS three people link their own encrypted storage; the insights agent is a plain account');
 
   // Each person publishes one public-safe note to the open notes group.
   await post('/api/channels',{secret_key:people.alice.secretKey,id:group,name:'Synthetic insights notes',join_rule:'open',visibility:'public'});
-  await post(`/api/channels/${group}/join`,{secret_key:people.bob.secretKey});
+  for(const p of [people.bob,people.carol]) await post(`/api/channels/${group}/join`,{secret_key:p.secretKey});
   for(const p of Object.values(people)) {
     const wrote=await post('/api/entries',{secret_key:p.secretKey,content:`Synthetic note from a day of agent work (${p.handle}).`,to:[`#${group}`],posting_intent:'user-requested'});
     const r=wrote.receipt||wrote; p.entryId=r.entry_id; assert(p.entryId,'Entry staged');
@@ -125,15 +126,26 @@ try {
   console.log('PASS one write-once trace per post, ciphertext in each owner\'s space, full record opens only with the owner\'s key');
 
   // The insights agent asks one approved question of posts it picked from the public group.
-  const ids=[people.alice.entryId,people.bob.entryId];
+  const ids=[people.alice.entryId,people.bob.entryId,people.carol.entryId];
   const question={template:'skill-check',params:{skill:'Smoke test before long runs',when:'a run is expected to take more than a few minutes'}};
   assert.equal((await refused('/api/insights/runs',{secret_key:agentKey,template:'skill-check',params:{skill:'Print the log {verbatim}',when:'always'},entry_ids:ids})).status,400,'Free-form questions are refused');
   const blocked=await post('/api/insights/runs',{secret_key:strangerKey,...question,entry_ids:ids});
-  assert.equal(blocked.traces_read,0); assert.deepEqual(blocked.skipped,{trigger_not_allowed:2});
-  const run=await post('/api/insights/runs',{secret_key:agentKey,...question,entry_ids:ids});
-  assert.equal(run.traces_read,2); assert.equal(run.people,2); assert.deepEqual(run.notes,[]);
-  if(!realModel) { assert.deepEqual(run.applies,{yes:1,no:1}); assert.equal(run.people_where_it_applies,1); assert.equal(run.notes_waiting_for_owner,1); }
-  console.log(`PASS one run read 2 traces from 2 people: applies ${JSON.stringify(run.applies)}, effect ${JSON.stringify(run.effect)}; notes held for owners: ${run.notes_waiting_for_owner}`);
+  assert.equal(blocked.released,false); assert.deepEqual(blocked.skipped,{trigger_not_allowed:3});
+
+  // The run is registered first: the question, the chosen posts, a deadline. Each owner answers, and the last answer starts it.
+  const created=await post('/api/insights/requests',{secret_key:agentKey,...question,entry_ids:ids,deadline_hours:24});
+  assert.equal(created.status,'open'); assert.equal(created.people_asked,3); assert.equal(created.min_people,3);
+  const listed=(await request(base,'/api/insights/requests')).requests.find(r=>r.request_id===created.request_id);
+  assert(listed,'The request is in the public register');
+  assert(!Object.values(people).some(p=>JSON.stringify(listed).includes(p.handle)),'The public register shows counts, not names');
+  let answered;
+  for(const p of Object.values(people)) answered=await post('/api/insights/requests/answer',{secret_key:p.secretKey,request_id:created.request_id,answer:'yes'});
+  assert.equal(answered.status,'started'); assert(answered.run_id,'The last answer started the run');
+  const run=await post('/api/insights/runs/get',{secret_key:agentKey,run_id:answered.run_id});
+  assert.equal(run.released,true); assert.equal(run.request_id,created.request_id);
+  assert.equal(run.traces_read,3); assert.equal(run.people,3); assert.deepEqual(run.notes,[]);
+  if(!realModel) { assert.deepEqual(run.applies,{yes:1,no:2}); assert.equal(run.people_where_it_applies,1); assert.equal(run.notes_waiting_for_owner,1); }
+  console.log(`PASS a registered request started when all 3 owners said yes; it read 3 traces: applies ${JSON.stringify(run.applies)}, effect ${JSON.stringify(run.effect)}; notes held for owners: ${run.notes_waiting_for_owner}`);
 
   // Every owner got a signed receipt in their own space, and decides on their own note.
   for(const p of Object.values(people)) {
@@ -152,11 +164,12 @@ try {
 
   // The same question cannot be put to the same traces again, and a revoked consent stops later runs.
   const again=await post('/api/insights/runs',{secret_key:agentKey,...question,entry_ids:ids});
-  assert.equal(again.traces_read,0); assert.deepEqual(again.skipped,{already_read_for_this_question:2});
+  assert.equal(again.released,false); assert.deepEqual(again.skipped,{already_read_for_this_question:3});
   await post('/api/insights/consent/revoke',{secret_key:people.bob.secretKey});
   const other=await post('/api/insights/runs',{secret_key:agentKey,template:'skill-check',params:{skill:'Ask before narrowing scope',when:'the agent wants to reduce access or swap an input'},entry_ids:ids});
-  assert.equal(other.traces_read,1); assert.deepEqual(other.skipped,{no_consent:1});
-  console.log('PASS a repeated question reads nothing; after Bob revokes, a new question reads only Alice\'s trace');
+  assert.deepEqual(other.skipped,{no_consent:1});
+  assert.equal(other.released,false); assert.equal(other.applies,undefined,'Two people are too few for counts to come out');
+  console.log('PASS a repeated question reads nothing; after Bob revokes, a new question reads two traces and releases nothing, being under 3 people');
   console.log('\nALL PASSED (synthetic data; local Router; hosted TinyCloud storage)');
 } catch(err) {
   console.error('FAILED:',err?.message||err); console.error('--- server log tail ---\n'+logs.slice(-2500)); process.exitCode=1;

@@ -36,7 +36,7 @@ import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteTe
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
-import { insightsRelease } from './insights-release.js';
+import { insightsRelease, checkUpgradePolicy, type UpgradePolicy } from './insights-release.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
@@ -1287,24 +1287,41 @@ const anthropic = process.env.ANTHROPIC_API_KEY
 // release key has to live in its own enclave app before real traces are accepted, so this
 // never switches on in production.
 const insightsRunsEnabled = process.env.INSIGHTS_RELEASE === 'local-test' && process.env.NODE_ENV !== 'production';
+// The upgrade policy the deployment declares, which every consent names. An incomplete timelock
+// setting turns runs off rather than letting consents claim a policy that isn't in place.
+let insightsUpgrades: UpgradePolicy = { by: 'operator' };
+let insightsUpgradesOk = true;
+if (process.env.INSIGHTS_UPGRADES === 'timelock') {
+  try {
+    insightsUpgrades = checkUpgradePolicy({ by: 'timelock', chain: process.env.INSIGHTS_CHAIN, appContract: process.env.INSIGHTS_APP_CONTRACT,
+      timelock: process.env.INSIGHTS_TIMELOCK, delayHours: Number(process.env.INSIGHTS_TIMELOCK_HOURS || 48) });
+  } catch (err) {
+    insightsUpgradesOk = false;
+    console.error(`[Insights] INSIGHTS_UPGRADES=timelock is incomplete, so runs stay off: ${err instanceof Error ? err.message : err}`);
+  }
+}
 // Without a release key this only stores and returns owner-only traces: ciphertext Router cannot open.
 // TRACE_STORAGE=off switches all of it off.
 let traceUploads = 0;
 const insights = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 'off'
   ? insightsRelease({
-      releasePrivateKey: insightsRunsEnabled
+      releasePrivateKey: insightsRunsEnabled && insightsUpgradesOk
         ? '0x' + createHmac('sha256', Buffer.from(authorIdentity.privateKey.slice(2), 'hex')).update('teleport-router/test-trace-release/v1').digest('hex')
         : null,
       appId: 'local-test', baseUrl: BASE_URL, build: { gitSha: process.env.GIT_SHA || null, imageDigest: process.env.IMAGE_DIGEST || null },
       model: process.env.INSIGHTS_MODEL || 'claude-sonnet-5-5',
+      upgrades: insightsUpgrades,
       getUser: handle => storage.getUser(handle),
       updateUser: (handle, updates) => storage.updateUser(handle, updates as any),
       getEntry: id => storage.getEntry(id),
       storeFor: binding => authorCloud.accessFor(binding.delegation),
       complete: anthropic
         ? async ({ model, system, user, maxTokens }) => {
-            const reply = await anthropic.messages.create({ model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] });
-            const block = reply.content[0];
+            // Current models think before answering by default, and the thinking counts against max_tokens,
+            // so leave room beyond the answer and read the text block, which need not come first.
+            const reply = await anthropic.messages.create({ model, max_tokens: maxTokens + 4000, system, messages: [{ role: 'user', content: user }] });
+            if ((reply.stop_reason as string) === 'refusal') throw new Error('The model declined this trace.');
+            const block = reply.content.find(b => b.type === 'text');
             return block?.type === 'text' ? block.text : '';
           }
         // Stand-in for runs without a model key: a fixed answer keyed on one word of the synthetic log.
@@ -1315,6 +1332,11 @@ const insights = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 
           : null,
     })
   : null;
+// Requests whose deadline passes start (if enough people agreed) or close, within a minute.
+if (insights && insights.releaseEnabled) {
+  const release = insights;
+  setInterval(() => { release.checkRequests().catch(err => console.error('[Insights] request check failed:', err)); }, 60_000).unref();
+}
 
 // Initialize SendGrid client for email notifications
 // Debug: show all env vars containing SEND or GRID
@@ -7391,6 +7413,11 @@ const server = createServer(async (req, res) => {
       if (!insights?.releaseEnabled) { res.writeHead(404); res.end(JSON.stringify({ error: 'Insights runs are not enabled on this server.' })); return; }
       res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify(insights.info())); return;
     }
+    // The public register of run requests: questions, chosen posts and counts of answers, never who said what.
+    if (req.method === 'GET' && url.pathname === '/api/insights/requests') {
+      if (!insights?.releaseEnabled) { res.writeHead(404); res.end(JSON.stringify({ error: 'Insights runs are not enabled on this server.' })); return; }
+      res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ requests: insights.listRequests() })); return;
+    }
     if (req.method === 'POST' && (url.pathname.startsWith('/api/insights/') || url.pathname.startsWith('/api/traces'))) {
       let releaseUpload = () => {};
       // Storing and returning an owner-only trace needs no release key. Everything else does.
@@ -7437,6 +7464,9 @@ const server = createServer(async (req, res) => {
           case '/api/traces/list': result = { entry_ids: await insights.listTraces(user) }; break;
           case '/api/insights/runs': result = await insights.run(user, body); break;
           case '/api/insights/runs/get': result = insights.getRun(user, body.run_id); break;
+          case '/api/insights/requests': result = await insights.createRequest(user, body); break;
+          case '/api/insights/requests/mine': result = { requests: insights.myRequests(user) }; break;
+          case '/api/insights/requests/answer': result = await insights.answerRequest(user, body.request_id, body.answer); break;
           case '/api/insights/notes/decide': result = await insights.decideNote(user, body.run_id, body.entry_id, body.approve); break;
           case '/api/insights/receipts': result = { receipts: await insights.receipts(user) }; break;
           default: res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return;
