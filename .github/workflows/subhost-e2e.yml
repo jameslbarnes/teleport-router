@@ -1,0 +1,71 @@
+name: Sub-container host end-to-end
+
+# Runs the host (subhost/host.mjs) on a real Docker daemon against a stand-in for
+# dstack's socket (subhost/dev/fake-dstack.mjs), starts the real test container
+# from the pinned Router image, then grants it read access through hosted
+# TinyCloud with a throwaway owner, checks the read and revokes. Quotes here are
+# unsigned; the TDX signature is checked only against the real CVM.
+on:
+  pull_request:
+    paths:
+      - 'subhost/**'
+      - 'docker-compose.template.yml'
+      - 'server/scripts/subhost-grant.mjs'
+      - 'server/src/tinycloud-identity.ts'
+      - '.github/workflows/subhost-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies (Router's dstack and TinyCloud clients)
+        working-directory: server
+        run: npm ci
+
+      - name: Unit and host tests, with Router's dstack client through the filtered socket
+        run: |
+          node subhost/embed.mjs --check
+          node --test subhost/
+
+      - name: Start the host against a stand-in dstack, on the real Docker daemon
+        run: |
+          mkdir -p /tmp/subhost-e2e
+          docker run -d --name subhost-local -p 8091:8091 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /tmp/subhost-e2e:/tmp/subhost-e2e \
+            -v "$PWD":/repo:ro -w /repo \
+            docker.io/library/node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202 \
+            node subhost/dev/local-host.mjs /tmp/subhost-e2e
+
+      - name: Wait for the test container to register its key
+        run: |
+          for i in $(seq 1 120); do
+            status=$(curl -fsS http://127.0.0.1:8091/ || true)
+            echo "$status"
+            if echo "$status" | grep -q '"key_registered":true'; then exit 0; fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Check the binding, grant, read and revoke through hosted TinyCloud
+        working-directory: server
+        run: node scripts/subhost-grant.mjs --url http://127.0.0.1:8091 --new-owner --simulated --approved-file ../subhost/dev/approved-local.json --revoke
+
+      - name: Container logs
+        if: always()
+        run: |
+          docker logs subhost-local 2>&1 | tail -100 || true
+          docker logs subhost-probe-e2e 2>&1 | tail -100 || true
+          docker rm -f subhost-local subhost-probe-e2e >/dev/null 2>&1 || true
