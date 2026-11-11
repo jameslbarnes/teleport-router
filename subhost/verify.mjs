@@ -37,10 +37,16 @@ export function eventDigest(e) {
     .digest('hex');
 }
 
-export function replayRtmr(events, imr) {
+/**
+ * Replays one RTMR. With `fromContent`, each digest is computed from the event's
+ * type, name and payload instead of read from the log: dstack's own GetQuote
+ * returns RTMR3 events with empty digests (Phala's API fills them in), and
+ * computing them is what binds the names and payloads we read to the quote.
+ */
+export function replayRtmr(events, imr, { fromContent = false } = {}) {
   let mr = Buffer.alloc(48);
   for (const e of events.filter(x => x.imr === imr)) {
-    let d = Buffer.from(e.digest, 'hex');
+    let d = Buffer.from(fromContent ? eventDigest(e) : e.digest, 'hex');
     if (d.length < 48) d = Buffer.concat([d, Buffer.alloc(48 - d.length)]);
     mr = createHash('sha384').update(Buffer.concat([mr, d])).digest();
   }
@@ -133,9 +139,10 @@ export function verifyBundle(bundle, expected) {
   const events = bundle.event_log;
   if (!Array.isArray(events)) throw new Error('the bundle has no event log');
   for (const e of events.filter(x => x.imr === 3)) {
-    if (eventDigest(e) !== String(e.digest).toLowerCase()) throw new Error(`event "${e.event}" does not match its digest`);
+    // A digest given in the log must agree with the content; an empty one is computed.
+    if (e.digest && eventDigest(e) !== String(e.digest).toLowerCase()) throw new Error(`event "${e.event}" does not match its digest`);
   }
-  if (replayRtmr(events, 3) !== quote.rtmr3) throw new Error('RTMR3 in the quote does not match the event log');
+  if (replayRtmr(events, 3, { fromContent: true }) !== quote.rtmr3) throw new Error('RTMR3 in the quote does not match the event log');
 
   // The OS: boot measurements match an approved dstack image.
   const osImageHash = onlyEvent(events, 'os-image-hash');
