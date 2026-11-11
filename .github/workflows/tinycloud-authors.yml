@@ -6,6 +6,10 @@ on:
       - 'server/src/group-store*.ts'
       - 'server/src/tinycloud-*.ts'
       - 'server/src/http.ts'
+      - 'server/src/trace-*.ts'
+      - 'server/src/insights-*.ts'
+      - 'server/scripts/*e2e.mjs'
+      - 'plugins/teleport-router/scripts/**'
       - 'server/scripts/*tinycloud*'
       - 'server/scripts/decrypt-my-router-data.mjs'
       - 'server/package*.json'
@@ -16,7 +20,7 @@ permissions:
 jobs:
   hosted-node:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,4 +35,10 @@ jobs:
       # Random synthetic owner/Router keys only. No repository secrets or live
       # Router connection. Exercises the real node's ETags and owner recovery.
       - run: node scripts/tinycloud-authors-e2e.mjs
+        working-directory: server
+      # The private trace behind a post: the capture client against a Router with no release key,
+      # then an insights run in local-test mode. Synthetic people and session logs only.
+      - run: node scripts/trace-capture-e2e.mjs
+        working-directory: server
+      - run: node scripts/insights-e2e.mjs
         working-directory: server

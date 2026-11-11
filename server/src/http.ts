@@ -10,7 +10,7 @@
 
 import 'dotenv/config';
 import { createServer } from 'http';
-import { randomUUID, createHash, randomBytes } from 'crypto';
+import { randomUUID, createHash, randomBytes, createHmac } from 'crypto';
 import { readFile } from 'fs/promises';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, accessSync, statSync, constants } from 'fs';
 import { join, extname, dirname } from 'path';
@@ -36,6 +36,7 @@ import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError, invi
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
+import { insightsRelease } from './insights-release.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
@@ -1276,6 +1277,39 @@ const SUMMARY_GAP_MS = 30 * 60 * 1000; // 30 minutes
 // Initialize Anthropic client if API key is available
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
+
+// Private traces behind posts, and insights runs over them. Synthetic local runs only: the
+// release key has to live in its own enclave app before real traces are accepted, so this
+// never switches on in production.
+const insightsRunsEnabled = process.env.INSIGHTS_RELEASE === 'local-test' && process.env.NODE_ENV !== 'production';
+// Without a release key this only stores and returns owner-only traces: ciphertext Router cannot open.
+// TRACE_STORAGE=off switches all of it off.
+let traceUploads = 0;
+const insights = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 'off'
+  ? insightsRelease({
+      releasePrivateKey: insightsRunsEnabled
+        ? '0x' + createHmac('sha256', Buffer.from(authorIdentity.privateKey.slice(2), 'hex')).update('teleport-router/test-trace-release/v1').digest('hex')
+        : null,
+      appId: 'local-test', baseUrl: BASE_URL, build: { gitSha: process.env.GIT_SHA || null, imageDigest: process.env.IMAGE_DIGEST || null },
+      model: process.env.INSIGHTS_MODEL || 'claude-sonnet-5-5',
+      getUser: handle => storage.getUser(handle),
+      updateUser: (handle, updates) => storage.updateUser(handle, updates as any),
+      getEntry: id => storage.getEntry(id),
+      storeFor: binding => authorCloud.accessFor(binding.delegation),
+      complete: anthropic
+        ? async ({ model, system, user, maxTokens }) => {
+            const reply = await anthropic.messages.create({ model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] });
+            const block = reply.content[0];
+            return block?.type === 'text' ? block.text : '';
+          }
+        // Stand-in for runs without a model key: a fixed answer keyed on one word of the synthetic log.
+        : process.env.INSIGHTS_MODEL_STUB === '1'
+          ? async ({ user }) => JSON.stringify(/<log>[\s\S]*timeout[\s\S]*<\/log>/.test(user)
+              ? { applies: 'yes', effect: 'would_have_helped', cost: 'tens_of_minutes', note: 'A tiny trial run first would have exposed the mistake early.' }
+              : { applies: 'no', effect: 'not_applicable', cost: 'none', note: '' })
+          : null,
+    })
   : null;
 
 // Initialize SendGrid client for email notifications
@@ -7317,6 +7351,69 @@ const server = createServer(async (req, res) => {
       } catch(err) {
         res.writeHead(400); res.end(JSON.stringify({error:err instanceof Error ? err.message : 'Invalid TinyCloud linking request.'})); return;
       }
+    }
+
+    // Insights: private traces behind posts, the owner's signed consent, and runs over consented traces.
+    if (req.method === 'GET' && url.pathname === '/api/insights/release') {
+      if (!insights?.releaseEnabled) { res.writeHead(404); res.end(JSON.stringify({ error: 'Insights runs are not enabled on this server.' })); return; }
+      res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify(insights.info())); return;
+    }
+    if (req.method === 'POST' && (url.pathname.startsWith('/api/insights/') || url.pathname.startsWith('/api/traces'))) {
+      let releaseUpload = () => {};
+      // Storing and returning an owner-only trace needs no release key. Everything else does.
+      const ownerOnly = ['/api/traces', '/api/traces/get', '/api/traces/list', '/api/traces/owner'].includes(url.pathname);
+      if (!insights || (!insights.releaseEnabled && !ownerOnly)) {
+        res.writeHead(404); res.end(JSON.stringify({ error: ownerOnly ? 'Private traces are not enabled on this server.' : 'Insights runs are not enabled on this server.' })); return;
+      }
+      // Trace routes take the key in the Authorization header and check it before the body is read, so a
+      // caller without an account cannot make the server buffer megabytes. Never accept a key in a URL.
+      const headerKey = req.headers.authorization?.replace(/^Bearer /i, '');
+      let user = headerKey && isValidSecretKey(headerKey) ? await storage.getUserByKeyHash(hashSecretKey(headerKey)) : null;
+      if (ownerOnly && !user) { res.writeHead(401); res.end(JSON.stringify({ error: 'Send your Router key in the Authorization header.' })); return; }
+      if (url.pathname === '/api/traces') {
+        // An upload is held in memory while it is checked and stored. Two at a time is enough for capture clients.
+        if (traceUploads >= 2) { res.writeHead(429, { 'Retry-After': '5' }); res.end(JSON.stringify({ error: 'Other traces are being stored. Try again in a few seconds.' })); return; }
+        // The slot is held until the work ends, not until the caller hangs up and not on a timer: releasing it
+        // while a stalled upload still holds its data would let more than two pile up.
+        traceUploads++;
+        let held = true;
+        releaseUpload = () => { if (held) { held = false; traceUploads--; } };
+      }
+      try {
+      let body: any;
+      try {
+        body = JSON.parse(await readBody(req, url.pathname === '/api/traces' ? 12 * 1024 * 1024 : 262144));
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid request');
+      } catch (err) {
+        res.writeHead(err instanceof RangeError ? 413 : 400); res.end(JSON.stringify({ error: 'Invalid or oversized request.' })); return;
+      }
+      // The insights routes exist only in local test runs; their scripts send the key in the body.
+      if (!user && !ownerOnly && typeof body.secret_key === 'string' && isValidSecretKey(body.secret_key)) user = await storage.getUserByKeyHash(hashSecretKey(body.secret_key));
+      if (!user) { res.writeHead(401); res.end(JSON.stringify({ error: 'A registered Router identity is required.' })); return; }
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        let result: unknown;
+        switch (url.pathname) {
+          case '/api/insights/consent/draft': result = await insights.draftPolicy(user, body); break;
+          case '/api/insights/consent': result = await insights.saveConsent(user, body.policy, body.signature); break;
+          case '/api/insights/consent/revoke': result = await insights.revokeConsent(user); break;
+          case '/api/insights/consent/status': result = insights.consentStatus(user); break;
+          case '/api/traces/owner': result = insights.ownerKey(user); break;
+          case '/api/traces': result = await insights.putTrace(user, body); break;
+          case '/api/traces/get': result = await insights.getTrace(user, body.entry_id, body.part); break;
+          case '/api/traces/list': result = { entry_ids: await insights.listTraces(user) }; break;
+          case '/api/insights/runs': result = await insights.run(user, body); break;
+          case '/api/insights/runs/get': result = insights.getRun(user, body.run_id); break;
+          case '/api/insights/notes/decide': result = await insights.decideNote(user, body.run_id, body.entry_id, body.approve); break;
+          case '/api/insights/receipts': result = { receipts: await insights.receipts(user) }; break;
+          default: res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return;
+        }
+        if (result === null) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return; }
+        res.writeHead(200); res.end(JSON.stringify(result)); return;
+      } catch (err) {
+        res.writeHead(400); res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Request failed.' })); return;
+      }
+      } finally { releaseUpload(); }
     }
 
     // GET /api/tinycloud/router - the identity an author or group owner grants access to
