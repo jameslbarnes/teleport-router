@@ -5,6 +5,9 @@ name: Sub-container host end-to-end
 # from the pinned Router image, then grants it read access through hosted
 # TinyCloud with a throwaway owner, checks the read and revokes. Quotes here are
 # unsigned; the TDX signature is checked only against the real CVM.
+#
+# Run it by hand with cvm_url set to check the deployed host instead: a real TDX
+# quote, verified with Phala's verifier, then grant, read and revoke.
 on:
   pull_request:
     paths:
@@ -14,12 +17,18 @@ on:
       - 'server/src/tinycloud-identity.ts'
       - '.github/workflows/subhost-e2e.yml'
   workflow_dispatch:
+    inputs:
+      cvm_url:
+        description: 'Deployed host to check, e.g. https://<app-id>-8091.dstack-pha-prod9.phala.network (empty: local run)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   e2e:
+    if: ${{ !inputs.cvm_url }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -69,3 +78,23 @@ jobs:
           docker logs subhost-local 2>&1 | tail -100 || true
           docker logs subhost-probe-e2e 2>&1 | tail -100 || true
           docker rm -f subhost-local subhost-probe-e2e >/dev/null 2>&1 || true
+
+  live:
+    if: ${{ inputs.cvm_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Check the deployed host's quote, grant, read and revoke
+        working-directory: server
+        env:
+          CVM_URL: ${{ inputs.cvm_url }}
+        run: node scripts/subhost-grant.mjs --url "$CVM_URL" --new-owner --revoke
