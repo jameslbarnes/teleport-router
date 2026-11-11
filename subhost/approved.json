@@ -1,11 +1,28 @@
 {
-  "about": "What the grant check accepts besides the container code: Router's CVM, its deploy manifest, OS and pre-launch script, as measured on Nov 9-11, 2026 (evidences/). A change to any of them makes the check refuse until someone reviews the new values and adds them here. allowed_envs names the secrets the operator may inject at boot; review new names before approving them.",
+  "about": "What the grant check accepts besides the container code: Router's CVM, its deploy manifest, OS and pre-launch script, as measured on Nov 9-11, 2026 (evidences/); the second manifest adds INSIGHTS_LINK_SECRET (PR 60). A change to any of them makes the check refuse until someone reviews the new values and adds them here. allowed_envs names the secrets the operator may inject at boot; review new names before approving them.",
   "app_ids": [
     "db82f581256a3c9244c4d7129a67336990d08cdf"
   ],
   "manifests": [
     {
       "allowed_envs": ["BASE_URL", "FIREBASE_SERVICE_ACCOUNT_BASE64", "ANTHROPIC_API_KEY", "SENDGRID_API_KEY", "SENDGRID_FROM_EMAIL", "CLOUDFLARE_API_TOKEN", "HERMES_AGENT_SECRET_KEY", "TELEGRAM_BOT_TOKEN", "NEAR_AI_API_KEY", "NAMECHEAP_API_KEY", "NAMECHEAP_CLIENT_IP", "SHAPE_ROUTER_SECRET_KEY", "SHAPE_MATRIX_AGENT_SECRET", "SHAPE_MATRIX_SERVICE_KEY", "MATRIX_BOT_SECRET_KEY", "MATRIX_BOT_HANDLE", "MATRIX_REGISTRATION_TOKEN", "DISCORD_BOT_TOKEN", "DISCORD_MODEL_API_KEY", "DISCORD_PUBLIC_ROUTER_KEY", "DISCORD_PRIVATE_ROUTER_KEY", "DISCORD_INITIAL_LINKS_B64", "ROUTER_SECRET_KEY", "HERMES_SECRET_KEY", "GITHUB_TOKEN", "MATRIX_CRYPTO_SECRET"],
+      "features": ["kms", "tproxy-net"],
+      "gateway_enabled": true,
+      "kms_enabled": true,
+      "local_key_provider_enabled": false,
+      "manifest_version": 2,
+      "name": "app_db82f581256a3c9244c4d7129a67336990d08cdf",
+      "no_instance_id": false,
+      "public_logs": false,
+      "public_sysinfo": true,
+      "public_tcbinfo": true,
+      "runner": "docker-compose",
+      "secure_time": false,
+      "storage_fs": "zfs",
+      "tproxy_enabled": true
+    },
+    {
+      "allowed_envs": ["BASE_URL", "FIREBASE_SERVICE_ACCOUNT_BASE64", "ANTHROPIC_API_KEY", "SENDGRID_API_KEY", "SENDGRID_FROM_EMAIL", "CLOUDFLARE_API_TOKEN", "HERMES_AGENT_SECRET_KEY", "TELEGRAM_BOT_TOKEN", "NEAR_AI_API_KEY", "NAMECHEAP_API_KEY", "NAMECHEAP_CLIENT_IP", "SHAPE_ROUTER_SECRET_KEY", "SHAPE_MATRIX_AGENT_SECRET", "SHAPE_MATRIX_SERVICE_KEY", "MATRIX_BOT_SECRET_KEY", "MATRIX_BOT_HANDLE", "MATRIX_REGISTRATION_TOKEN", "DISCORD_BOT_TOKEN", "DISCORD_MODEL_API_KEY", "DISCORD_PUBLIC_ROUTER_KEY", "DISCORD_PRIVATE_ROUTER_KEY", "DISCORD_INITIAL_LINKS_B64", "INSIGHTS_LINK_SECRET", "ROUTER_SECRET_KEY", "HERMES_SECRET_KEY", "GITHUB_TOKEN", "MATRIX_CRYPTO_SECRET"],
       "features": ["kms", "tproxy-net"],
       "gateway_enabled": true,
       "kms_enabled": true,

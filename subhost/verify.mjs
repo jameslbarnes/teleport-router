@@ -164,7 +164,9 @@ export function verifyBundle(bundle, expected) {
   for (const name of manifest.allowed_envs || []) {
     if (RISKY_ENV_NAMES.test(String(name))) throw new Error(`the deploy manifest lets the operator set ${name} at boot`);
   }
-  if (!(expected.approved.manifests || []).some(m => canonicalJson(m) === canonicalJson(manifest)))
+  // The order of secret names doesn't matter; the set does.
+  const normal = m => canonicalJson({ ...m, ...(Array.isArray(m.allowed_envs) ? { allowed_envs: [...m.allowed_envs].sort() } : {}) });
+  if (!(expected.approved.manifests || []).some(m => normal(m) === normal(manifest)))
     throw new Error('the deploy manifest (secret names, features, key settings) is not an approved one');
 
   // The binding: this key, this code, this app, this nonce.
