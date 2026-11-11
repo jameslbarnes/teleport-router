@@ -299,8 +299,13 @@ export function insightsRelease(deps: ReleaseDeps) {
           ...(derived ? { derived: { ...derived.meta, chunks: derived.chunks, policyId } } : {}) };
         await store.put(`traces/${entryId}/meta`, canonical(record), { ifNoneMatch: '*' });
       } catch (err) {
-        await discard();
-        if (err instanceof GroupStoreConflictError) throw new Error('This post already has its trace.');
+        // A failed write may still have been saved, for example when the reply timed out. Read the record
+        // back before removing anything: chunks are deleted only once it is known that no record points to them.
+        let saved: TraceRecord | null | undefined;
+        try { saved = await traceRecord(store, entryId); } catch { saved = undefined; }
+        if (saved && saved.upload === upload) return { entry_id: entryId, stored: true, full_sha256: full.meta.sha256, derived_sha256: derived?.meta.sha256 || null };
+        if (saved !== undefined) await discard();
+        if (saved || err instanceof GroupStoreConflictError) throw new Error('This post already has its trace.');
         throw err;
       }
       return { entry_id: entryId, stored: true, full_sha256: full.meta.sha256, derived_sha256: derived?.meta.sha256 || null };

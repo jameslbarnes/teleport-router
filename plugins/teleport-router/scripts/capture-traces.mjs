@@ -23,7 +23,8 @@
 //   --state <file>           the index and upload record (default ~/.router/traces/state.json)
 //   --rules <file>           your rules (default ~/.router/traces/rules.json), for example
 //                            { "never_upload_tools": ["mcp__diary__"] }: once a session calls such a tool,
-//                            that post and later ones get a record that says "withheld" and holds nothing else
+//                            that post and later ones get a record that says "withheld" and holds nothing else.
+//                            The file must exist before anything is uploaded; the list may be empty.
 //   --never-upload <prefix>  add one such tool-name prefix for this run
 //   --owner-key-file <file>  your storage key, or
 //   --owner-public-key <k>   its public key, from your own copy of the key and not from Router.
@@ -34,7 +35,7 @@ import { readFile, writeFile, readdir, stat, mkdir, rename, rm } from 'node:fs/p
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
-import { findPosts, buildTrace, sourceOf, mentionsNeverUpload, sealFull, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, sealFull, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
 
 const argv = process.argv.slice(2);
 const flag = name => argv.includes(name);
@@ -73,23 +74,38 @@ if (flag('--open')) {
 // Losing it silently would lose all three, so a damaged file stops the run and two runs never write at once.
 await mkdir(dirname(statePath), { recursive: true });
 const lockPath = statePath + '.lock';
-const lockAge = await stat(lockPath).then(s => Date.now() - s.mtimeMs, () => null);
-if (lockAge !== null && lockAge > 30 * 60_000) await rm(lockPath, { force: true });
-await writeFile(lockPath, String(process.pid), { flag: 'wx' }).catch(() => fail(`Another run is using ${statePath} (lock file ${lockPath}). Try again when it finishes.`));
-const unlock = () => rm(lockPath, { force: true });
+// The lock names its process. It is taken over only when that process is gone, never by age alone, and a
+// run removes the lock only while it is still its own.
+const lockToken = `${process.pid} ${Date.now()}`;
+const alive = pid => { try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; } };
+const holder = await readFile(lockPath, 'utf8').catch(() => null);
+if (holder !== null && !alive(Number(holder.split(' ')[0]))) await rm(lockPath, { force: true });
+await writeFile(lockPath, lockToken, { flag: 'wx' }).catch(() => fail(`Another run is using ${statePath} (lock file ${lockPath}). Try again when it finishes.`));
+const unlock = async () => { if (await readFile(lockPath, 'utf8').catch(() => null) === lockToken) await rm(lockPath, { force: true }); };
 const stop = async message => { await unlock(); fail(message); };
+process.on('uncaughtException', err => { stop(err?.stack || String(err)); });
 let saved = {};
 const existing = await readFile(statePath, 'utf8').catch(err => err.code === 'ENOENT' ? null : stop(`Could not read ${statePath}: ${err.message}`));
 if (existing !== null) { try { saved = JSON.parse(existing); } catch { await stop(`${statePath} is damaged and was left untouched. Restore it or move it aside, then run again.`); } }
 if (!saved || typeof saved !== 'object' || Array.isArray(saved)) await stop(`${statePath} is damaged and was left untouched.`);
-const state = { v: 1, owner: null, index: {}, traces: {}, excluded_sessions: {}, ...saved };
+const state = { v: 1, owner: null, index: {}, traces: {}, sessions: {}, ...saved };
 const saveState = async () => { const tmp = `${statePath}.${process.pid}.tmp`; await writeFile(tmp, JSON.stringify(state, null, 1)); await rename(tmp, statePath); };
 const sliceHash = (lines, post) => createHash('sha256').update(lines.slice(post.firstLine, post.lastLine + 1).join('\n')).digest('hex');
-const excluded = () => new Set(Object.keys(state.excluded_sessions));
+// state.sessions records, for every log read, which session started it and whether it called a never-upload
+// tool or opened with carried-over history. A session is excluded if it or any ancestor did, however the
+// logs were ordered when they were read.
+const isExcluded = (id, seen = new Set()) => {
+  const s = id ? state.sessions[id] : null;
+  if (!s || seen.has(id)) return false;
+  return !!(s.called || s.summary) || isExcluded(s.parent, seen.add(id));
+};
+const excluded = () => new Set(Object.keys(state.sessions).filter(id => isExcluded(id)));
+const VIA_PARENT = 'a session this one descends from called a tool whose results are never uploaded, or its history cannot be checked';
 const rulesPath = value('--rules') || join(dirname(statePath), 'rules.json');
 const rulesText = await readFile(rulesPath, 'utf8').catch(err => err.code === 'ENOENT' && !value('--rules') ? null : stop(`Could not read ${rulesPath}: ${err.message}`));
 let rules = {};
 if (rulesText !== null) { try { rules = JSON.parse(rulesText); } catch { await stop(`${rulesPath} is not valid JSON. Nothing was indexed or uploaded.`); } }
+if (!rules || typeof rules !== 'object' || Array.isArray(rules)) await stop(`${rulesPath} must hold an object such as { "never_upload_tools": [] }. Nothing was indexed or uploaded.`);
 const neverUpload = [...new Set([...(Array.isArray(rules.never_upload_tools) ? rules.never_upload_tools : []), ...values('--never-upload')])];
 if (neverUpload.some(p => typeof p !== 'string' || p.length < 4)) await stop('Each never-upload entry must be a tool-name prefix of at least four characters.');
 
@@ -117,11 +133,20 @@ try {
       if (log.bytes > MAX_LOG_BYTES) { totals.logs_too_large++; continue; }
       const text = await readFile(log.path, 'utf8');
       const mentionsPost = text.includes('router_write_entry') || text.includes('write_to_shared_notebook');
-      if (!mentionsPost && !mentionsNeverUpload(text, neverUpload)) continue;
-      const lines = text.split('\n');
+      const full = mentionsPost || mentionsNeverUpload(text, neverUpload);
+      // Every log's ancestry is recorded, also when it holds no post: it may sit between two that do.
+      const head = full ? null : text.slice(0, 2_000_000).split('\n');
+      if (head && text.length > 2_000_000) head.pop();
+      const lines = full ? text.split('\n') : head;
+      const origin = sessionOrigin(lines, basename(log.path));
+      if (origin.logSessionId) {
+        const known = state.sessions[origin.logSessionId] ||= {};
+        if (origin.parentSessionId) known.parent = origin.parentSessionId;
+        if (origin.startsFromSummary) known.summary = true;
+      }
+      if (!full) continue;
       const found = findPosts(lines, { neverUpload, excludedSessions: excluded(), fileName: basename(log.path) });
-      // A session that called a never-upload tool is remembered, so that sessions it started are withheld too.
-      if (found.calledNeverUpload && found.sessionId) state.excluded_sessions[found.sessionId] ||= { since: new Date().toISOString() };
+      if (found.calledNeverUpload && found.logSessionId) state.sessions[found.logSessionId].called = true;
       if (!found.posts.length) continue;
       totals.logs_with_posts++; totals.failed_writes += found.failedWrites; totals.unrecognized_receipts += found.unrecognizedResults;
       scanned.push({ path: log.path, parent: found.parentSessionId, posts: found.posts.map(post => ({ ...post, hash: sliceHash(lines, post) })) });
@@ -130,7 +155,7 @@ try {
   const now = new Date().toISOString();
   for (const log of scanned) {
     // The session that started this one may have been read later in the same run.
-    const viaParent = log.parent && state.excluded_sessions[log.parent] ? 'the session that started this one called a tool whose results are never uploaded' : null;
+    const viaParent = isExcluded(log.parent) ? VIA_PARENT : null;
     for (const post of log.posts) {
       totals.posts_found++;
       const withheld = post.withheld || viaParent || undefined, known = state.index[post.entryId];
@@ -148,6 +173,8 @@ try {
   const wanted = flag('--upload-all')
     ? Object.keys(state.index).filter(id => { const t = state.traces[id]; return !t || (t.skipped && (t.tries || 1) < 3); })
     : [...new Set(values('--upload'))];
+  // Uploading without rules would mean nobody decided what must stay on the machine.
+  if (wanted.length && rulesText === null) await stop(`Before the first upload, create ${rulesPath} listing the tools whose results must never be uploaded, for example { "never_upload_tools": ["mcp__diary__"] }. An empty list is allowed: { "never_upload_tools": [] }. Nothing was uploaded.`);
   let owner = null;
   async function ownerKey() {
     if (owner) return owner;
@@ -175,7 +202,7 @@ try {
       const fresh = findPosts(lines, { neverUpload, excludedSessions: excluded(), fileName: basename(item.log) });
       const post = fresh.posts.find(p => p.entryId === entryId);
       if (!post || post.firstLine !== item.first_line || post.lastLine !== item.last_line || sliceHash(lines, post) !== item.slice_sha256) throw new Error('The session log changed since this post was indexed.');
-      post.withheld ||= item.withheld || (fresh.parentSessionId && state.excluded_sessions[fresh.parentSessionId] ? 'the session that started this one called a tool whose results are never uploaded' : null);
+      post.withheld ||= item.withheld || (isExcluded(fresh.parentSessionId) ? VIA_PARENT : null);
       if (post.withheld && !item.withheld) item.withheld = post.withheld;
       built = buildTrace({ post, lines, source: { log: basename(item.log), ...sourceOf(lines, post) }, extraSecrets: [routerKey].filter(Boolean), maxBytes: (await ownerKey()).maxBytes - 64 * 1024 });
     } catch (err) { totals.failed++; report.push({ ...line, error: err.code === 'ENOENT' ? 'The session log is no longer on this machine.' : err.message }); continue; }

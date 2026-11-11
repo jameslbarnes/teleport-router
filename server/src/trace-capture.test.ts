@@ -4,6 +4,7 @@ import { testWallet, versionedMemoryStore } from './author-test-fixtures.js';
 import { insightsRelease } from './insights-release.js';
 import { sealPart, openPart, checkPartMeta } from './trace-envelope.js';
 import type { JournalEntry, User } from './storage.js';
+import type { GroupStore } from './group-store.js';
 // The capture client ships with the plugin as plain JavaScript.
 // @ts-ignore
 import { findPosts, buildTrace, sourceOf, cleanRecords, scrubText, sealFull, openFull, readTrace } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
@@ -237,7 +238,7 @@ describe('Cleaning a trace', () => {
 });
 
 describe('Owner-only traces on a server with no release key', () => {
-  const world = () => {
+  const world = (wrap: (store: GroupStore) => GroupStore = s => s) => {
     const users = new Map<string, any>(), entries = new Map<string, JournalEntry>(), stores = new Map<string, Map<string, string>>();
     const person = (handle: string) => {
       const wallet = testWallet(handle);
@@ -249,7 +250,7 @@ describe('Owner-only traces on a server with no release key', () => {
     const release = insightsRelease({
       releasePrivateKey: null, appId: 'production', baseUrl: 'https://router.example', build: { gitSha: null, imageDigest: null }, model: 'unused',
       getUser: async h => users.get(h) || null, updateUser: async () => null, getEntry: async id => entries.get(id) || null,
-      storeFor: async b => { if (!stores.has(b.delegation)) stores.set(b.delegation, new Map()); return versionedMemoryStore(stores.get(b.delegation)!); },
+      storeFor: async b => { if (!stores.has(b.delegation)) stores.set(b.delegation, new Map()); return wrap(versionedMemoryStore(stores.get(b.delegation)!)); },
       complete: null,
     });
     const post = (id: string, handle: string) => entries.set(id, { id, handle, pseudonym: handle, client: 'code', content: 'note', timestamp: 1, to: ['#group'] });
@@ -300,6 +301,32 @@ describe('Owner-only traces on a server with no release key', () => {
     const record = JSON.parse(w.stores.get('alice')!.get('traces/raced/meta')!);
     expect([...w.stores.get('alice')!.keys()].filter(k => k !== 'traces/raced/meta').every(k => k.startsWith(`traces/raced/${record.upload}/`))).toBe(true);
     expect(await w.release.listTraces(alice.user)).toEqual(['raced']);
+  });
+
+  it('keeps a trace whose record was saved although the write reported a failure', async () => {
+    // Storage saves the record and then the reply is lost, as with a timeout.
+    let lost = false;
+    const w = world(s => ({ ...s, put: async (k, v, c) => { await s.put(k, v, c); if (k.endsWith('/meta') && !lost) { lost = true; throw new Error('reply lost'); } } }));
+    const alice = w.person('alice'); w.post('p1', 'alice');
+    const owner = w.release.ownerKey(alice.user), context = { ownerDid: owner.owner_did, entryId: 'p1' };
+    const sealed = sealFull(Buffer.from('kept although the reply was lost'), context, owner.owner_public_key);
+    const body = { entry_id: 'p1', full: { meta: sealed.meta, data: sealed.ciphertext.toString('base64') } };
+    expect(await w.release.putTrace(alice.user, body)).toMatchObject({ stored: true, full_sha256: sealed.meta.sha256 });
+    const got = (await w.release.getTrace(alice.user, 'p1', 'full'))!;
+    expect(openFull(got.meta, Buffer.from(got.data, 'base64'), context, alice.wallet.privateKey).toString()).toBe('kept although the reply was lost');
+    await expect(w.release.putTrace(alice.user, body)).rejects.toThrow('already has its trace');
+  });
+
+  it('removes its chunks and allows a retry when the record was not saved', async () => {
+    let failed = false;
+    const w = world(s => ({ ...s, put: async (k, v, c) => { if (k.endsWith('/meta') && !failed) { failed = true; throw new Error('storage unavailable'); } await s.put(k, v, c); } }));
+    const alice = w.person('alice'); w.post('p1', 'alice');
+    const owner = w.release.ownerKey(alice.user), context = { ownerDid: owner.owner_did, entryId: 'p1' };
+    const sealed = sealFull(Buffer.from('second attempt'), context, owner.owner_public_key);
+    const body = { entry_id: 'p1', full: { meta: sealed.meta, data: sealed.ciphertext.toString('base64') } };
+    await expect(w.release.putTrace(alice.user, body)).rejects.toThrow('storage unavailable');
+    expect([...w.stores.get('alice')!.keys()]).toEqual([]);
+    expect(await w.release.putTrace(alice.user, body)).toMatchObject({ stored: true });
   });
 
   it('refuses everything that would need a release key', async () => {

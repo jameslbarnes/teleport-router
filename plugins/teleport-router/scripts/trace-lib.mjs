@@ -173,11 +173,15 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
     }
   }
   return { posts, failedWrites: failed, unrecognizedResults: unrecognized, unanswered: pending.size,
-    sessionId: origin.sessionId, parentSessionId: origin.parentSessionId, calledNeverUpload, startsFromSummary: origin.startsFromSummary };
+    sessionId: origin.sessionId, logSessionId: origin.logSessionId, parentSessionId: origin.parentSessionId, calledNeverUpload, startsFromSummary: origin.startsFromSummary };
 }
 
-/** Which session a log belongs to, which session started it, and whether it opens with carried-over history. */
-function sessionOrigin(lines, fileName) {
+/**
+ * Which session a log belongs to, which session started it, and whether it opens with carried-over history.
+ * `logSessionId` names this log itself; a caller that records it with `parentSessionId` for every log can
+ * follow exclusions through any number of generations.
+ */
+export function sessionOrigin(lines, fileName = '') {
   const meta = parse(lines[0] || '');
   if (meta?.type === 'session_meta') {   // Codex
     const p = meta.payload || {};
@@ -186,7 +190,8 @@ function sessionOrigin(lines, fileName) {
       if (lines[i].includes('"type":"compacted"') && parse(lines[i])?.type === 'compacted') { startsFromSummary = true; break; }
       if (lines[i].includes('"type":"response_item"') && parse(lines[i])?.type === 'response_item') break;
     }
-    return { sessionId: p.id || p.session_id || null, parentSessionId: p.parent_thread_id || null, startsFromSummary };
+    const sessionId = p.id || p.session_id || null;
+    return { sessionId, logSessionId: sessionId, parentSessionId: p.parent_thread_id || null, startsFromSummary };
   }
   let sessionId = null, startsFromSummary = false;
   for (let i = 0; i < Math.min(lines.length, 5000); i++) {
@@ -201,7 +206,8 @@ function sessionOrigin(lines, fileName) {
   }
   // A Claude Code subagent's log carries the session ID of the session that started it, under its own file name.
   const stem = fileName.replace(/\.jsonl$/, '');
-  return { sessionId, parentSessionId: stem && sessionId && stem !== sessionId ? sessionId : null, startsFromSummary };
+  const subagent = !!(stem && sessionId && stem !== sessionId);
+  return { sessionId, logSessionId: subagent ? stem : sessionId, parentSessionId: subagent ? sessionId : null, startsFromSummary };
 }
 
 // ── Cleaning ────────────────────────────────────────────────────────────────────────────

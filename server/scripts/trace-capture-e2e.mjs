@@ -12,6 +12,7 @@ import {promisify} from 'node:util';
 import {Wallet} from 'ethers';
 import {TinyCloudNode} from '@tinycloud/node-sdk';
 import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
+import {sealFull,openFull} from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
 const run=promisify(execFile);
 const host=process.env.TINYCLOUD_HOST||'https://tee.node.tinycloud.xyz';
@@ -58,7 +59,7 @@ try {
 
   // Two posts, written through the same API an agent uses.
   const ids=[];
-  for(const content of ['Polling every second caused the load on the nightly job.','Polling now runs every thirty seconds.']) {
+  for(const content of ['Polling every second caused the load on the nightly job.','Polling now runs every thirty seconds.','A note written two sessions after a private tool was used.']) {
     const wrote=await post('/api/entries',{secret_key:secretKey,content,posting_intent:'user-requested'});
     ids.push((wrote.receipt||wrote).entry_id);
   }
@@ -83,12 +84,26 @@ try {
   ];
   const projects=join(work,'projects'); await mkdir(join(projects,'-work-nightly'),{recursive:true});
   await writeFile(join(projects,'-work-nightly',`${session}.jsonl`),lines.join('\n')+'\n');
+  // Three Codex sessions in a chain: the first calls a tool the owner never uploads, the second only passes
+  // context on, and the third posts. The third must be withheld although it never called the tool itself.
+  const codex=(type,payload)=>JSON.stringify({timestamp:new Date().toISOString(),type,payload});
+  const thread=(id,parent,...rest)=>[codex('session_meta',{id,session_id:id,cwd:'/work/diary',...(parent?{parent_thread_id:parent}:{})}),
+    codex('response_item',{type:'message',role:'user',content:[{type:'input_text',text:`work in ${id}`}]}),...rest].join('\n')+'\n';
+  const mcp=(server,tool,text)=>codex('event_msg',{type:'item_completed',thread_id:'t',item:{type:'McpToolCall',server,tool,status:'completed',result:{content:[{type:'text',text}]}}});
+  await mkdir(join(projects,'codex'),{recursive:true});
+  await writeFile(join(projects,'codex','rollout-1-posts.jsonl'),thread('thread-c','thread-b',mcp('router','router_write_entry',`Saved.\nEntry ID: ${ids[2]}`)));
+  await writeFile(join(projects,'codex','rollout-2-between.jsonl'),thread('thread-b','thread-a'));
+  await writeFile(join(projects,'codex','rollout-3-first.jsonl'),thread('thread-a',null,mcp('diary','diary_read','PRIVATE-DIARY-PAGE')));
   const keyFile=join(work,'router.key'), ownerKeyFile=join(work,'owner.key'), stateFile=join(work,'state.json');
   await writeFile(keyFile,secretKey); await writeFile(ownerKeyFile,ownerKey);
   const capture=async(...args)=>JSON.parse((await run(process.execPath,[cli,'--router',base,'--key-file',keyFile,'--projects',projects,'--state',stateFile,...args],{env:{...process.env,ROUTER_KEY:'',CLAUDE_CONFIG_DIR:''}})).stdout);
 
+  const run2=(...args)=>run(process.execPath,[cli,'--router',base,'--key-file',keyFile,'--projects',projects,'--state',stateFile,...args],{env:{...process.env,ROUTER_KEY:'',CLAUDE_CONFIG_DIR:''}}).then(()=>null,e=>e);
+  const noRules=await run2('--upload',ids[0],'--owner-key-file',ownerKeyFile);
+  assert(noRules&&/Before the first upload, create/.test(noRules.stderr),'Nothing is uploaded until the owner has written their rules');
+  await writeFile(join(work,'rules.json'),JSON.stringify({never_upload_tools:['mcp__diary__']}));
   const indexed=await capture();
-  assert.equal(indexed.posts_found,2); assert.equal(indexed.newly_indexed,2); assert.equal(indexed.uploaded,0);
+  assert.equal(indexed.posts_found,3); assert.equal(indexed.indexed_total,3); assert.equal(indexed.uploaded,0); assert.equal(indexed.indexed_withheld,1);
   assert.equal(await status('/api/traces/list',{secret_key:secretKey}),200);
   assert.deepEqual((await post('/api/traces/list',{secret_key:secretKey})).entry_ids,[]);
   console.log('PASS the default run indexes both posts and sends nothing');
@@ -108,12 +123,12 @@ try {
   const unknown=await run(process.execPath,[cli,'--router',base,'--key-file',keyFile,'--projects',projects,'--state',stateFile,'--upload','no-such-entry'],{env:{...process.env,ROUTER_KEY:''}}).then(()=>null,e=>e);
   assert(unknown&&/No session log on this machine/.test(unknown.stdout),'A post with no local session log is reported');
   const rest=await capture('--upload-all');
-  assert.equal(rest.uploaded,1);
+  assert.equal(rest.uploaded,2); assert.equal(rest.withheld,1);
   assert.deepEqual((await post('/api/traces/list',{secret_key:secretKey})).entry_ids.sort(),[...ids].sort());
   console.log('PASS a trace is uploaded only when its post is named; each post gets one trace, once');
 
   // What the storage node holds, read with the owner's own session: ciphertext only.
-  for(const id of ids) {
+  for(const id of ids.slice(0,2)) {
     const meta=await owner.kv.get(`router/traces/${id}/meta`); assert(meta.ok);
     const raw=await owner.kv.get(`router/traces/${id}/${JSON.parse(stored(meta.data)).upload}/full-000`); assert(raw.ok);
     const held=Buffer.from(stored(raw.data),'base64').toString('latin1');
@@ -121,7 +136,7 @@ try {
   }
   // The owner opens each trace with their own key: the right slice, cleaned.
   const opened=[];
-  for(const id of ids) {
+  for(const id of ids.slice(0,2)) {
     const out=join(work,`${id}.json`);
     await run(process.execPath,[cli,'--router',base,'--key-file',keyFile,'--state',stateFile,'--open',id,'--owner-key-file',ownerKeyFile,'--out',out]);
     opened.push(await readFile(out,'utf8'));
@@ -131,6 +146,26 @@ try {
   for(const text of opened) for(const gone of [secretKey,'CIPHERCIPHER','toolUseResult','synthetic-account']) assert(!text.includes(gone),`Cleaned: ${gone.slice(0,12)}`);
   assert(opened[0].includes('summary of reasoning')&&opened[0].includes('[secret removed]'));
   console.log('PASS storage holds ciphertext; the owner\'s key opens each trace; slices are separate; credentials and provider ciphertext are gone');
+
+  // The post two sessions downstream of the private tool has a record that says so and holds nothing else.
+  const heldOut=join(work,'withheld.json');
+  await run(process.execPath,[cli,'--router',base,'--key-file',keyFile,'--state',stateFile,'--open',ids[2],'--owner-key-file',ownerKeyFile,'--out',heldOut]);
+  const heldTrace=JSON.parse(await readFile(heldOut,'utf8'));
+  assert.equal(heldTrace.records.length,0); assert.match(heldTrace.withheld,/descends from/); assert(!JSON.stringify(heldTrace).includes('PRIVATE-DIARY'));
+  console.log('PASS a post two sessions downstream of a never-upload tool is withheld');
+
+  // Two uploads for the same post at the same moment, against real storage: one is kept, and it opens.
+  const raced=(await post('/api/entries',{secret_key:secretKey,content:'A post two uploads race for.',posting_intent:'user-requested'}));
+  const racedId=(raced.receipt||raced).entry_id, mine=await post('/api/traces/owner',{secret_key:secretKey});
+  const context={ownerDid:mine.owner_did,entryId:racedId};
+  const attempts=['first ','second '].map(word=>{const sealed=sealFull(Buffer.from(word.repeat(60000)),context,mine.owner_public_key);
+    return {word,sealed,reply:send('/api/traces',{secret_key:secretKey,entry_id:racedId,full:{meta:sealed.meta,data:sealed.ciphertext.toString('base64')}})};});
+  const replies=await Promise.all(attempts.map(async a=>({...a,status:(await a.reply).status})));
+  assert.deepEqual(replies.map(r=>r.status).sort(),[200,400],'Exactly one of two racing uploads is stored');
+  const kept=replies.find(r=>r.status===200), got=await post('/api/traces/get',{secret_key:secretKey,entry_id:racedId});
+  assert.equal(got.meta.sha256,kept.sealed.meta.sha256);
+  assert(openFull(got.meta,Buffer.from(got.data,'base64'),context,ownerKey).toString().startsWith(kept.word));
+  console.log('PASS of two uploads racing for one post, real storage keeps exactly one and it opens');
 
   // Nobody else can fetch it, and another key cannot open it.
   const strangerKey=randomBytes(32).toString('base64url');

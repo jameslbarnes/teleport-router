@@ -7359,6 +7359,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify(insights.info())); return;
     }
     if (req.method === 'POST' && (url.pathname.startsWith('/api/insights/') || url.pathname.startsWith('/api/traces'))) {
+      let releaseUpload = () => {};
       // Storing and returning an owner-only trace needs no release key. Everything else does.
       const ownerOnly = ['/api/traces', '/api/traces/get', '/api/traces/list', '/api/traces/owner'].includes(url.pathname);
       if (!insights || (!insights.releaseEnabled && !ownerOnly)) {
@@ -7372,8 +7373,14 @@ const server = createServer(async (req, res) => {
       if (url.pathname === '/api/traces') {
         // An upload is held in memory while it is checked and stored. Two at a time is enough for capture clients.
         if (traceUploads >= 2) { res.writeHead(429, { 'Retry-After': '5' }); res.end(JSON.stringify({ error: 'Other traces are being stored. Try again in a few seconds.' })); return; }
-        traceUploads++; res.once('close', () => { traceUploads--; });
+        // The slot is held until the work ends, not until the caller hangs up, and for five minutes at most
+        // if storage never answers.
+        traceUploads++;
+        let held = true;
+        releaseUpload = () => { if (held) { held = false; traceUploads--; clearTimeout(expiry); } };
+        const expiry = setTimeout(releaseUpload, 5 * 60_000); expiry.unref();
       }
+      try {
       let body: any;
       try {
         body = JSON.parse(await readBody(req, url.pathname === '/api/traces' ? 12 * 1024 * 1024 : 262144));
@@ -7407,6 +7414,7 @@ const server = createServer(async (req, res) => {
       } catch (err) {
         res.writeHead(400); res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Request failed.' })); return;
       }
+      } finally { releaseUpload(); }
     }
 
     // GET /api/tinycloud/router - the identity an author or group owner grants access to
