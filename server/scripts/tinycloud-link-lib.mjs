@@ -15,8 +15,9 @@ export async function request(base,path,body) {
   return json;
 }
 
-/** Caller keeps both keys local. Prove recovery works before any record is migrated. */
-export async function linkOwner({base,secretKey,signMessage,confirmRecovery,grant,onProgress=()=>{}}) {
+/** Caller keeps both keys local. Prove recovery works before any record is migrated.
+ * Stops waiting after timeoutMs; Router's own deadline for a link is shorter, so by then it has finished or failed. */
+export async function linkOwner({base,secretKey,signMessage,confirmRecovery,grant,onProgress=()=>{},timeoutMs=25*60_000}) {
   if(typeof confirmRecovery!=='function')throw new Error('A client that can decrypt the owner recovery key is required before linking.');
   const delegation=serializeDelegation(grant);
   const challenge=await request(base,'/api/tinycloud/challenge',{secret_key:secretKey,delegation});
@@ -26,13 +27,15 @@ export async function linkOwner({base,secretKey,signMessage,confirmRecovery,gran
     throw new Error('Recovery confirmation does not match this link request.');
   const recovery_proof=await confirmRecovery(prepared);
   await request(base,'/api/tinycloud/link',{secret_key:secretKey,delegation,signature,recovery_proof});
+  const deadline=Date.now()+timeoutMs;
   let last='';
   for(;;) {
     const status=await request(base,'/api/tinycloud/status',{secret_key:secretKey});
-    if(status.job?.progress!==last) {last=status.job?.progress;onProgress(last);}
+    if(status.job?.progress!==last) {last=status.job?.progress;onProgress(last,status.job);}
     if(status.job?.status==='failed')throw new Error(status.job.error);
     if(status.job?.status==='complete')return status;
     if(!status.job)throw new Error('Router restarted during linking. Retry the same grant; verified copies are retained.');
+    if(Date.now()>deadline)throw new Error('Linking is still running on Router. Check /api/tinycloud/status before retrying; verified copies are retained.');
     await new Promise(r=>setTimeout(r,1000));
   }
 }

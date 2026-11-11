@@ -81,6 +81,9 @@ export interface Conversation {
   humanVisible?: boolean;    // Show full content in human feed? Default false for imports.
 }
 
+/** One account's stored records, by kind. */
+export interface OwnRecords { posts: JournalEntry[]; conversations: Conversation[]; summaries: Summary[] }
+
 export interface EmailPrefs {
   comments: boolean;         // Receive comment notifications
   digest: boolean;           // Receive daily digest
@@ -322,6 +325,10 @@ export interface Storage {
   /** Get entries by handle */
   getEntriesByHandle(handle: string, limit?: number, since?: number): Promise<JournalEntry[]>;
 
+  /** Every stored post, imported conversation and summary that carries this handle or one of these pseudonyms.
+   * Linking an account to its own storage uses it to find that account's records without reading everyone's. */
+  getRecordsOf?(handle: string, pseudonyms: string[]): Promise<OwnRecords>;
+
   /** Search entries by keywords */
   searchEntries(query: string, limit?: number, since?: number): Promise<JournalEntry[]>;
 
@@ -505,6 +512,11 @@ export class MemoryStorage implements Storage {
       .filter(e => e.handle === handle && (!since || e.timestamp >= since))
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, limit);
+  }
+
+  async getRecordsOf(handle: string, pseudonyms: string[]): Promise<OwnRecords> {
+    const mine = (v: { handle?: string; pseudonym?: string }) => v.handle === handle || (!!v.pseudonym && pseudonyms.includes(v.pseudonym));
+    return { posts: this.entries.filter(mine), conversations: this.conversations.filter(mine), summaries: [...this.summaries.values()].filter(mine) };
   }
 
   async getEntryCount(): Promise<number> {
@@ -1014,6 +1026,21 @@ export class FirestoreStorage implements Storage {
       id: doc.id,
       ...doc.data(),
     } as JournalEntry));
+  }
+
+  async getRecordsOf(handle: string, pseudonyms: string[]): Promise<OwnRecords> {
+    // One equality per query: these use Firestore's automatic single-field indexes and read only matching documents.
+    const owned = async <T>(collection: string): Promise<T[]> => {
+      const fields: [string, string][] = [['handle', handle], ...pseudonyms.map(p => ['pseudonym', p] as [string, string])];
+      const found = new Map<string, T>();
+      for (const snapshot of await Promise.all(fields.map(([field, value]) => this.db.collection(collection).where(field, '==', value).get())))
+        for (const doc of snapshot.docs) found.set(doc.id, { id: doc.id, ...doc.data() } as T);
+      return [...found.values()];
+    };
+    const [posts, conversations, summaries] = await Promise.all([
+      owned<JournalEntry>(this.collection), owned<Conversation>(this.conversationsCollection), owned<Summary>('summaries'),
+    ]);
+    return { posts, conversations, summaries };
   }
 
   async getEntryCount(): Promise<number> {
