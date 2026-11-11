@@ -325,6 +325,8 @@ jobs:
           DISCORD_PUBLIC_ROUTER_KEY: ${{ secrets.DISCORD_PUBLIC_ROUTER_KEY }}
           DISCORD_PRIVATE_ROUTER_KEY: ${{ secrets.DISCORD_PRIVATE_ROUTER_KEY }}
           DISCORD_INITIAL_LINKS_B64: ${{ secrets.DISCORD_INITIAL_LINKS_B64 }}
+          INSIGHTS_ENCLAVE_URL: ${{ secrets.INSIGHTS_ENCLAVE_URL }}
+          INSIGHTS_LINK_SECRET: ${{ secrets.INSIGHTS_LINK_SECRET }}
         run: |
           set -euo pipefail
           env_file=/tmp/phala.env
@@ -364,6 +366,8 @@ jobs:
           write_env DISCORD_PUBLIC_ROUTER_KEY
           write_env DISCORD_PRIVATE_ROUTER_KEY
           write_env DISCORD_INITIAL_LINKS_B64
+          write_env INSIGHTS_ENCLAVE_URL
+          write_env INSIGHTS_LINK_SECRET
 
           if [ -n "$HERMES_AGENT_SECRET_KEY" ]; then
             printf 'ROUTER_SECRET_KEY=%s\n' "$HERMES_AGENT_SECRET_KEY" >> "$env_file"
