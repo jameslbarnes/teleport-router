@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authorStorage, recordCodec, type AuthorBinding } from './author-store.js';
+import { authorStorage, recordCodec, LinkTimeoutError, type AuthorBinding, type LinkStep } from './author-store.js';
 import { MemoryStorage, StagedStorage, type JournalEntry, type User } from './storage.js';
 import type { GroupStore } from './group-store.js';
 import {testWallet,versionedMemoryStore,legacyRecord} from './author-test-fixtures.js';
@@ -144,6 +144,89 @@ describe('Each author owns their published records',()=>{
     expect(await f.base.getEntriesByHandle('alice')).toEqual([]);
     expect((await f.layer.storage.getEntriesByHandle('alice')).map(e=>e.content).sort()).toEqual(['before','during']);
     expect(f.data.get('space:alice')!.has(`posts/${saved.id}`)).toBe(true);
+  });
+});
+
+describe('Linking while other people link and read',()=>{
+  it('links different accounts side by side',async()=>{
+    const f=await fixture();
+    let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    // Alice's storage answers only when released, so her link is still running while Bob's runs.
+    const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);
+      return b.space==='space:alice'?{...s,list:async(p:string)=>{await gate;return s.list(p);}}:s;},codec);
+    const alice=layer.link(f.users[0],binding('alice'));
+    expect(await layer.link(f.users[1],binding('bob'))).toMatchObject({legacyCleanupPending:0});
+    release(); await alice;
+    expect(await layer.status('alice')).toMatchObject({linked:true,available:true});
+  });
+
+  it('never links one storage identity to two accounts, even when both ask at once',async()=>{
+    const f=await fixture(); const shared=binding('alice');
+    const results=await Promise.allSettled([
+      f.layer.link(f.users[0],shared),
+      f.layer.link(f.users[2],{...shared,space:'space:carol',delegation:'grant:carol',pseudonym:'carol#123'}),
+    ]);
+    expect(results.map(r=>r.status).sort()).toEqual(['fulfilled','rejected']);
+    expect(String((results.find(r=>r.status==='rejected') as PromiseRejectedResult).reason)).toContain('already linked to another Router account');
+    expect((await f.base.getAllUsers()).filter(u=>u.tinycloud?.ownerDid===shared.ownerDid)).toHaveLength(1);
+  });
+
+  it("finds an account's own records without reading everyone's",async()=>{
+    const f=await fixture();
+    const mine=await f.base.addEntry(post('alice'));
+    const imported=await f.base.addConversation({pseudonym:'alice#123',content:'imported research',title:'A conversation',
+      sourceUrl:'https://example.test/chat',platform:'claude',summary:'summary',timestamp:999,keywords:['research']});
+    const theirs=await f.base.addEntry(post('bob'));
+    await f.layer.ready();
+    const reads=[vi.spyOn(f.base,'getEntries'),vi.spyOn(f.base,'getConversations'),vi.spyOn(f.base,'getSummaries')];
+    expect(await f.layer.link(f.users[0],binding('alice'))).toMatchObject({copied:2,legacyCleanupPending:0});
+    for(const read of reads)expect(read).not.toHaveBeenCalled();
+    expect(await f.base.getEntry(mine.id)).toBeNull();
+    expect(await f.base.getConversation(imported.id)).toBeNull();
+    expect(await f.base.getEntry(theirs.id)).toEqual(theirs);
+  });
+
+  it('gives up on a storage call that never answers, and leaves the account free to retry',async()=>{
+    const f=await fixture(); const e=await f.base.addEntry(post('alice'));
+    let hang=true;
+    const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);
+      return {...s,list:(p:string)=>hang?new Promise<string[]>(()=>{}):s.list(p)};},codec);
+    await expect(layer.link(f.users[0],binding('alice'),undefined,{callTimeoutMs:20})).rejects.toThrow(LinkTimeoutError);
+    expect((await f.base.getUser('alice'))?.tinycloud).toBeUndefined();
+    expect(await f.base.getEntry(e.id)).toEqual(e);
+    hang=false;
+    expect(await layer.link(f.users[0],binding('alice'))).toMatchObject({copied:1,legacyCleanupPending:0});
+    expect(await layer.storage.getEntry(e.id)).toEqual(e);
+  });
+
+  it('does not start once its deadline has passed',async()=>{
+    const f=await fixture(); const e=await f.base.addEntry(post('alice'));
+    await expect(f.layer.link(f.users[0],binding('alice'),undefined,{deadline:0})).rejects.toThrow(LinkTimeoutError);
+    expect((await f.base.getUser('alice'))?.tinycloud).toBeUndefined();
+    expect(f.data.get('space:alice')!.size).toBe(0);
+    expect(await f.base.getEntry(e.id)).toEqual(e);
+  });
+
+  it('reports each step as it goes',async()=>{
+    const f=await fixture(); await f.base.addEntry(post('alice'));
+    const steps:LinkStep[]=[];
+    await f.layer.link(f.users[0],binding('alice'),undefined,{onStep:s=>steps.push(s)});
+    expect(steps).toEqual(['waiting','checking','encrypting','finding','copying','reading','saving','cleaning']);
+  });
+
+  it("keeps serving everyone's reads while one account re-links",async()=>{
+    const f=await fixture(); let clock=1000; let held=false;
+    let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const layer=authorStorage(f.base,async b=>{const s=await f.resolve(b);
+      return {...s,list:async(p:string)=>{if(held)await gate;return s.list(p);}};},codec,{leaseMs:60,now:()=>clock});
+    await layer.link(f.users[0],binding('alice'));
+    const mine=await layer.storage.addEntry(post('alice'));
+    held=true;
+    const relink=layer.link(f.users[0],binding('alice'));
+    clock+=61; // Alice's read lease runs out while her re-link waits on storage
+    expect((await layer.storage.getEntries()).map(e=>e.id)).toContain(mine.id);
+    release(); await relink;
+    expect(await layer.status('alice')).toMatchObject({linked:true,available:true});
   });
 });
 

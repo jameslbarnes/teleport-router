@@ -29,6 +29,7 @@ import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type Jour
 import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
+import { startLinkJob, type LinkJob } from './author-link-job.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { discordAudience } from './discord-audience.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
@@ -1140,8 +1141,7 @@ async function setEntryLabels(entry: JournalEntry, labels: { repo?: string | nul
   return publishedStorage.addEntry(apply({ ...entry })); // same id: replaces the stored record
 }
 const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string; recovery?: string}>();
-const authorJobs = new Map<string, {status: 'running'|'complete'|'failed'; progress: string; result?: unknown; error?: string}>();
-let authorLinkQueue: Promise<unknown> = Promise.resolve();
+const authorJobs = new Map<string, LinkJob>();
 const STATIC_DIR = join(process.cwd(), '..');
 const discordGroupService = authorLayer ? discordGroups(storage, publishedStorage,
   handle => authorLayer.status(handle), {baseUrl: BASE_URL.replace(/\/$/, ''), audience: discordAudience(process.env.DISCORD_BOT_TOKEN)}) : null;
@@ -7416,17 +7416,9 @@ const server = createServer(async (req, res) => {
         if (!challenge.recovery) throw new Error('Confirm owner recovery before linking. Use the current TinyCloud link client.');
         authorCodec.verifyOwnerRecovery(parsed.recovery_proof,binding,challenge.message,challenge.recovery);
         authorChallenges.delete(user.handle);
-        const job={status:'running' as 'running'|'complete'|'failed',progress:'Waiting to verify and move published records.'};
-        authorJobs.set(user.handle,job);
-        // Serialize account links to enforce one TinyCloud identity per Router account.
-        authorLinkQueue=authorLinkQueue.catch(()=>{}).then(async()=>{
-          try {
-            const result=await authorLayer.link(user,binding,message=>{job.progress=message;});
-            Object.assign(job,{status:'complete',result,progress:'Encrypted migration verified; your TinyCloud key can recover your records independently.'});
-          } catch {
-            Object.assign(job,{status:'failed',error:'Migration did not complete. Existing verified data is retained; retry or inspect the storage connection.'});
-          }
-        });
+        // Links for different accounts run side by side. link() takes one at a time per account and per
+        // TinyCloud identity, which keeps one identity to one Router account.
+        authorJobs.set(user.handle,startLinkJob(({deadline,onStep,progress})=>authorLayer.link(user,binding,progress,{deadline,onStep})));
         res.writeHead(202); res.end(JSON.stringify({status:'running',handle:user.handle})); return;
       } catch(err) {
         res.writeHead(400); res.end(JSON.stringify({error:err instanceof Error ? err.message : 'Invalid TinyCloud linking request.'})); return;

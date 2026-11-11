@@ -3,7 +3,7 @@
  * A grant check gives a short read lease; failed/expired checks evict that author.
  */
 import { tokenize, encodePageCursor, generateEntryId, type Storage, type User,
-  type JournalEntry, type Conversation, type Summary, type DailySummary } from './storage.js';
+  type JournalEntry, type Conversation, type Summary, type DailySummary, type OwnRecords } from './storage.js';
 import type { GroupStore } from './group-store.js';
 import { isPublicNotebookEntry } from './public-views.js';
 import { recordCodec, canonical, RECOVERY_KEY, ownerPublicKey } from './author-records.js';
@@ -30,6 +30,42 @@ type AuthorState = { user: BindingUser; expires: number; available: boolean; act
 const order = (a: {timestamp: number; id: string}, b: {timestamp: number; id: string}) => b.timestamp - a.timestamp || b.id.localeCompare(a.id);
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 
+/** A step of linking an account to its own storage, reported so the caller can show it and time it. */
+export type LinkStep = 'waiting' | 'checking' | 'encrypting' | 'finding' | 'copying' | 'reading' | 'saving' | 'cleaning';
+export interface LinkOptions {
+  /** Time (ms since the epoch) after which the link stops before switching anything, time spent waiting to start included. */
+  deadline?: number;
+  /** Longest wait for any one storage call. */
+  callTimeoutMs?: number;
+  onStep?: (step: LinkStep) => void;
+}
+/** The link ran out of time, or storage did not answer one call in time. Nothing was switched. */
+export class LinkTimeoutError extends Error {}
+export const LINK_CALL_TIMEOUT_MS = 60_000;
+/** Longest a running link pauses grant checks on its account for reads. */
+const LINK_PAUSES_CHECKS_MS = 30 * 60_000;
+
+function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new LinkTimeoutError(`Storage did not answer ${what} within ${Math.round(ms / 1000)} s.`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/** The same store, with no single call waiting longer than `ms`. A call that lands late is harmless
+ * to linking, whose every write is conditional. */
+function timeLimited(store: GroupStore, ms: number): GroupStore {
+  const limited: GroupStore = {
+    put: (key, value, condition) => within(store.put(key, value, condition), ms, 'a write'),
+    get: key => within(store.get(key), ms, 'a read'),
+    list: path => within(store.list(path), ms, 'a listing'),
+    delete: key => within(store.delete(key), ms, 'a deletion'),
+  };
+  if (store.getVersioned) limited.getVersioned = key => within(store.getVersioned!(key), ms, 'a read');
+  return limited;
+}
+
 async function parallel<T>(items: T[], fn: (item: T) => Promise<void>, concurrency = 8) {
   let next = 0;
   const results = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -49,6 +85,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
   const authors = new Map<string, AuthorState>();
   const handlesByPseudonym = new Map<string, string>();
   const locks = new Map<string, Promise<unknown>>();
+  /** Accounts with a link running, and until when reads keep serving what was loaded instead of waiting for it. */
+  const linking = new Map<string, { count: number; until: number }>();
   let initializing: Promise<void> | undefined;
   const index = (kind: Kind): Map<string, any> => kind === 'posts' ? entries : kind === 'conversations' ? conversations : summaries;
   const ownerOf = (value: {handle?: string; pseudonym: string}) => value.handle && authors.has(value.handle)
@@ -65,9 +103,9 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     for (const map of [entries, conversations, summaries]) for (const [id, value] of map) if (belongs(value, user)) map.delete(id);
     for (const [date, summary] of daily) if (summary.pseudonyms.some(p => belongs({pseudonym:p},user))) daily.delete(date);
   }
-  async function readAuthor(state: AuthorState) {
+  async function readAuthor(state: AuthorState, opened?: GroupStore) {
     const binding = state.user.tinycloud;
-    const store = await resolveStore(binding);
+    const store = opened || await resolveStore(binding);
     const loaded: { kind: Kind; value: RecordValue }[] = [];
     for (const kind of ['posts', 'conversations', 'summaries'] as Kind[]) {
       const keys = await store.list(`${kind}/`);
@@ -103,6 +141,9 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     if (state.activationPending) return; // uncertain metadata commit: only a verified re-link can resume
     if (!reload && state.available && state.expires > now()) return;
     if (!reload && !state.available && (state.retryAt || 0) > now()) return;
+    // A re-link holds this account for as long as it runs; everyone's reads would otherwise wait on it.
+    // The link proves the grant itself, and the next check after it ends catches any revocation.
+    if (!reload && (linking.get(state.user.handle)?.until || 0) > now()) return;
     if (state.checking) return state.checking;
     const started = now();
     state.checking = exclusive(state.user.handle, async () => {
@@ -255,10 +296,29 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
   /** Encrypt, read back, commit the durable v2 floor, then clean up legacy copies.
    * Existing TinyCloud records are authoritative. Never restore them from a stale
    * cache/Firestore copy, and never replace an owner edit/deletion without its ETag. */
-  async function link(user: User, binding: AuthorBinding, progress: (message: string) => void = () => {}) {
-    await init();
-    handlesByPseudonym.set(binding.pseudonym,user.handle);
+  async function link(user: User, binding: AuthorBinding, progress: (message: string) => void = () => {},
+    { deadline = Infinity, callTimeoutMs = LINK_CALL_TIMEOUT_MS, onStep = () => {} }: LinkOptions = {}) {
+    const due = () => { if (now() > deadline) throw new LinkTimeoutError('The link ran out of time before switching storage.'); };
+    onStep('waiting');
+    const running = linking.get(user.handle);
+    linking.set(user.handle, { count: (running?.count || 0) + 1,
+      until: Math.max(running?.until || 0, Math.min(deadline, now() + LINK_PAUSES_CHECKS_MS)) });
+    try {
+      await init();
+      handlesByPseudonym.set(binding.pseudonym,user.handle);
+      // One link at a time per storage identity, so two accounts cannot both claim it, and per account.
+      // Links for other accounts and other storage run alongside.
+      return await exclusive(`did:${binding.ownerDid.toLowerCase()}`, () => linkAccount(user, binding, progress, due, callTimeoutMs, onStep));
+    } finally {
+      const done = linking.get(user.handle);
+      if (done && --done.count === 0) linking.delete(user.handle);
+    }
+  }
+  function linkAccount(user: User, binding: AuthorBinding, progress: (message: string) => void, due: () => void,
+    callTimeoutMs: number, onStep: (step: LinkStep) => void) {
     return exclusive(user.handle, async () => {
+      due();
+      onStep('checking');
       const all = await base.getAllUsers();
       if (all.some(u=>u.handle!==user.handle&&u.tinycloud?.ownerDid.toLowerCase()===binding.ownerDid.toLowerCase()))
         throw new Error('This TinyCloud identity is already linked to another Router account.');
@@ -274,7 +334,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         ownerPublicKey: ownerPublicKey(binding, binding.ownerPublicKey),
         minRecordVersion: durableBinding?.minRecordVersion || previous?.user.tinycloud.minRecordVersion };
       const linked = { ...user, tinycloud: binding } as BindingUser;
-      const store = await resolveStore(binding);
+      const store = timeLimited(await within(resolveStore(binding), callTimeoutMs, 'opening the grant'), callTimeoutMs);
       await store.list('posts/'); // prove the actual grant works, not only its unsigned metadata
       if (!store.getVersioned) throw new Error('TinyCloud conditional writes are required for encryption migration');
       let recovery = await store.get(RECOVERY_KEY);
@@ -285,10 +345,12 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       codec.verifyRecovery(recovery, binding, binding.ownerPublicKey!);
       if (await store.get(RECOVERY_KEY) !== recovery) throw new Error('Owner recovery readback failed');
       let encrypted = 0;
+      onStep('encrypting');
       // Migrate the current node contents first, with conditional writes. Partial
       // completion is safe to resume while the durable minimum remains v1.
       for (const kind of ['posts','conversations','summaries'] as Kind[]) {
         await parallel(await store.list(`${kind}/`), async key => {
+          due();
           const id = key.slice(kind.length + 1);
           if (key !== `${kind}/${id}` || !validId(id)) throw new Error('Invalid author record path');
           const current = await store.getVersioned!(key);
@@ -303,6 +365,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
           }
         });
       }
+      due();
+      onStep('finding');
       const records: {kind:Kind;value:RecordValue}[]=[];
       if (!previous) for (const kind of ['posts','conversations','summaries'] as Kind[])
         for(const value of index(kind).values()) if(belongs(value,linked)) records.push({kind,value});
@@ -311,11 +375,20 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       const addLegacy = (kind: Kind, value: RecordValue) => {
         if(belongs(value,linked) && !records.some(r=>r.kind===kind&&r.value.id===value.id)) records.push({kind,value});
       };
-      await pageAll(base.getEntries.bind(base), v=>addLegacy('posts',v));
-      await pageAll(base.getConversations.bind(base), v=>addLegacy('conversations',v));
-      if(extra.getSummaries) for(const v of await extra.getSummaries(100000))addLegacy('summaries',v);
+      if (base.getRecordsOf) {
+        // Ask for this account's own records by handle and pseudonym, instead of reading everyone's.
+        const own: OwnRecords = await base.getRecordsOf(user.handle,
+          [...new Set([binding.pseudonym, user.legacyPseudonym].filter((p): p is string => !!p))]);
+        for (const kind of ['posts','conversations','summaries'] as Kind[]) for (const v of own[kind]) addLegacy(kind, v);
+      } else {
+        await pageAll(base.getEntries.bind(base), v=>addLegacy('posts',v));
+        await pageAll(base.getConversations.bind(base), v=>addLegacy('conversations',v));
+        if(extra.getSummaries) for(const v of await extra.getSummaries(100000))addLegacy('summaries',v);
+      }
       let copied=0;
+      onStep('copying');
       await parallel(records, async ({kind,value})=>{
+        due();
         const key=`${kind}/${value.id}`;
         const current=await store.get(key);
         if (!current && !previous) {
@@ -328,9 +401,12 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
         }
         progress(`Verified ${++copied}/${records.length} records`);
       });
-      binding.minRecordVersion = 2;
+      binding.minRecordVersion = 2; // before the readback, so it accepts only encrypted records
+      onStep('reading');
       const state: AuthorState={user:linked,expires:now()+leaseMs,available:true};
-      const verified = await readAuthor(state);
+      const verified = await readAuthor(state, store);
+      due(); // the last point at which the link stops: after this it switches and finishes
+      onStep('saving');
       try {
         if (!await base.updateUser(user.handle,{tinycloud:binding})) throw new Error('Could not commit encrypted storage state');
       } catch (err) {
@@ -344,6 +420,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       handlesByPseudonym.set(binding.pseudonym,user.handle);
       evict(linked);
       for (const {kind,value} of verified) index(kind).set(value.id,value);
+      onStep('cleaning');
       // Existing records are already the verified originals in memory. Clear derived cross-author summaries.
       const failed:string[]=[];
       await parallel(records,async ({kind,value})=>{
