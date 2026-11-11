@@ -129,6 +129,17 @@ test('the template match lets only the four deploy values vary', () => {
   assert.throws(() => matchTemplate('x: ${HOME}\n', 'x: /root\n'));
 });
 
+test('the template match handles the real template, which embeds the host program', () => {
+  const template = readFileSync(join(ROOT, 'docker-compose.template.yml'), 'utf8');
+  const values = { GIT_SHA: 'abcdef0', IMAGE_DIGEST: `sha256:${'1'.repeat(64)}`, AGENT_IMAGE_DIGEST: `sha256:${'2'.repeat(64)}`, DISCORD_IMAGE_DIGEST: `sha256:${'3'.repeat(64)}` };
+  const filled = lf(template).replace(/\$\{([A-Z_]+)\}/g, (_, name) => values[name]);
+  assert.ok(filled.length > 20000, 'the template carries the host program');
+  assert.deepEqual(matchTemplate(template, filled), values);
+  assert.throws(() => matchTemplate(template, filled.replace('- SUBHOST_MAIN=1', '- SUBHOST_MAIN=1\n      - EXTRA=1')));
+  assert.throws(() => matchTemplate(template, filled.replace('/var/run/subhost/router:/var/run/dstack-filtered:ro', '/var/run:/var/run/dstack-filtered:ro')));
+  assert.throws(() => matchTemplate(template, filled.replace(/base64,[A-Za-z0-9]/, m => `${m}A`)), 'one changed byte of the host program');
+});
+
 test('the compose template: socket mounts are exactly as intended and the embedded block is current', () => {
   const text = lf(readFileSync(join(ROOT, 'docker-compose.template.yml'), 'utf8'));
   assert.equal(lf(withBlock(text, subhostBlock(ROOT))), text, 'run node subhost/embed.mjs');

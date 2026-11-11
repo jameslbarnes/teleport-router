@@ -78,23 +78,40 @@ export const TEMPLATE_VARIABLES = Object.freeze({
  * above filled in (the way CI's envsubst fills them), and returns their values.
  */
 export function matchTemplate(template, deployed) {
+  // Walks literal text and variable slots in turn. (A single regex built from the
+  // template is too large for V8 once the template embeds the host program.)
   const text = lf(template);
-  const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const seen = new Set();
-  let pattern = '^';
+  const out = lf(deployed);
+  const parts = [];
   let last = 0;
   for (const m of text.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
     const name = m[1] || m[2];
     if (!(name in TEMPLATE_VARIABLES)) throw new Error(`the template uses an unexpected variable: ${name}`);
-    pattern += escape(text.slice(last, m.index));
-    pattern += seen.has(name) ? `\\k<${name}>` : `(?<${name}>${TEMPLATE_VARIABLES[name]})`;
-    seen.add(name);
+    parts.push(text.slice(last, m.index), { name });
     last = m.index + m[0].length;
   }
-  pattern += `${escape(text.slice(last))}$`;
-  const match = new RegExp(pattern).exec(lf(deployed));
-  if (!match) throw new Error('the deployed compose file is not the approved template');
-  return { ...match.groups };
+  parts.push(text.slice(last));
+  const mismatch = () => new Error('the deployed compose file is not the approved template');
+  const values = {};
+  let pos = 0;
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      if (!out.startsWith(part, pos)) throw mismatch();
+      pos += part.length;
+      continue;
+    }
+    // Greedy, anchored at pos. The literal after each slot must follow at once;
+    // nothing is accepted by backtracking into a value.
+    const re = new RegExp(TEMPLATE_VARIABLES[part.name], 'y');
+    re.lastIndex = pos;
+    const m = re.exec(out);
+    if (!m) throw mismatch();
+    if (part.name in values && values[part.name] !== m[0]) throw mismatch();
+    values[part.name] = m[0];
+    pos += m[0].length;
+  }
+  if (pos !== out.length) throw mismatch();
+  return values;
 }
 
 /**
