@@ -237,7 +237,7 @@ describe('Cleaning a trace', () => {
   });
 });
 
-describe('Owner-only traces on a server with no release key', () => {
+describe('Owner-only traces on a server with no insights enclave', () => {
   const world = (wrap: (store: GroupStore) => GroupStore = s => s) => {
     const users = new Map<string, any>(), entries = new Map<string, JournalEntry>(), stores = new Map<string, Map<string, string>>();
     const person = (handle: string) => {
@@ -248,10 +248,9 @@ describe('Owner-only traces on a server with no release key', () => {
       return { wallet, user: users.get(handle) as User };
     };
     const release = insightsRelease({
-      releasePrivateKey: null, appId: 'production', baseUrl: 'https://router.example', build: { gitSha: null, imageDigest: null }, model: 'unused',
+      enclave: null, baseUrl: 'https://router.example', model: 'unused',
       getUser: async h => users.get(h) || null, updateUser: async () => null, getEntry: async id => entries.get(id) || null,
       storeFor: async b => { if (!stores.has(b.delegation)) stores.set(b.delegation, new Map()); return wrap(versionedMemoryStore(stores.get(b.delegation)!)); },
-      complete: null,
     });
     const post = (id: string, handle: string) => entries.set(id, { id, handle, pseudonym: handle, client: 'code', content: 'note', timestamp: 1, to: ['#group'] });
     return { release, person, post, stores };
@@ -362,7 +361,7 @@ describe('Owner-only traces on a server with no release key', () => {
     await expect(w.release.putTrace(alice.user, { entry_id: 'p1', full: { meta: full.meta, data: full.ciphertext.toString('base64') },
       derived: { meta: derived.meta, data: derived.ciphertext.toString('base64'), policy_id: 'any' } })).rejects.toThrow('runs_not_enabled');
     await expect(w.release.draftPolicy(alice.user, { triggers: ['alice'] })).rejects.toThrow('not enabled');
-    await expect(w.release.run(alice.user, { template: 'skill-check', params: {}, entry_ids: ['p1'] })).rejects.toThrow('not enabled');
+    await expect(w.release.createRequest(alice.user, { template: 'skill-check', params: {}, entry_ids: ['p1'] })).rejects.toThrow('not enabled');
     expect(w.release.consentStatus(alice.user)).toMatchObject({ active: false, reason: 'runs_not_enabled', release_key: null });
   });
 });

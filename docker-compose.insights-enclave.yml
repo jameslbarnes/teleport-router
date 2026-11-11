@@ -1,0 +1,24 @@
+# The insights enclave: its own CVM, separate from Router, so Router's deploys never reach the release key.
+# One process, node dist/insights-enclave-server.js, from the same image as Router, pinned by digest.
+# Deploy it as its own Phala app; never add it to Router's compose. Everything here is measured into the
+# compose hash that owners' clients check, so settings that matter (key source, model) are plain values here.
+# Replace IMAGE_DIGEST and GIT_SHA with the build being deployed.
+services:
+  insights-enclave:
+    image: docker.io/generalsemantics/teleport-router@sha256:IMAGE_DIGEST
+    command: ["node", "dist/insights-enclave-server.js"]
+    ports:
+      - "3100:3100"
+    environment:
+      - PORT=3100
+      - NODE_ENV=production
+      - INSIGHTS_KEY_SOURCE=dstack
+      - INSIGHTS_MODEL=claude-sonnet-5-5
+      - GIT_SHA=GIT_SHA
+      - IMAGE_DIGEST=sha256:IMAGE_DIGEST
+      # Names only: values come from Phala's encrypted environment at deploy time.
+      - INSIGHTS_LINK_SECRET
+      - ANTHROPIC_API_KEY
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: unless-stopped
