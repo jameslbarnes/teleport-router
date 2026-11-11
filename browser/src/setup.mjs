@@ -69,6 +69,9 @@ function showGroup() {
   $('description').textContent = context.group.description || 'Keep useful ideas and questions with your group.'; $('description').hidden = false;
   $('audience').textContent = 'Who can read notes: ' + context.group.audience; $('audience').hidden = false;
   $('eyebrow').hidden = !invite;
+  // An invited person who has not joined yet sees, first, what to hand to their own agent.
+  const forAgent = !!invite && !context.member && typeof context.agent_message === 'string';
+  $('for-agent').hidden = !forAgent; if (forAgent) $('agent-message').textContent = context.agent_message;
   // Public groups have no Discord connection, so that step never appears for them.
   if (!context.group.private) $('step-discord').hidden = true;
   document.title = context.group.name + ' · Router';
@@ -159,6 +162,9 @@ async function showDiscord(back = false) {
   $('unlink-discord').hidden = !discord.grantId;
   $('discord-explanation').textContent = discord.configured ? 'Connect your own Discord account to @' + identity.handle + ' in this group.' : 'This group is not connected to Discord at the moment. You can finish your Router setup now and connect Discord later.';
   if (discord.configured) $('open-discord').href = discord.channelUrl;
+  // Only Discord's own invitation addresses are linked, whatever the server sent.
+  const serverInvite = /^https:\/\/(?:discord\.gg|discord\.com\/invite)\/[A-Za-z0-9-]{2,40}$/.test(context.discord_invite || '') ? context.discord_invite : '';
+  $('discord-invite').hidden = !serverInvite; $('discord-invite-missing').hidden = !!serverInvite; if (serverInvite) $('discord-invite').href = serverInvite;
   $('discord-state').textContent = discord.linked ? 'Connected to Discord ' + (discord.username ? '@' + discord.username : discord.discordUserId) + '. It stays connected while you use it. Without use, it ends on ' + new Date(discord.expiresAt).toLocaleDateString() + '.' : discord.pending ? 'You approved a connection, but Discord has not finished it. Use /router-link again to retry.' : '';
   if (pairing && context.group.private) {
     let pair;
@@ -294,6 +300,10 @@ $('unlink-discord').onclick = () => act(async () => {
 $('discord-next').onclick = $('skip-discord').onclick = () => act(showRules);
 $('rules-next').onclick = () => act(() => solo() ? showConnect() : finish());
 $('copy-plugin').onclick = () => copy($('plugin-commands').textContent, 'Commands copied.');
+$('copy-agent-message').onclick = async () => {
+  try { await navigator.clipboard.writeText($('agent-message').textContent); $('agent-copy-state').textContent = 'Copied. Paste it into your agent.'; }
+  catch { $('agent-copy-state').textContent = 'Could not copy. Select the text and copy it yourself.'; }
+};
 $('copy-key').onclick = () => copy(key, 'Router key copied. Paste it when Claude Code asks, and nowhere else.');
 $('connect-next').onclick = $('connect-later').onclick = () => act(finish);
 $('back').onclick = () => act(() => step === 5 ? (solo() ? showConnect() : showRules()) : step === 4 ? showRules() : step === 3 ? showDiscord(true) : checkStorage());

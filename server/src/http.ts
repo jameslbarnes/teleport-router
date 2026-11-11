@@ -32,7 +32,7 @@ import { authorStorage, recordCodec } from './author-store.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { discordAudience } from './discord-audience.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
-import { resolveOnboardingGroup, groupOnboardingView, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
+import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteText, discordInvite, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
@@ -702,6 +702,10 @@ export const SYSTEM_SKILLS: Skill[] = [
         invite_token: {
           type: 'string',
           description: 'For join: the invitation token for an invite-only group.',
+        },
+        discord_invite: {
+          type: 'string',
+          description: 'For invite, optional: a Discord server invitation link for this group, such as https://discord.gg/abc123. It is saved on the group, so pass it once; every later invitation then includes it.',
         },
         skill_name: {
           type: 'string',
@@ -1693,6 +1697,7 @@ const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
@@ -3706,7 +3711,12 @@ function createMCPServer(secretKey: string) {
         }
 
         let limits: ReturnType<typeof inviteLimits>;
-        try { limits = inviteLimits(args as { expires_in_hours?: unknown; max_uses?: unknown }); }
+        let discordUrl: string | undefined;
+        try {
+          limits = inviteLimits(args as { expires_in_hours?: unknown; max_uses?: unknown });
+          const given = (args as { discord_invite?: unknown }).discord_invite;
+          if (given !== undefined && given !== null && given !== '') discordUrl = discordInvite(given);
+        }
         catch (err) {
           if (!(err instanceof GroupOnboardingError)) throw err;
           return { content: [{ type: 'text' as const, text: err.message }], isError: true };
@@ -3723,9 +3733,13 @@ function createMCPServer(secretKey: string) {
 
         await storage.createInvite(invite);
 
-        const inviteUrl = `${BASE_URL}/join?channelinvite=${encodeURIComponent(token)}`;
+        const invited = discordUrl ? (await storage.updateChannel(channelId, { discordInviteUrl: discordUrl })) || channel : channel;
+        const forms = inviteForms(invited, BASE_URL, token);
+        const discordNote = !invited.discord ? ''
+          : invited.discordInviteUrl ? ' It includes the invitation to the Discord server.'
+          : ' This group has a Discord server, but no Discord invitation is saved for it. Pass discord_invite once, with a Discord invite link that does not expire, and every later invitation will include it.';
         return {
-          content: [{ type: 'text' as const, text: `Invite created for #${channelId}. Anyone with this link can join until ${new Date(limits.expiresAt).toISOString().slice(0, 10)}, for up to ${limits.maxUses} ${limits.maxUses === 1 ? 'person' : 'people'}. Share it only with the people you mean to invite.\n\nJoin link: ${inviteUrl}\nToken: ${token}\n\nUsers can click the link to join. They can also join manually with: router_channels action: "join", channel_id: "${channelId}", invite_token: "${token}"` }],
+          content: [{ type: 'text' as const, text: `Invitation created for #${channelId}. It works until ${new Date(limits.expiresAt).toISOString().slice(0, 10)}, for up to ${limits.maxUses} ${limits.maxUses === 1 ? 'person' : 'people'}. Share it only with the people you mean to invite.\n\nSend them this:\n\n${forms.message}\n\nSend the whole message: the part for their agent is what makes the setup hands-off. Their agent fetches the steps from Router and creates the account, joins the group, sets up storage and posting rules, and posts a first note. The link at the end opens the guided setup in a browser, which also starts with the same text to give an agent.${discordNote}\n\nToken, for router_channels action "join": ${token}` }],
         };
       }
 
@@ -7097,7 +7111,7 @@ const server = createServer(async (req, res) => {
         req.on('end', () => resolve(data));
       });
 
-      let parsed: { secret_key?: string; max_uses?: number; expires_in_hours?: number };
+      let parsed: { secret_key?: string; max_uses?: number; expires_in_hours?: number; discord_invite?: unknown };
       try { parsed = JSON.parse(body); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
 
       if (!parsed.secret_key || !isValidSecretKey(parsed.secret_key)) {
@@ -7129,7 +7143,8 @@ const server = createServer(async (req, res) => {
       }
 
       let limits: ReturnType<typeof inviteLimits>;
-      try { limits = inviteLimits(parsed); }
+      let discordUrl: string | undefined;
+      try { limits = inviteLimits(parsed); if (parsed.discord_invite !== undefined && parsed.discord_invite !== null && parsed.discord_invite !== '') discordUrl = discordInvite(parsed.discord_invite); }
       catch (err) {
         if (!(err instanceof GroupOnboardingError)) throw err;
         res.writeHead(err.status); res.end(JSON.stringify({ error: err.message })); return;
@@ -7146,7 +7161,25 @@ const server = createServer(async (req, res) => {
 
       await storage.createInvite(invite);
       res.writeHead(201);
-      res.end(JSON.stringify(invite));
+      // The same invitation in two forms: a link for the setup page, and a prompt for the person's own agent.
+      const invited = discordUrl ? (await storage.updateChannel(channelId, { discordInviteUrl: discordUrl })) || channel : channel;
+      res.end(JSON.stringify({ ...invite, ...inviteForms(invited, BASE_URL, token) }));
+      return;
+    }
+
+    // An invitation link read by an agent. A browser asks for a page and gets the guided setup; anything that
+    // does not ask for HTML (curl, most agents' fetch tools) gets the same invitation as plain steps.
+    if (req.method === 'GET' && (url.pathname.startsWith('/agent-invite/')
+        || (url.pathname === '/join' && url.searchParams.has('channelinvite') && !(req.headers.accept || '').includes('text/html')))) {
+      const inviteToken = url.pathname === '/join' ? url.searchParams.get('channelinvite') || '' : decodeURIComponent(url.pathname.slice('/agent-invite/'.length));
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
+      try {
+        const { channel } = await resolveOnboardingGroup(storage, { inviteToken: inviteToken || 'missing' });
+        res.writeHead(200); res.end(agentInviteText(channel, BASE_URL, inviteToken));
+      } catch (err) {
+        res.writeHead(err instanceof GroupOnboardingError ? err.status : 500);
+        res.end(err instanceof GroupOnboardingError ? err.message : 'The invitation could not be loaded. Try again.');
+      }
       return;
     }
 
@@ -9476,7 +9509,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
       // setup.js names its lazily loaded parts by content hash, so it must always be current while the
       // parts themselves never change.
-      const cacheControl = ext === '.html' || filePath === '/onboarding-assets/setup.js'
+      const cacheControl = ext === '.html' || filePath === '/onboarding-assets/setup.js' || filePath === '/agent-setup.mjs'
         ? 'no-cache'
         : (filePath.startsWith('/assets/') || filePath.startsWith('/onboarding-assets/chunks/')
           ? 'public, max-age=31536000, immutable'

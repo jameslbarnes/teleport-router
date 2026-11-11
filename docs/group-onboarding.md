@@ -22,6 +22,31 @@ The setup page serves its scripts locally, has no-referrer and a restricted Cont
 
 Build the browser assets with `npm ci && npm run build` in `browser/`. Docker does this in a separate build stage. Run the server build before `npm test` in `browser/` so its WebCrypto recovery tests can compare against the actual server codec.
 
+## An invitation for the guest's agent
+
+An invitation is one link, `/join?channelinvite=…`, for two readers. A browser asks for a page and gets the guided setup. Anything that does not ask for HTML, such as curl or an agent's fetch tool, gets the same invitation as plain-text steps; `/agent-invite/<token>` always returns the text, and the setup page tells an agent that read the HTML where to find it. So the guest can open the link, or give it to their own agent (Claude Code, Codex or any agent with a shell and Node.js 20) and say "set me up with this".
+
+`router_channels` action `invite`, `POST /api/channels/:id/invite` and the group page's "Copy invitation message" button return a `message` to send. It leads with `agent_message`, a few lines the guest pastes into their agent that tell it to fetch the steps from `agent_url` and carry them out, and ends with the link for someone without an agent. They also return `invite_url` and the full steps as `agent_prompt`. Opened in a browser, the invitation page starts with the same "Give this to your agent" text and a copy button, above the form. Both forms carry the same token, so they end on the same date and after the same number of joins.
+
+A group with a Discord server can keep its Discord invitation: pass `discord_invite` once when creating an invitation (admins only; only `discord.gg` and `discord.com/invite` addresses are accepted). It is saved on the group and shown to invited people and members, on the setup page and in the agent's steps.
+
+The message tells the agent to download `/agent-setup.mjs` from this Router, read it and run one command:
+
+```
+node router-setup.mjs join --invite <token> --handle <name> --approve-rules group
+```
+
+- It checks the invitation, creates the account, joins the group, creates the person's storage key and connects encrypted storage with the same grant, recovery proof and read-back as the setup page, and prints a summary. Running it again continues where it stopped.
+- Keys are written to `~/.router/accounts/<handle>/` and never printed. There is no password-protected recovery file in this path: the folder is the backup, and the summary says so.
+- `--approve-rules group` saves the group's suggested rules. The message states those rules in words and says that sending it is the person's approval; without the flag nothing is saved. Existing rules are never replaced.
+- `tools` and `call` reach Router's tools with the new account before Router is connected to the agent's app, so the agent can read the group and post a first note in the same conversation. The usual sharing receipt comes back.
+- Discord still needs the person: they join the server, type `/router-link` and paste the private link to their agent. `discord --link` shows which Discord account asked; `--confirm` connects it.
+- `connect` installs the Router plugin in Claude Code. The script, not the agent, refuses when Router is already connected there, so an invitation can never replace another account's connection.
+
+The group's name and description are written by its admin. They appear in the message as one quoted data line and never as steps.
+
+`server/scripts/agent-setup-e2e.mjs` runs the whole path with synthetic accounts against a local Router and hosted TinyCloud.
+
 ## Invitations, removal and Discord permissions
 
 - Every invitation link ends. By default it works for 7 days and 10 joins; an admin can set `expires_in_hours` (up to 720) and `max_uses` (up to 100). Invitations to one named person are single-use and last 7 days. Links created before this rule keep their original terms.

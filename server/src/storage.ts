@@ -199,6 +199,8 @@ export interface Channel {
   subscribers: ChannelSubscriber[];
   /** Optional binding for the private Discord note commands. */
   discord?: import('./discord-groups.js').DiscordGroupBinding;
+  /** The Discord server invitation an admin saved for this group. Shown only to members and invited people. */
+  discordInviteUrl?: string;
   // Group posts stored in the owner's TinyCloud space instead of the Router database (see group-store.ts)
   store?: {
     kind: 'tinycloud';

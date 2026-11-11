@@ -42,3 +42,7 @@ jobs:
         working-directory: server
       - run: node scripts/insights-e2e.mjs
         working-directory: server
+      # An invitation handed to an agent: the setup script downloaded from a local Router creates a synthetic
+      # account, joins a private group, connects hosted storage and posts a first note.
+      - run: node scripts/agent-setup-e2e.mjs
+        working-directory: server
