@@ -36,7 +36,8 @@ import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteTe
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
-import { insightsRelease, checkUpgradePolicy, type UpgradePolicy } from './insights-release.js';
+import { insightsRelease, checkUpgradePolicy, type UpgradePolicy, type EnclaveClient, type EnclaveInfo } from './insights-release.js';
+import { insightsEnclave } from './insights-enclave.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
@@ -1283,12 +1284,12 @@ const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
 
-// Private traces behind posts, and insights runs over them. Synthetic local runs only: the
-// release key has to live in its own enclave app before real traces are accepted, so this
-// never switches on in production.
+// Private traces behind posts, and insights runs over them. Runs happen in the insights enclave, its own
+// small CVM (insights-enclave.ts), reached at INSIGHTS_ENCLAVE_URL. Local tests (INSIGHTS_RELEASE=local-test,
+// never in production) run the same enclave code in this process with a test key instead.
 const insightsRunsEnabled = process.env.INSIGHTS_RELEASE === 'local-test' && process.env.NODE_ENV !== 'production';
-// The upgrade policy the deployment declares, which every consent names. An incomplete timelock
-// setting turns runs off rather than letting consents claim a policy that isn't in place.
+const insightsModel = process.env.INSIGHTS_MODEL || 'claude-sonnet-5-5';
+// The upgrade policy the in-process test enclave declares. The real enclave declares its own.
 let insightsUpgrades: UpgradePolicy = { by: 'operator' };
 let insightsUpgradesOk = true;
 if (process.env.INSIGHTS_UPGRADES === 'timelock') {
@@ -1300,36 +1301,60 @@ if (process.env.INSIGHTS_UPGRADES === 'timelock') {
     console.error(`[Insights] INSIGHTS_UPGRADES=timelock is incomplete, so runs stay off: ${err instanceof Error ? err.message : err}`);
   }
 }
-// Without a release key this only stores and returns owner-only traces: ciphertext Router cannot open.
+// The model call, for the in-process test enclave only.
+const insightsComplete = anthropic
+  ? async ({ model, system, user, maxTokens }: { model: string; system: string; user: string; maxTokens: number }) => {
+      // Current models think before answering by default, and the thinking counts against max_tokens,
+      // so leave room beyond the answer and read the text block, which need not come first.
+      const reply = await anthropic.messages.create({ model, max_tokens: maxTokens + 4000, system, messages: [{ role: 'user', content: user }] });
+      if ((reply.stop_reason as string) === 'refusal') throw new Error('The model declined this trace.');
+      const block = reply.content.find(b => b.type === 'text');
+      return block?.type === 'text' ? block.text : '';
+    }
+  // Stand-in for runs without a model key: a fixed answer keyed on one word of the synthetic log.
+  : process.env.INSIGHTS_MODEL_STUB === '1'
+    ? async ({ user }: { user: string }) => JSON.stringify(/<log>[\s\S]*timeout[\s\S]*<\/log>/.test(user)
+        ? { applies: 'yes', effect: 'would_have_helped', cost: 'tens_of_minutes', note: 'A tiny trial run first would have exposed the mistake early.' }
+        : { applies: 'no', effect: 'not_applicable', cost: 'none', note: '' })
+    : null;
+
+async function insightsEnclaveLink(): Promise<{ client: EnclaveClient; info: EnclaveInfo } | null> {
+  const url = process.env.INSIGHTS_ENCLAVE_URL;
+  if (url) {
+    // The link secret only lets Router hand the enclave a run. Every trace still needs its owner's signatures.
+    const secret = process.env.INSIGHTS_LINK_SECRET || '';
+    if (secret.length < 32) { console.error('[Insights] INSIGHTS_LINK_SECRET is missing or short, so runs stay off'); return null; }
+    const call = async (path: string, body?: unknown, timeoutMs = 60_000) => {
+      const res = await fetch(new URL(path, url), { method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(timeoutMs),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` }, body: body === undefined ? undefined : JSON.stringify(body) });
+      const json: any = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`Insights enclave ${path}: HTTP ${res.status}${json?.error ? ` (${String(json.error).slice(0, 200)})` : ''}`);
+      return json;
+    };
+    const client: EnclaveClient = { info: () => call('/info'), run: input => call('/run', input, 15 * 60_000), decide: input => call('/decide', input) };
+    try { return { client, info: await client.info() }; }
+    catch (err) { console.error(`[Insights] the enclave did not answer at startup, so runs stay off: ${err instanceof Error ? err.message : err}`); return null; }
+  }
+  if (insightsRunsEnabled && insightsUpgradesOk && authorIdentity && insightsComplete) {
+    const local = insightsEnclave({
+      releasePrivateKey: '0x' + createHmac('sha256', Buffer.from(authorIdentity.privateKey.slice(2), 'hex')).update('teleport-router/test-trace-release/v1').digest('hex'),
+      appId: 'local-test', model: insightsModel, upgrades: insightsUpgrades, complete: insightsComplete,
+      build: { gitSha: process.env.GIT_SHA || null, imageDigest: process.env.IMAGE_DIGEST || null } });
+    const client: EnclaveClient = { info: () => local.info(), run: input => local.run(input as any), decide: input => local.decide(input as any) };
+    return { client, info: await client.info() };
+  }
+  return null;
+}
+// Without an enclave this only stores and returns owner-only traces: ciphertext Router cannot open.
 // TRACE_STORAGE=off switches all of it off.
 let traceUploads = 0;
 const insights = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 'off'
   ? insightsRelease({
-      releasePrivateKey: insightsRunsEnabled && insightsUpgradesOk
-        ? '0x' + createHmac('sha256', Buffer.from(authorIdentity.privateKey.slice(2), 'hex')).update('teleport-router/test-trace-release/v1').digest('hex')
-        : null,
-      appId: 'local-test', baseUrl: BASE_URL, build: { gitSha: process.env.GIT_SHA || null, imageDigest: process.env.IMAGE_DIGEST || null },
-      model: process.env.INSIGHTS_MODEL || 'claude-sonnet-5-5',
-      upgrades: insightsUpgrades,
+      enclave: await insightsEnclaveLink(), baseUrl: BASE_URL, model: insightsModel,
       getUser: handle => storage.getUser(handle),
       updateUser: (handle, updates) => storage.updateUser(handle, updates as any),
       getEntry: id => storage.getEntry(id),
       storeFor: binding => authorCloud.accessFor(binding.delegation),
-      complete: anthropic
-        ? async ({ model, system, user, maxTokens }) => {
-            // Current models think before answering by default, and the thinking counts against max_tokens,
-            // so leave room beyond the answer and read the text block, which need not come first.
-            const reply = await anthropic.messages.create({ model, max_tokens: maxTokens + 4000, system, messages: [{ role: 'user', content: user }] });
-            if ((reply.stop_reason as string) === 'refusal') throw new Error('The model declined this trace.');
-            const block = reply.content.find(b => b.type === 'text');
-            return block?.type === 'text' ? block.text : '';
-          }
-        // Stand-in for runs without a model key: a fixed answer keyed on one word of the synthetic log.
-        : process.env.INSIGHTS_MODEL_STUB === '1'
-          ? async ({ user }) => JSON.stringify(/<log>[\s\S]*timeout[\s\S]*<\/log>/.test(user)
-              ? { applies: 'yes', effect: 'would_have_helped', cost: 'tens_of_minutes', note: 'A tiny trial run first would have exposed the mistake early.' }
-              : { applies: 'no', effect: 'not_applicable', cost: 'none', note: '' })
-          : null,
     })
   : null;
 // Requests whose deadline passes start (if enough people agreed) or close, within a minute.
@@ -7462,12 +7487,12 @@ const server = createServer(async (req, res) => {
           case '/api/traces': result = await insights.putTrace(user, body); break;
           case '/api/traces/get': result = await insights.getTrace(user, body.entry_id, body.part); break;
           case '/api/traces/list': result = { entry_ids: await insights.listTraces(user) }; break;
-          case '/api/insights/runs': result = await insights.run(user, body); break;
-          case '/api/insights/runs/get': result = insights.getRun(user, body.run_id); break;
           case '/api/insights/requests': result = await insights.createRequest(user, body); break;
-          case '/api/insights/requests/mine': result = { requests: insights.myRequests(user) }; break;
-          case '/api/insights/requests/answer': result = await insights.answerRequest(user, body.request_id, body.answer); break;
-          case '/api/insights/notes/decide': result = await insights.decideNote(user, body.run_id, body.entry_id, body.approve); break;
+          case '/api/insights/requests/mine': result = { requests: await insights.myRequests(user) }; break;
+          case '/api/insights/requests/answer': result = await insights.answerRequest(user, body.request_id, body.answer, body.authorization); break;
+          case '/api/insights/runs/get': result = insights.runStatus(body.run_id); break;
+          case '/api/insights/runs/preview': result = await insights.getPreview(user, body.run_id); break;
+          case '/api/insights/runs/decide': result = await insights.decide(user, body.run_id, body.approval); break;
           case '/api/insights/receipts': result = { receipts: await insights.receipts(user) }; break;
           default: res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return;
         }

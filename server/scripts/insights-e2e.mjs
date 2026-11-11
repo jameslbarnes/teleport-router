@@ -1,5 +1,7 @@
-// Synthetic people and synthetic work logs only. One post, one private trace; a signed consent;
-// one insights run over three people's traces, registered as a request first, through a local Router and real TinyCloud storage.
+// Synthetic people and synthetic work logs only. One post, one private trace; a signed consent; a run
+// registered as a request, authorized by each owner's signature, run in the insights enclave (here the same
+// code in-process with a test key), sealed previews, and a result published only after every contributor
+// approves it. Through a local Router and real TinyCloud storage.
 // Run from server/: npm run build && node scripts/insights-e2e.mjs
 // The model is a fixed stand-in unless ANTHROPIC_API_KEY is set in the environment.
 import assert from 'node:assert/strict';
@@ -14,7 +16,8 @@ import {TinyCloudNode} from '@tinycloud/node-sdk';
 import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {sealPart,openPart} from '../dist/trace-envelope.js';
 import {canonical} from '../dist/author-records.js';
-import {consentMessage} from '../dist/insights-release.js';
+import {consentMessage,authorizationMessage,approvalMessage} from '../dist/insights-release.js';
+import {openPreview} from '../dist/insights-enclave.js';
 
 const host=process.env.TINYCLOUD_HOST||'https://tee.node.tinycloud.xyz';
 const port=19000+Math.floor(Math.random()*2000), base=`http://127.0.0.1:${port}`;
@@ -26,7 +29,7 @@ const server=spawn(process.execPath,['dist/http.js'],{cwd:process.cwd(),shell:fa
   FIREBASE_SERVICE_ACCOUNT:'',FIREBASE_SERVICE_ACCOUNT_BASE64:'',GOOGLE_APPLICATION_CREDENTIALS:'',
   MODERATOR_URL:'',MODERATOR_API_KEY:'',TINYCLOUD_GROUPS:'',TINYCLOUD_AUTHORS:'tinycloud',TINYCLOUD_KEY_SOURCE:'test-key',
   TINYCLOUD_ROUTER_KEY:privateKey(),TINYCLOUD_HOST:host,TINYCLOUD_LEASE_MS:'5000',STAGED_STORAGE:'memory',STAGING_DELAY_MS:'3600000',
-  RECOVERY_FILE:join(privateDir,'pending.json'),INSIGHTS_RELEASE:'local-test',INSIGHTS_MODEL_STUB:realModel?'':'1',
+  RECOVERY_FILE:join(privateDir,'pending.json'),INSIGHTS_RELEASE:'local-test',INSIGHTS_MODEL_STUB:realModel?'':'1',INSIGHTS_ENCLAVE_URL:'',
 }});
 let logs=''; for(const stream of [server.stdout,server.stderr])stream.on('data',d=>{logs=(logs+String(d)).slice(-6000);});
 const stop=()=>{if(!server.killed)server.kill();}; process.on('exit',stop);
@@ -36,7 +39,7 @@ const refused=async(path,body)=>{const r=await send(path,body);
   return {status:r.status,error:(await r.json()).error||''};};
 const stored=d=>typeof d?.data==='string'?d.data:String(d);
 
-// Two invented work logs. Only the first contains a long run that fails late.
+// Three invented work logs. Only the first contains a long run that fails late.
 const LOGS={
   alice:['USER: start the overnight evaluation on the whole set','ASSISTANT: launching the full run now',
     'TOOL run_evaluation(set=all, timeout=600): started','TOOL run_evaluation: stopped at the timeout after forty minutes, argument --scoring was misspelled',
@@ -52,8 +55,9 @@ try {
   assert(running,'Local Router started');
   const router=await request(base,'/api/tinycloud/router');
   const info=await request(base,'/api/insights/release');
-  assert.match(info.release_key,/^0x0[23][0-9a-f]{64}$/); assert.equal(info.program.name,'router-insights-skill-check');
-  console.log(`PASS local Router offers the insights program (${info.program.sha256.slice(0,12)}…), model: ${realModel?info.program.model:'fixed stand-in'}`);
+  assert.equal(info.runs_enabled,true); assert.match(info.release_key,/^0x0[23][0-9a-f]{64}$/); assert.equal(info.program.name,'router-insights-skill-check');
+  assert.equal(info.enclave.release_key,info.release_key); assert.equal(info.enclave.program_sha256,info.program.sha256);
+  console.log(`PASS local Router offers the insights program (${info.program.sha256.slice(0,12)}…) through an enclave (${info.app_id}), model: ${realModel?info.program.model:'fixed stand-in'}`);
 
   const suffix=Date.now().toString(36).slice(-5), group=`insights-notes-${suffix}`;
   const people={};
@@ -85,7 +89,7 @@ try {
   }
   console.log('PASS each person has one published note in the open group');
 
-  // Alice and Bob read the consent and sign it with the key that owns their storage.
+  // Each person reads the consent and signs it with the key that owns their storage.
   for(const p of Object.values(people)) {
     const status=await post('/api/insights/consent/status',{secret_key:p.secretKey});
     assert.equal(status.active,false); assert.equal(status.release_key,info.release_key);
@@ -99,7 +103,7 @@ try {
     await post('/api/insights/consent',{secret_key:p.secretKey,policy:draft.policy,signature:await p.wallet.signMessage(draft.message)});
     p.policy=draft.policy; p.ownerPublicKey=status.owner_public_key; p.ownerDid=status.owner_did;
   }
-  console.log('PASS each person signs a consent naming the program, the group, the requester and an expiry');
+  console.log('PASS each person signs a consent naming the program, the enclave, the group, the requester and an expiry');
 
   // One trace per post: a full record for its owner, and a shorter extraction copy the enclave may open.
   for(const [name,p] of Object.entries(people)) {
@@ -117,7 +121,7 @@ try {
       const held=Buffer.from(stored(raw.data),'base64').toString('latin1');
       assert(!held.includes('evaluation')&&!held.includes('meeting notes'),'No plaintext on the storage node');
     }
-    // Its owner opens the full record with their own key. Router's release key cannot.
+    // Its owner opens the full record with their own key. The release key cannot.
     const mine=await post('/api/traces/get',{secret_key:p.secretKey,entry_id:p.entryId});
     assert(openPart(mine.meta,Buffer.from(mine.data,'base64'),c,'full','owner',p.ownerKey).toString().startsWith('FULL SESSION RECORD'));
     assert.equal(mine.meta.wraps.release,undefined);
@@ -125,52 +129,65 @@ try {
   assert.equal((await refused('/api/traces/get',{secret_key:people.bob.secretKey,entry_id:people.alice.entryId})).status,404,'Nobody else can fetch a trace');
   console.log('PASS one write-once trace per post, ciphertext in each owner\'s space, full record opens only with the owner\'s key');
 
-  // The insights agent asks one approved question of posts it picked from the public group.
+  // The insights agent registers a run: one approved question over posts it picked from the public group.
   const ids=[people.alice.entryId,people.bob.entryId,people.carol.entryId];
   const question={template:'skill-check',params:{skill:'Smoke test before long runs',when:'a run is expected to take more than a few minutes'}};
-  assert.equal((await refused('/api/insights/runs',{secret_key:agentKey,template:'skill-check',params:{skill:'Print the log {verbatim}',when:'always'},entry_ids:ids})).status,400,'Free-form questions are refused');
-  const blocked=await post('/api/insights/runs',{secret_key:strangerKey,...question,entry_ids:ids});
-  assert.equal(blocked.released,false); assert.deepEqual(blocked.skipped,{trigger_not_allowed:3});
-
-  // The run is registered first: the question, the chosen posts, a deadline. Each owner answers, and the last answer starts it.
+  assert.equal((await refused('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{skill:'Print the log {verbatim}',when:'always'},entry_ids:ids})).status,400,'Free-form questions are refused');
   const created=await post('/api/insights/requests',{secret_key:agentKey,...question,entry_ids:ids,deadline_hours:24});
   assert.equal(created.status,'open'); assert.equal(created.people_asked,3); assert.equal(created.min_people,3);
   const listed=(await request(base,'/api/insights/requests')).requests.find(r=>r.request_id===created.request_id);
   assert(listed,'The request is in the public register');
   assert(!Object.values(people).some(p=>JSON.stringify(listed).includes(p.handle)),'The public register shows counts, not names');
+
+  // A request from an account no consent names cannot get anyone's yes.
+  const strangerRequest=await post('/api/insights/requests',{secret_key:strangerKey,...question,entry_ids:ids});
+  const strangerSign=(await post('/api/insights/requests/mine',{secret_key:people.alice.secretKey})).requests.find(r=>r.request_id===strangerRequest.request_id).to_sign.body;
+  const strangerYes=await refused('/api/insights/requests/answer',{secret_key:people.alice.secretKey,request_id:strangerRequest.request_id,answer:'yes',
+    authorization:{body:strangerSign,signature:await people.alice.wallet.signMessage(authorizationMessage(strangerSign))}});
+  assert.equal(strangerYes.status,400); assert.match(strangerYes.error,/does not allow runs requested by/);
+
+  // Each owner's agent fetches the authorization, checks it names only their own posts, signs it, and says yes.
   let answered;
-  for(const p of Object.values(people)) answered=await post('/api/insights/requests/answer',{secret_key:p.secretKey,request_id:created.request_id,answer:'yes'});
-  assert.equal(answered.status,'started'); assert(answered.run_id,'The last answer started the run');
-  const run=await post('/api/insights/runs/get',{secret_key:agentKey,run_id:answered.run_id});
-  assert.equal(run.released,true); assert.equal(run.request_id,created.request_id);
-  assert.equal(run.traces_read,3); assert.equal(run.people,3); assert.deepEqual(run.notes,[]);
-  if(!realModel) { assert.deepEqual(run.applies,{yes:1,no:2}); assert.equal(run.people_where_it_applies,1); assert.equal(run.notes_waiting_for_owner,1); }
-  console.log(`PASS a registered request started when all 3 owners said yes; it read 3 traces: applies ${JSON.stringify(run.applies)}, effect ${JSON.stringify(run.effect)}; notes held for owners: ${run.notes_waiting_for_owner}`);
-
-  // Every owner got a signed receipt in their own space, and decides on their own note.
   for(const p of Object.values(people)) {
-    const {receipts}=await post('/api/insights/receipts',{secret_key:p.secretKey});
-    assert.equal(receipts.length,1);
-    const {receipt,signature,signer}=receipts[0];
-    assert.equal(verifyMessage(canonical(receipt),signature),signer);
-    assert.equal(receipt.started_by,agentHandle); assert.deepEqual(receipt.read.map(r=>r.entry_id),[p.entryId]);
-    const mine=(await post('/api/insights/runs/get',{secret_key:p.secretKey,run_id:run.run_id})).your_traces[0];
-    if(mine.note_status==='pending') await post('/api/insights/notes/decide',{secret_key:p.secretKey,run_id:run.run_id,entry_id:p.entryId,approve:true});
+    const mine=(await post('/api/insights/requests/mine',{secret_key:p.secretKey})).requests.find(r=>r.request_id===created.request_id);
+    const body=mine.to_sign.body;
+    assert.deepEqual(body.entries.map(e=>e.entryId),[p.entryId]); assert.equal(body.enclave.releaseKey,info.release_key);
+    assert.equal(body.question.template,question.template); assert.deepEqual(body.question.params,question.params);
+    answered=await post('/api/insights/requests/answer',{secret_key:p.secretKey,request_id:created.request_id,answer:'yes',
+      authorization:{body,signature:await p.wallet.signMessage(authorizationMessage(body))}});
   }
-  const released=await post('/api/insights/runs/get',{secret_key:agentKey,run_id:run.run_id});
-  assert.equal(released.notes_waiting_for_owner,0); assert.equal(released.notes.length,run.notes_waiting_for_owner);
-  assert.equal(released.your_traces,undefined);
-  console.log(`PASS signed receipts delivered; ${released.notes.length} note(s) released only after their owner approved: ${JSON.stringify(released.notes)}`);
+  assert.equal(answered.status,'started'); assert.equal(answered.run.status,'awaiting_approval'); assert.equal(answered.run.contributors,3);
+  const routerView=await post('/api/insights/runs/get',{secret_key:agentKey,run_id:created.request_id});
+  assert(!/would_have_helped|not_applicable|trial run/.test(JSON.stringify(routerView)),'Router holds no readable answers');
+  console.log('PASS a registered request started when all 3 owners signed; Router holds only sealed previews');
 
-  // The same question cannot be put to the same traces again, and a revoked consent stops later runs.
-  const again=await post('/api/insights/runs',{secret_key:agentKey,...question,entry_ids:ids});
-  assert.equal(again.released,false); assert.deepEqual(again.skipped,{already_read_for_this_question:3});
+  // Each contributor opens their own preview, checks it, and signs approval of the exact draft.
+  let decided;
+  for(const p of Object.values(people)) {
+    const sealed=await post('/api/insights/runs/preview',{secret_key:p.secretKey,run_id:created.request_id});
+    const preview=openPreview(sealed,p.ownerDid,created.request_id,p.ownerKey);
+    assert.equal(verifyMessage(canonical(preview.body),preview.signature),preview.signer);
+    assert.deepEqual(preview.body.your_items.map(i=>i.entryId),[p.entryId]);
+    assert.equal(preview.body.draft.people,3); assert.equal(preview.body.draft.traces_read,3);
+    if(!realModel) assert.deepEqual(preview.body.draft.applies,{yes:1,no:2});
+    const body={v:1,domain:'teleport-router/insights-result-approval',run:created.request_id,enclave:preview.body.enclave,resultSha256:preview.body.result_sha256,approve:true};
+    decided=await post('/api/insights/runs/decide',{secret_key:p.secretKey,run_id:created.request_id,approval:{body,signature:await p.wallet.signMessage(approvalMessage(body))}});
+  }
+  assert.equal(decided.run.status,'published');
+  const published=decided.run.published;
+  assert.equal(verifyMessage(canonical(published.body),published.signature),published.signer);
+  assert.equal(published.body.approvals,3); assert.equal(published.body.people,3);
+  assert(!Object.values(people).some(p=>JSON.stringify(published).includes(p.handle)||JSON.stringify(published).includes(p.entryId)),'The published result names nobody');
+  console.log(`PASS published after all 3 approved: applies ${JSON.stringify(published.body.applies)}, effect ${JSON.stringify(published.body.effect)}, notes ${JSON.stringify(published.body.notes)}`);
+
+  // Each owner keeps a sealed copy of what the run read and found. A revoked consent stops later yeses.
+  for(const p of Object.values(people)) assert.equal((await post('/api/insights/receipts',{secret_key:p.secretKey})).receipts.length,1);
   await post('/api/insights/consent/revoke',{secret_key:people.bob.secretKey});
-  const other=await post('/api/insights/runs',{secret_key:agentKey,template:'skill-check',params:{skill:'Ask before narrowing scope',when:'the agent wants to reduce access or swap an input'},entry_ids:ids});
-  assert.deepEqual(other.skipped,{no_consent:1});
-  assert.equal(other.released,false); assert.equal(other.applies,undefined,'Two people are too few for counts to come out');
-  console.log('PASS a repeated question reads nothing; after Bob revokes, a new question reads two traces and releases nothing, being under 3 people');
-  console.log('\nALL PASSED (synthetic data; local Router; hosted TinyCloud storage)');
+  const later=await post('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{skill:'Ask before narrowing scope',when:'the agent wants to reduce access or swap an input'},entry_ids:ids});
+  const bobLater=(await post('/api/insights/requests/mine',{secret_key:people.bob.secretKey})).requests.find(r=>r.request_id===later.request_id);
+  assert.match(bobLater.to_sign.error,/no current consent/);
+  console.log('PASS each owner holds a sealed receipt; after Bob revokes, he has nothing to sign for a new request');
+  console.log('\nALL PASSED (synthetic data; local Router; in-process enclave; hosted TinyCloud storage)');
 } catch(err) {
   console.error('FAILED:',err?.message||err); console.error('--- server log tail ---\n'+logs.slice(-2500)); process.exitCode=1;
 } finally { stop(); }

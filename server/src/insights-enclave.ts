@@ -24,36 +24,15 @@ import { randomUUID } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { computeAddress, verifyMessage, Wallet } from 'ethers';
 import { canonical } from './author-records.js';
-import { checkUpgradePolicy, consentMessage, insightsProgram, MIN_PEOPLE, parseAnswer, type InsightsPolicy, type UpgradePolicy } from './insights-release.js';
+import { approvalMessage, authorizationMessage, AUTHORIZATION_MAX_MS, checkUpgradePolicy, consentMessage, insightsProgram, MIN_PEOPLE, parseAnswer, questionSha256,
+  type InsightsPolicy, type ResultApproval, type RunAuthorization, type UpgradePolicy } from './insights-release.js';
 import { checkPartMeta, compressPublicKey, openPart, publicKeyOf, sealPart, sha256Hex, type PartMeta } from './trace-envelope.js';
 
-const DERIVED_MAX = 400 * 1024, DERIVED_TEXT_MAX = 600_000, MAX_OWNERS = 50, MAX_ENTRIES = 50, AUTH_MAX_MINUTES = 24 * 60;
+const DERIVED_MAX = 400 * 1024, DERIVED_TEXT_MAX = 600_000, MAX_OWNERS = 50, MAX_ENTRIES = 50;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 const didAddress = (did: unknown) => typeof did === 'string' ? /^did:pkh:eip155:1:(0x[\da-fA-F]{40})$/.exec(did)?.[1]?.toLowerCase() : undefined;
 
-/** What an owner signs to let one run read some of their traces. */
-export interface RunAuthorization {
-  v: 1; domain: 'teleport-router/insights-run-authorization';
-  run: string;
-  enclave: { appId: string; releaseKey: string };
-  policyId: string;
-  question: { template: string; params: Record<string, string>; sha256: string };
-  entries: { entryId: string; derivedSha256: string }[];
-  expiresAt: string;
-}
-export const authorizationMessage = (a: RunAuthorization) => 'Teleport Router: allow one insights run to read these traces\n\n' + canonical(a);
-
-/** What a contributor signs to approve, or veto, publishing one exact result. */
-export interface ResultApproval {
-  v: 1; domain: 'teleport-router/insights-result-approval';
-  run: string; enclave: { appId: string; releaseKey: string }; resultSha256: string; approve: boolean;
-}
-export const approvalMessage = (a: ResultApproval) => 'Teleport Router: decide whether this insights result may be published\n\n' + canonical(a);
-
-/** The question's identity, the same way Router computes it. */
-export function questionSha256(programSha256: string, template: string, params: Record<string, string>) {
-  return sha256Hex(canonical({ program: programSha256, template, params }));
-}
+export { authorizationMessage, approvalMessage, questionSha256, type RunAuthorization, type ResultApproval } from './insights-release.js';
 
 export interface EnclaveDeps {
   releasePrivateKey: string; appId: string; model: string; upgrades?: UpgradePolicy;
@@ -117,7 +96,7 @@ export function insightsEnclave(deps: EnclaveDeps) {
     if (a.question?.sha256 !== question.sha256 || a.question?.template !== question.template || canonical(a.question?.params ?? null) !== canonical(question.params))
       throw new Error('The authorization is for a different question.');
     const expires = Date.parse(a.expiresAt);
-    if (!(expires > now()) || expires - now() > AUTH_MAX_MINUTES * 60_000) throw new Error('The authorization has expired or lasts too long.');
+    if (!(expires > now()) || expires - now() > AUTHORIZATION_MAX_MS) throw new Error('The authorization has expired or lasts too long.');
     if (!Array.isArray(a.entries) || !a.entries.length || a.entries.length > p.limits.maxTracesPerRun) throw new Error('The authorization lists too many or no entries.');
     const allowed = new Map(a.entries.map(e => [e.entryId, e.derivedSha256]));
     return { address, publicKey, policy: p, allowed };

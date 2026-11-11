@@ -1,38 +1,43 @@
-/** Private traces behind posts, and the insights runs that may read them.
+/** Private traces behind posts, and the insights runs that may read them: Router's side.
  *
  * One post has at most one trace, written once. The `full` part opens only with the owner's
- * key. The `derived` part also opens with this enclave's release key, and the enclave uses
- * that key only under a consent the owner signed: a named program, a scope of posts, the
- * accounts that may start a run, the outside model, and an expiry.
+ * key. The `derived` extraction copy also opens with the insights enclave's release key. The
+ * enclave is a separate small app in its own CVM (insights-enclave.ts): it holds the release key
+ * and runs the extraction. Router keeps storage, consents and run requests, and hands the enclave
+ * ciphertext for one run at a time. Router never holds the release key and the enclave never gets
+ * storage access, so reading a trace needs both.
  *
- * Who can change the code that holds the release key is a deployment matter: the key comes from
- * the enclave's key service and follows the app identity. The consent names the upgrade policy
- * the deployment declares: the operator (local tests), or a public timelock on the app's
- * contract (the MVP's own app, decided Nov 11). This module cannot check that policy from
- * inside; an owner's agent checks the attestation and the contract on chain.
+ * A consent, signed with the key that owns the person's storage, names the program, the enclave,
+ * its upgrade policy (the operator for now; later a public timelock on the app's contract), the
+ * outside model, the accounts that may request runs, and an expiry. It is checked again on every
+ * use. A run is registered first: a request names the question, the chosen posts and a deadline.
+ * Each owner's agent answers no, or yes with an authorization signed by the same key, naming the
+ * enclave, the consent, the question, the request and each entry with its ciphertext hash. The
+ * enclave checks all of it again before opening anything, because Router assembles the run.
  *
- * Runs are registered before they start: a request names the question, the chosen posts and
- * a deadline, each owner answers yes or no, and the run starts when everyone has answered, or
- * at the deadline if enough agreed. Nothing about anyone's answers comes out of a run that read
- * fewer than MIN_PEOPLE people's traces.
+ * The run starts when everyone has answered, or at the deadline if at least MIN_PEOPLE agreed. A
+ * decline counts as an answer. Each contributor gets a preview sealed to their own key; Router
+ * stores it in their space and cannot read it. Nothing is published until every contributor signs
+ * approval of the exact result, and nothing at all from fewer than MIN_PEOPLE people.
  */
 import { randomUUID } from 'node:crypto';
-import { gunzipSync } from 'node:zlib';
-import { verifyMessage, Wallet } from 'ethers';
+import { verifyMessage } from 'ethers';
 import { canonical } from './author-records.js';
 import type { AuthorBinding } from './author-store.js';
 import { GroupStoreConflictError, type GroupStore } from './group-store.js';
 import type { JournalEntry, User } from './storage.js';
-import { checkPartMeta, compressPublicKey, openPart, publicKeyOf, sha256Hex, type PartMeta, type TraceContext } from './trace-envelope.js';
+import { checkPartMeta, compressPublicKey, sha256Hex, type PartMeta } from './trace-envelope.js';
 
 const CHUNK = 180_000;            // base64 characters per stored value
 const FULL_MAX = 6 * 1024 * 1024; // ciphertext bytes
 const DERIVED_MAX = 400 * 1024;
 const DERIVED_TEXT_MAX = 600_000; // characters after decompression
 const NOTE_MAX = 240, OVERLAP_WORDS = 6, MAX_ENTRIES_PER_RUN = 50, MAX_CONSENT_DAYS = 90;
-/** Fewer people than this and a run releases nothing about their answers. */
+/** Fewer people than this and nothing about a run's answers is ever published. */
 export const MIN_PEOPLE = 3;
 const REQUEST_HOURS_DEFAULT = 48, REQUEST_HOURS_MAX = 168, REQUESTS_KEPT = 200;
+/** An authorization must last until its request's deadline, and never longer than this. */
+export const AUTHORIZATION_MAX_MS = (REQUEST_HOURS_MAX + 24) * 3600_000;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 const groupId = (g: unknown): g is string => typeof g === 'string' && /^[a-z0-9][a-z0-9-]{1,40}$/.test(g);
 
@@ -60,16 +65,20 @@ export function insightsProgram(model: string) {
           applies: ['yes', 'no', 'unclear'],
           effect: ['would_have_helped', 'already_followed', 'would_not_have_helped', 'not_applicable', 'unclear'],
           cost: ['none', 'minutes', 'tens_of_minutes', 'hours', 'unclear'],
-          note: { maxChars: NOTE_MAX, releasedOnlyAfterOwnerApproval: true, rejectedIfItSharesWordsInARowWithTheLog: OVERLAP_WORDS },
+          note: { maxChars: NOTE_MAX, rejectedIfItSharesWordsInARowWithTheLog: OVERLAP_WORDS },
         },
       },
     },
     limits: { derivedMaxBytes: DERIVED_MAX, derivedTextMaxChars: DERIVED_TEXT_MAX, entriesPerRun: MAX_ENTRIES_PER_RUN, eachTraceReadOncePerQuestion: true, minPeopleToRelease: MIN_PEOPLE },
-    released: `Nothing from a run that read fewer than ${MIN_PEOPLE} people's traces. Otherwise counts by answer, at once, and notes only after their owner approves each one. A signed receipt goes to every owner whose trace was read.`,
+    released: `Each contributor gets their own answers and the draft result, sealed to them. Nothing is published from a run that read fewer than ${MIN_PEOPLE} people's traces, and a result (counts and notes) is published only after every contributor signs approval of its exact text. One veto stops it.`,
   };
   return { ...spec, sha256: sha256Hex(canonical(spec)) };
 }
 export type InsightsProgram = ReturnType<typeof insightsProgram>;
+
+/** The question's identity, computed the same way by Router, the enclave and owners' clients. */
+export const questionSha256 = (programSha256: string, template: string, params: Record<string, string>) =>
+  sha256Hex(canonical({ program: programSha256, template, params }));
 
 /** Who can put new code behind the release key, as the deployment declares it. */
 export type UpgradePolicy =
@@ -104,29 +113,25 @@ export interface InsightsPolicy {
   issuedAt: string; expiresAt: string;
 }
 export interface InsightsConsentRecord { policy: InsightsPolicy; signature: string; savedAt: number; revokedAt?: number }
-type ConsentUser = User & { insightsConsent?: InsightsConsentRecord };
-type StoredPart = PartMeta & { chunks: number };
-/** `upload` names the chunk set this record points to. Records written before it existed keep their chunks directly under the post. */
-interface TraceRecord { v: 1; entryId: string; ownerDid: string; createdAt: number; upload?: string; full: StoredPart; derived?: StoredPart & { policyId: string } }
-const chunkKey = (entryId: string, upload: string | undefined, part: string, i: number) =>
-  `traces/${entryId}/${upload ? upload + '/' : ''}${part}-${String(i).padStart(3, '0')}`;
-type Answer = { applies: string; effect: string; cost: string };
-interface RunItem { entryId: string; owner: string; traceSha256: string; answer: Answer; note: string; noteStatus: 'none' | 'pending' | 'approved' | 'withheld' }
-interface RunRecord {
-  runId: string; at: string; trigger: string; template: string; params: Record<string, string>; questionSha256: string;
-  program: { name: string; version: number; sha256: string }; build: { gitSha: string | null; imageDigest: string | null };
-  items: RunItem[]; skipped: Record<string, number>; requestId?: string;
+
+/** What an owner signs to let one run read some of their traces. */
+export interface RunAuthorization {
+  v: 1; domain: 'teleport-router/insights-run-authorization';
+  run: string;
+  enclave: { appId: string; releaseKey: string };
+  policyId: string;
+  question: { template: string; params: Record<string, string>; sha256: string };
+  entries: { entryId: string; derivedSha256: string }[];
+  expiresAt: string;
 }
-type RequestStatus = 'open' | 'started' | 'not_enough_people' | 'expired' | 'failed';
-/** A run registered before it starts. Who answered what stays private; only counts are public. */
-interface RunRequest {
-  requestId: string; createdAt: string; createdBy: string; template: string; params: Record<string, string>; questionSha256: string;
-  program: { name: string; version: number; sha256: string };
-  entries: { entryId: string; owner: string }[];
-  minPeople: number; deadline: string;
-  answers: Map<string, { answer: 'yes' | 'no'; at: string }>;
-  status: RequestStatus; runId: string | null; closedAt: string | null;
+export const authorizationMessage = (a: RunAuthorization) => 'Teleport Router: allow one insights run to read these traces\n\n' + canonical(a);
+
+/** What a contributor signs to approve, or veto, publishing one exact result. */
+export interface ResultApproval {
+  v: 1; domain: 'teleport-router/insights-result-approval';
+  run: string; enclave: { appId: string; releaseKey: string }; resultSha256: string; approve: boolean;
 }
+export const approvalMessage = (a: ResultApproval) => 'Teleport Router: decide whether this insights result may be published\n\n' + canonical(a);
 
 /** The text an owner signs. Deterministic, so the server and any client derive the same bytes. */
 export function consentMessage(p: InsightsPolicy): string {
@@ -134,7 +139,7 @@ export function consentMessage(p: InsightsPolicy): string {
     'Teleport Router: permission to read my private traces for insights',
     '',
     `I am @${p.owner.handle} (${p.owner.did}).`,
-    'I allow the program below to read the extraction copy of the private traces behind my posts.',
+    'I allow the program below to read the extraction copy of the private traces behind my posts, in runs I authorize one at a time.',
     '',
     `Program: ${p.program.name} v${p.program.version}`,
     `Program SHA-256: ${p.program.sha256}`,
@@ -142,9 +147,9 @@ export function consentMessage(p: InsightsPolicy): string {
     `Enclave release key: ${p.enclave.releaseKey}`,
     upgradesLine(p.enclave.upgrades),
     `May read: traces of my published posts in ${p.scope.groups.map(g => '#' + g).join(', ')}`,
-    `May be started by: ${p.triggers.map(t => `@${t.handle} [${t.keyId}]`).join(', ')}`,
+    `May be requested by: ${p.triggers.map(t => `@${t.handle} [${t.keyId}]`).join(', ')}`,
     `Leaves the enclave during a run: the trace text, sent to the ${p.egress.provider} (model ${p.egress.model})`,
-    'Comes out: counts at once; a written note only after I approve it; a signed receipt to me for every read',
+    `Comes out: my own answers and the draft result, sealed to me; a published result only with ${MIN_PEOPLE} or more people, after every contributor approves it`,
     `Limits: at most ${p.limits.maxTracesPerRun} of my traces per run; each trace read once per question`,
     `Valid from ${p.issuedAt} until ${p.expiresAt}. I can revoke it at any time; revoking stops later runs only.`,
     `Policy ID: ${p.policyId}`,
@@ -152,30 +157,64 @@ export function consentMessage(p: InsightsPolicy): string {
   ].join('\n');
 }
 
+/** What the enclave says about itself. Its attestation binds these fields. */
+export interface EnclaveInfo { release_key: string; app_id: string; program_sha256: string; upgrades: UpgradePolicy; min_people: number; [field: string]: unknown }
+export interface SealedPreview { did: string; meta: PartMeta; ciphertext: string }
+export interface EnclaveClient {
+  info(): Promise<EnclaveInfo>;
+  run(input: unknown): Promise<{ run: string; status: string; result_sha256: string | null; contributors: number; skipped: Record<string, number>; previews: SealedPreview[] }>;
+  decide(input: unknown): Promise<{ run: string; status: string; published?: unknown }>;
+}
+
+type ConsentUser = User & { insightsConsent?: InsightsConsentRecord };
+type StoredPart = PartMeta & { chunks: number };
+/** `upload` names the chunk set this record points to. Records written before it existed keep their chunks directly under the post. */
+interface TraceRecord { v: 1; entryId: string; ownerDid: string; createdAt: number; upload?: string; full: StoredPart; derived?: StoredPart & { policyId: string } }
+const chunkKey = (entryId: string, upload: string | undefined, part: string, i: number) =>
+  `traces/${entryId}/${upload ? upload + '/' : ''}${part}-${String(i).padStart(3, '0')}`;
+type RequestStatus = 'open' | 'started' | 'not_enough_people' | 'expired' | 'failed';
+type SignedAuthorization = { body: RunAuthorization; signature: string };
+/** A run registered before it starts. Who answered what stays private; only counts are public. */
+interface RunRequest {
+  requestId: string; createdAt: string; createdBy: string; template: string; params: Record<string, string>; questionSha256: string;
+  program: { name: string; version: number; sha256: string };
+  entries: { entryId: string; owner: string }[];
+  minPeople: number; deadline: string;
+  answers: Map<string, { answer: 'yes' | 'no'; at: string; authorization?: SignedAuthorization }>;
+  status: RequestStatus; closedAt: string | null;
+  run: { status: string; resultSha256: string | null; contributors: string[]; skipped: Record<string, number>; published: unknown | null } | null;
+}
+
 export interface ReleaseDeps {
-  /** Null stores and returns owner-only traces but never drafts a consent, opens a trace or runs anything. */
-  releasePrivateKey: string | null; appId: string; baseUrl: string;
-  build: { gitSha: string | null; imageDigest: string | null };
+  /** The insights enclave, and what it said about itself at startup. Null: owner-only traces, no consents or runs. */
+  enclave: { client: EnclaveClient; info: EnclaveInfo } | null;
+  baseUrl: string;
+  /** The model the program names. The enclave must run the same program, or runs stay off. */
   model: string;
-  /** Who can put new code behind the release key. Consents name it; the default is the operator. */
-  upgrades?: UpgradePolicy;
   getUser(handle: string): Promise<User | null>;
   updateUser(handle: string, updates: Record<string, unknown>): Promise<User | null>;
   getEntry(id: string): Promise<JournalEntry | null>;
   storeFor(binding: AuthorBinding): Promise<GroupStore>;
-  /** One model call. Null when no model is configured: runs are then refused. */
-  complete: ((args: { model: string; system: string; user: string; maxTokens: number }) => Promise<string>) | null;
   now?: () => number;
 }
 
 export function insightsRelease(deps: ReleaseDeps) {
   const now = deps.now || Date.now;
   const program = insightsProgram(deps.model);
-  const releaseKey = deps.releasePrivateKey ? publicKeyOf(deps.releasePrivateKey) : null;
-  const signer = deps.releasePrivateKey ? new Wallet(deps.releasePrivateKey) : null;
-  const needRelease = () => { if (!releaseKey || !signer || !deps.releasePrivateKey) throw new Error('Insights runs are not enabled on this server.'); return { releaseKey, signer, privateKey: deps.releasePrivateKey }; };
-  const upgrades = checkUpgradePolicy(deps.upgrades || { by: 'operator' });
-  const runs = new Map<string, RunRecord>();
+  // Runs are on only when the enclave runs this same program with a well-formed key and policy.
+  let enclave: { client: EnclaveClient; releaseKey: string; appId: string; upgrades: UpgradePolicy } | null = null;
+  let enclaveProblem: string | null = deps.enclave ? null : 'no enclave configured';
+  if (deps.enclave) {
+    const info = deps.enclave.info;
+    try {
+      if (info.program_sha256 !== program.sha256) throw new Error('the enclave runs a different program');
+      if (typeof info.release_key !== 'string' || !/^0x0[23][0-9a-f]{64}$/.test(info.release_key)) throw new Error('the enclave reported no valid release key');
+      if (!validId(info.app_id)) throw new Error('the enclave reported no app id');
+      enclave = { client: deps.enclave.client, releaseKey: info.release_key, appId: info.app_id, upgrades: checkUpgradePolicy(info.upgrades) };
+    } catch (err) { enclaveProblem = err instanceof Error ? err.message : String(err); }
+  }
+  const releaseKey = enclave?.releaseKey ?? null;
+  const needEnclave = () => { if (!enclave) throw new Error('Insights runs are not enabled on this server.'); return enclave; };
   const requests = new Map<string, RunRequest>();
   const iso = (t: number) => new Date(t).toISOString();
   const keyId = (user: User) => user.secretKeyHash.slice(0, 16);
@@ -186,18 +225,17 @@ export function insightsRelease(deps: ReleaseDeps) {
     if (!b || b.minRecordVersion !== 2 || !b.ownerPublicKey) throw new Error('Connect your own encrypted storage first. Traces are kept only there.');
     return b as AuthorBinding & { ownerPublicKey: string };
   }
-  const context = (b: AuthorBinding, entryId: string): TraceContext => ({ ownerDid: b.ownerDid, entryId });
 
   function consentState(user: ConsentUser): { active: true; policy: InsightsPolicy } | { active: false; reason: string } {
     const record = user.insightsConsent;
-    if (!releaseKey) return { active: false, reason: 'runs_not_enabled' };
+    if (!enclave) return { active: false, reason: 'runs_not_enabled' };
     if (!record) return { active: false, reason: 'none' };
     if (record.revokedAt) return { active: false, reason: 'revoked' };
     const p = record.policy;
     if (Date.parse(p.expiresAt) <= now()) return { active: false, reason: 'expired' };
     if (p.program.sha256 !== program.sha256) return { active: false, reason: 'program_changed' };
-    if (p.enclave.releaseKey !== releaseKey || p.enclave.appId !== deps.appId) return { active: false, reason: 'enclave_changed' };
-    if (canonical(p.enclave.upgrades ?? null) !== canonical(upgrades)) return { active: false, reason: 'upgrade_policy_changed' };
+    if (p.enclave.releaseKey !== enclave.releaseKey || p.enclave.appId !== enclave.appId) return { active: false, reason: 'enclave_changed' };
+    if (canonical(p.enclave.upgrades ?? null) !== canonical(enclave.upgrades)) return { active: false, reason: 'upgrade_policy_changed' };
     // The stored record is checked again on every use, not only when it was saved: whoever holds the
     // account records must not be able to widen or invent a consent.
     if (!user.tinycloud || p.owner?.handle !== user.handle || p.owner?.did !== user.tinycloud.ownerDid || !signedByOwner(record)) return { active: false, reason: 'bad_signature' };
@@ -217,7 +255,7 @@ export function insightsRelease(deps: ReleaseDeps) {
     return ok;
   }
 
-  /** The fixed question a run or request asks, and the published posts it would read. */
+  /** The fixed question a request asks, and the published posts it would read. */
   function parseQuestion(input: { template?: unknown; params?: unknown; entry_ids?: unknown }) {
     const name = input.template;
     const template = typeof name === 'string' ? program.templates[name as keyof typeof program.templates] : undefined;
@@ -231,7 +269,7 @@ export function insightsRelease(deps: ReleaseDeps) {
     }
     const ids = Array.isArray(input.entry_ids) ? [...new Set(input.entry_ids)] : [];
     if (!ids.length || ids.length > MAX_ENTRIES_PER_RUN || !ids.every(validId)) throw new Error(`entry_ids must list 1 to ${MAX_ENTRIES_PER_RUN} posts`);
-    return { name, template, params, ids: ids as string[], questionSha256: sha256Hex(canonical({ program: program.sha256, template: name, params })) };
+    return { name, params, ids: ids as string[], questionSha256: questionSha256(program.sha256, name, params) };
   }
 
   function publicRequest(r: RunRequest) {
@@ -240,87 +278,8 @@ export function insightsRelease(deps: ReleaseDeps) {
       question_sha256: r.questionSha256, program: r.program, posts: r.entries.map(e => e.entryId),
       people_asked: new Set(r.entries.map(e => e.owner)).size, answered: answers.length,
       agreed: answers.filter(a => a.answer === 'yes').length, min_people: r.minPeople, deadline: r.deadline,
-      status: r.status, run_id: r.runId, closed_at: r.closedAt };
-  }
-
-  /** Start or close a request once everyone has answered, or at its deadline. A decline counts as an answer. */
-  async function settle(r: RunRequest) {
-    if (r.status !== 'open') return;
-    const owners = [...new Set(r.entries.map(e => e.owner))];
-    const yes = owners.filter(o => r.answers.get(o)?.answer === 'yes');
-    const everyone = owners.every(o => r.answers.has(o));
-    if (!everyone && now() < Date.parse(r.deadline)) return;
-    if (yes.length < r.minPeople) { r.status = everyone ? 'not_enough_people' : 'expired'; r.closedAt = iso(now()); return; }
-    // Set before any await, so two answers arriving together cannot start the run twice.
-    r.status = 'started';
-    try {
-      const trigger = await deps.getUser(r.createdBy);
-      if (!trigger) throw new Error('The requester no longer exists.');
-      const ids = r.entries.filter(e => yes.includes(e.owner)).map(e => e.entryId);
-      const result = await runQuestion(trigger, parseQuestion({ template: r.template, params: r.params, entry_ids: ids }), r.requestId);
-      r.runId = result.run_id;
-    } catch { r.status = 'failed'; }
-    r.closedAt = iso(now());
-  }
-
-  /** One run of one approved question over chosen posts. Reads only what each owner's consent allows. */
-  async function runQuestion(trigger: User, q: ReturnType<typeof parseQuestion>, requestId?: string) {
-    const release = needRelease();
-    if (!deps.complete) throw new Error('No model is configured for insights runs on this server.');
-    const { template, params, ids, questionSha256 } = q;
-    const run: RunRecord = { runId: randomUUID(), at: iso(now()), trigger: trigger.handle, template: q.name, params,
-      questionSha256, program: { name: program.name, version: program.version, sha256: program.sha256 }, build: deps.build, items: [], skipped: {},
-      ...(requestId ? { requestId } : {}) };
-    const skip = (reason: string) => { run.skipped[reason] = (run.skipped[reason] || 0) + 1; };
-    const perOwner = new Map<string, number>();
-    const owners = new Map<string, ConsentUser>();
-
-    for (const entryId of ids) {
-      const entry = await deps.getEntry(entryId);
-      if (!entry || !entry.handle || (entry.publishAt && entry.publishAt > now())) { skip('not_a_published_post'); continue; }
-      const owner = owners.get(entry.handle) || await deps.getUser(entry.handle) as ConsentUser | null;
-      if (!owner?.tinycloud) { skip('no_trace'); continue; }
-      owners.set(owner.handle, owner);
-      const state = consentState(owner);
-      if (!state.active) { skip('no_consent'); continue; }
-      const policy = state.policy;
-      if (!policy.triggers.some(t => t.handle === trigger.handle && t.keyId === keyId(trigger))) { skip('trigger_not_allowed'); continue; }
-      if (!policy.scope.groups.some(g => (entry.to || []).includes('#' + g))) { skip('out_of_scope'); continue; }
-      if ((perOwner.get(owner.handle) || 0) >= policy.limits.maxTracesPerRun) { skip('owner_limit'); continue; }
-      let log = '', traceSha256 = '';
-      try {
-        const store = await deps.storeFor(owner.tinycloud);
-        const record = await traceRecord(store, entryId);
-        if (!record?.derived || record.ownerDid !== owner.tinycloud.ownerDid || record.derived.policyId !== policy.policyId) { skip('no_trace'); continue; }
-        // Read-once per question: repeated or overlapping runs cannot be used to probe one trace.
-        try { await store.put(`insights/reads/${questionSha256.slice(0, 24)}-${entryId}`, run.runId, { ifNoneMatch: '*' }); }
-        catch (err) { if (err instanceof GroupStoreConflictError) { skip('already_read_for_this_question'); continue; } throw err; }
-        const ciphertext = await readPart(store, entryId, 'derived', record.derived, record.upload);
-        const packed = openPart(record.derived, ciphertext, context(owner.tinycloud, entryId), 'derived', 'release', release.privateKey);
-        log = gunzipSync(packed, { maxOutputLength: DERIVED_TEXT_MAX * 4 }).toString('utf8').slice(0, DERIVED_TEXT_MAX);
-        packed.fill(0);
-        traceSha256 = record.derived.sha256;
-      } catch { skip('unreadable_trace'); continue; }
-      perOwner.set(owner.handle, (perOwner.get(owner.handle) || 0) + 1);
-      let item: RunItem;
-      try {
-        const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 400,
-          user: template.user.replace('{skill}', params.skill).replace('{when}', params.when).replace('{log}', () => log) });
-        const parsed = parseAnswer(reply, template.output, log);
-        item = { entryId, owner: owner.handle, traceSha256, answer: parsed.answer, note: parsed.note, noteStatus: parsed.note ? 'pending' : 'none' };
-      } catch { skip('model_failed'); continue; } finally { log = ''; }
-      run.items.push(item);
-    }
-
-    // A read without a delivered receipt releases nothing for that owner.
-    for (const [handle, owner] of owners) {
-      const mine = run.items.filter(i => i.owner === handle);
-      if (!mine.length) continue;
-      try { await writeReceipt(owner, run, mine); }
-      catch { run.items = run.items.filter(i => i.owner !== handle); skip('receipt_failed'); }
-    }
-    runs.set(run.runId, run);
-    return summary(run);
+      status: r.status, closed_at: r.closedAt,
+      run: r.run ? { status: r.run.status, result_sha256: r.run.resultSha256, contributors: r.run.contributors.length, skipped: r.run.skipped, published: r.run.published } : null };
   }
 
   async function readPart(store: GroupStore, entryId: string, part: 'full' | 'derived', meta: StoredPart, upload?: string): Promise<Buffer> {
@@ -337,8 +296,72 @@ export function insightsRelease(deps: ReleaseDeps) {
     return raw === null ? null : JSON.parse(raw);
   }
 
+  /** The authorization an owner would sign for one request: their posts in it that have an extraction copy under their consent. */
+  async function toSign(r: RunRequest, user: ConsentUser): Promise<{ body: RunAuthorization; message: string } | { error: string }> {
+    const e = needEnclave();
+    const state = consentState(user);
+    if (!state.active) return { error: `no current consent (${state.reason.replace(/_/g, ' ')})` };
+    const store = await deps.storeFor(binding(user));
+    const entries: RunAuthorization['entries'] = [];
+    for (const item of r.entries.filter(x => x.owner === user.handle)) {
+      const record = await traceRecord(store, item.entryId);
+      if (record?.derived && record.ownerDid === user.tinycloud!.ownerDid && record.derived.policyId === state.policy.policyId)
+        entries.push({ entryId: item.entryId, derivedSha256: record.derived.sha256 });
+    }
+    if (!entries.length) return { error: 'none of your chosen posts has an extraction copy under your current consent' };
+    const body: RunAuthorization = { v: 1, domain: 'teleport-router/insights-run-authorization', run: r.requestId,
+      enclave: { appId: e.appId, releaseKey: e.releaseKey }, policyId: state.policy.policyId,
+      question: { template: r.template, params: r.params, sha256: r.questionSha256 }, entries,
+      expiresAt: iso(Math.min(Date.parse(r.deadline) + 3600_000, now() + AUTHORIZATION_MAX_MS)) };
+    return { body, message: authorizationMessage(body) };
+  }
+
+  /** Start or close a request once everyone has answered, or at its deadline. A decline counts as an answer. */
+  async function settle(r: RunRequest) {
+    if (r.status !== 'open') return;
+    const owners = [...new Set(r.entries.map(x => x.owner))];
+    const yes = owners.filter(o => r.answers.get(o)?.answer === 'yes');
+    const everyone = owners.every(o => r.answers.has(o));
+    if (!everyone && now() < Date.parse(r.deadline)) return;
+    if (yes.length < r.minPeople) { r.status = everyone ? 'not_enough_people' : 'expired'; r.closedAt = iso(now()); return; }
+    // Set before any await, so two answers arriving together cannot start the run twice.
+    r.status = 'started';
+    try {
+      const e = needEnclave();
+      const inputs: { handle: string; did: string; publicKey: string; consent: { policy: InsightsPolicy; signature: string }; authorization: SignedAuthorization; traces: unknown[] }[] = [];
+      for (const handle of yes) {
+        const user = await deps.getUser(handle) as ConsentUser | null;
+        const authorization = r.answers.get(handle)?.authorization;
+        if (!user?.tinycloud?.ownerPublicKey || !user.insightsConsent || !authorization) continue;
+        const store = await deps.storeFor(user.tinycloud);
+        const traces: unknown[] = [];
+        for (const item of authorization.body.entries) {
+          const record = await traceRecord(store, item.entryId);
+          if (!record?.derived) continue;
+          traces.push({ entryId: item.entryId, meta: record.derived, ciphertext: (await readPart(store, item.entryId, 'derived', record.derived, record.upload)).toString('base64') });
+        }
+        inputs.push({ handle, did: user.tinycloud.ownerDid, publicKey: user.tinycloud.ownerPublicKey,
+          consent: { policy: user.insightsConsent.policy, signature: user.insightsConsent.signature }, authorization, traces });
+      }
+      const out = await e.client.run({ run: r.requestId, template: r.template, params: r.params, owners: inputs.map(i => ({ did: i.did, publicKey: i.publicKey, consent: i.consent, authorization: i.authorization, traces: i.traces })) });
+      // Each contributor's preview goes into their own space, sealed to them.
+      const byDid = new Map(inputs.map(i => [i.did, i]));
+      for (const p of out.previews) {
+        const owner = byDid.get(p.did);
+        const user = owner ? await deps.getUser(owner.handle) : null;
+        if (!user?.tinycloud) continue;
+        await (await deps.storeFor(user.tinycloud)).put(`insights/previews/${r.requestId}`, canonical({ run: r.requestId, at: iso(now()), meta: p.meta, ciphertext: p.ciphertext }));
+      }
+      r.run = { status: out.status, resultSha256: out.result_sha256, contributors: out.previews.map(p => p.did), skipped: out.skipped, published: null };
+    } catch (err) {
+      r.status = 'failed';
+      r.run = { status: 'failed', resultSha256: null, contributors: [], skipped: { [err instanceof Error ? err.message.slice(0, 80) : 'error']: 1 }, published: null };
+    }
+    r.closedAt = iso(now());
+  }
+
   return {
-    program, releaseKey, releaseEnabled: !!releaseKey,
+    program, releaseKey, releaseEnabled: !!enclave,
 
     /** What a capture client needs to encrypt a trace for its owner alone. Both values are public. */
     ownerKey(user: User) {
@@ -346,22 +369,20 @@ export function insightsRelease(deps: ReleaseDeps) {
       return { handle: user.handle, owner_did: b.ownerDid, owner_public_key: compressPublicKey(b.ownerPublicKey), full_max_bytes: FULL_MAX };
     },
 
+    /** Public: the program and the enclave as it described itself, attestation included. Owners' clients check it themselves. */
     info() {
-      return { program, release_key: releaseKey, app_id: deps.appId, git_sha: deps.build.gitSha, image_digest: deps.build.imageDigest,
-        key_binding: upgrades.by === 'timelock'
-          ? `app identity, with new code only through a public ${upgrades.delayHours}-hour timelock on ${upgrades.chain} (timelock ${upgrades.timelock})`
-          : 'app identity: any build the operator deploys can use this key',
-        upgrades, min_people: MIN_PEOPLE, model_configured: !!deps.complete };
+      return { program, runs_enabled: !!enclave, problem: enclaveProblem, release_key: releaseKey, app_id: enclave?.appId ?? null,
+        upgrades: enclave?.upgrades ?? null, min_people: MIN_PEOPLE, enclave: deps.enclave?.info ?? null };
     },
 
     /** A policy for this owner to read and sign. Nothing is saved. */
     async draftPolicy(user: User, input: { groups?: unknown; triggers?: unknown; days?: unknown; max_traces_per_run?: unknown }) {
       const b = binding(user);
-      const { releaseKey } = needRelease();
+      const e = needEnclave();
       const groups = Array.isArray(input.groups) && input.groups.length ? input.groups : ['insights-notes'];
       if (groups.length > 8 || !groups.every(groupId)) throw new Error('groups must be up to 8 group IDs');
       const handles = Array.isArray(input.triggers) ? input.triggers : [];
-      if (!handles.length || handles.length > 8 || !handles.every(h => typeof h === 'string')) throw new Error('triggers must name 1 to 8 accounts that may start a run');
+      if (!handles.length || handles.length > 8 || !handles.every(h => typeof h === 'string')) throw new Error('triggers must name 1 to 8 accounts that may request a run');
       const triggers: InsightsPolicy['triggers'] = [];
       for (const handle of handles as string[]) {
         const found = await deps.getUser(handle.replace(/^@/, ''));
@@ -377,7 +398,7 @@ export function insightsRelease(deps: ReleaseDeps) {
         v: 1, domain: 'teleport-router/insights-consent', server: deps.baseUrl, policyId: randomUUID(),
         owner: { handle: user.handle, did: b.ownerDid },
         program: { name: program.name, version: program.version, sha256: program.sha256 },
-        enclave: { appId: deps.appId, releaseKey, upgrades },
+        enclave: { appId: e.appId, releaseKey: e.releaseKey, upgrades: e.upgrades },
         scope: { groups: groups as string[] }, triggers,
         egress: { provider: 'Anthropic API', model: program.model },
         limits: { maxTracesPerRun: maxTraces },
@@ -387,14 +408,14 @@ export function insightsRelease(deps: ReleaseDeps) {
     },
 
     async saveConsent(user: User, policy: InsightsPolicy, signature: unknown) {
-      needRelease();
+      const e = needEnclave();
       const b = binding(user);
       const p = policy;
       const t = now();
       if (!p || p.v !== 1 || p.domain !== 'teleport-router/insights-consent' || p.server !== deps.baseUrl
         || p.owner?.handle !== user.handle || p.owner?.did !== b.ownerDid
         || p.program?.name !== program.name || p.program?.version !== program.version || p.program?.sha256 !== program.sha256
-        || p.enclave?.appId !== deps.appId || p.enclave?.releaseKey !== releaseKey || canonical(p.enclave?.upgrades ?? null) !== canonical(upgrades)
+        || p.enclave?.appId !== e.appId || p.enclave?.releaseKey !== e.releaseKey || canonical(p.enclave?.upgrades ?? null) !== canonical(e.upgrades)
         || !Array.isArray(p.scope?.groups) || !p.scope.groups.length || p.scope.groups.length > 8 || !p.scope.groups.every(groupId)
         || !Array.isArray(p.triggers) || !p.triggers.length || p.triggers.length > 8
         || !p.triggers.every(x => x && typeof x.handle === 'string' && /^[a-f0-9]{16}$/.test(x.keyId || ''))
@@ -502,17 +523,9 @@ export function insightsRelease(deps: ReleaseDeps) {
       return (await store.list('traces/')).filter(k => /^traces\/[\w-]+\/meta$/.test(k)).map(k => k.slice('traces/'.length, -'/meta'.length));
     },
 
-    /** A run started directly by an account the owners' consents name. Local tests; the MVP app uses requests. */
-    async run(trigger: User, input: { template?: unknown; params?: unknown; entry_ids?: unknown }) {
-      needRelease();
-      if (!deps.complete) throw new Error('No model is configured for insights runs on this server.');
-      return runQuestion(trigger, parseQuestion(input));
-    },
-
     /** Register a run before it starts: the question, the chosen published posts, and a deadline. */
     async createRequest(trigger: User, input: { template?: unknown; params?: unknown; entry_ids?: unknown; deadline_hours?: unknown }) {
-      needRelease();
-      if (!deps.complete) throw new Error('No model is configured for insights runs on this server.');
+      needEnclave();
       const q = parseQuestion(input);
       const hours = input.deadline_hours === undefined ? REQUEST_HOURS_DEFAULT : Number(input.deadline_hours);
       if (!Number.isInteger(hours) || hours < 1 || hours > REQUEST_HOURS_MAX) throw new Error(`deadline_hours must be 1 to ${REQUEST_HOURS_MAX}`);
@@ -527,7 +540,7 @@ export function insightsRelease(deps: ReleaseDeps) {
       const t = now();
       const r: RunRequest = { requestId: randomUUID(), createdAt: iso(t), createdBy: trigger.handle, template: q.name, params: q.params,
         questionSha256: q.questionSha256, program: { name: program.name, version: program.version, sha256: program.sha256 },
-        entries, minPeople: MIN_PEOPLE, deadline: iso(t + hours * 3600_000), answers: new Map(), status: 'open', runId: null, closedAt: null };
+        entries, minPeople: MIN_PEOPLE, deadline: iso(t + hours * 3600_000), answers: new Map(), status: 'open', closedAt: null, run: null };
       requests.set(r.requestId, r);
       // Keep memory bounded: forget the oldest closed requests first.
       for (const old of [...requests.values()].filter(x => x.status !== 'open')) { if (requests.size <= REQUESTS_KEPT) break; requests.delete(old.requestId); }
@@ -539,28 +552,47 @@ export function insightsRelease(deps: ReleaseDeps) {
       return [...requests.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50).map(publicRequest);
     },
 
-    /** Requests that involve the caller's posts, with the caller's own answer. */
-    myRequests(user: User) {
-      return [...requests.values()].filter(r => r.entries.some(e => e.owner === user.handle))
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50)
-        .map(r => ({ ...publicRequest(r), your_posts: r.entries.filter(e => e.owner === user.handle).map(e => e.entryId),
-          your_answer: r.answers.get(user.handle)?.answer || null }));
+    /** Requests that involve the caller's posts, with their answer and, while open, the authorization they would sign. */
+    async myRequests(user: ConsentUser) {
+      const mine = [...requests.values()].filter(r => r.entries.some(e => e.owner === user.handle))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50);
+      const out: unknown[] = [];
+      for (const r of mine) {
+        const sign = r.status === 'open' && !r.answers.has(user.handle) ? await toSign(r, user).catch(err => ({ error: String(err?.message || err) })) : null;
+        out.push({ ...publicRequest(r), your_posts: r.entries.filter(e => e.owner === user.handle).map(e => e.entryId),
+          your_answer: r.answers.get(user.handle)?.answer || null, to_sign: sign });
+      }
+      return out;
     },
 
-    /** An owner's yes or no for all of their posts in one request. A yes needs a current consent naming the requester. */
-    async answerRequest(user: ConsentUser, requestId: unknown, answer: unknown) {
+    /** An owner's no, or yes with a signed authorization for all of their posts in one request. */
+    async answerRequest(user: ConsentUser, requestId: unknown, answer: unknown, authorization?: { body?: unknown; signature?: unknown }) {
       const r = typeof requestId === 'string' ? requests.get(requestId) : undefined;
       if (!r || !r.entries.some(e => e.owner === user.handle)) throw new Error('No such request involves your posts.');
       if (r.status !== 'open') throw new Error(`This request is no longer open (${r.status.replace(/_/g, ' ')}).`);
       if (answer !== 'yes' && answer !== 'no') throw new Error('answer must be "yes" or "no"');
-      if (answer === 'yes') {
-        const state = consentState(user);
-        if (!state.active) throw new Error(`You have no current insights consent (${state.reason.replace(/_/g, ' ')}). Sign one first; it names who may start runs.`);
-        const requester = await deps.getUser(r.createdBy);
-        if (!requester || !state.policy.triggers.some(t => t.handle === requester.handle && t.keyId === keyId(requester)))
-          throw new Error(`Your consent does not allow runs started by @${r.createdBy}.`);
-      }
-      r.answers.set(user.handle, { answer, at: iso(now()) });
+      if (answer === 'no') { r.answers.set(user.handle, { answer, at: iso(now()) }); await settle(r); return { ...publicRequest(r), your_answer: answer }; }
+
+      const state = consentState(user);
+      if (!state.active) throw new Error(`You have no current insights consent (${state.reason.replace(/_/g, ' ')}). Sign one first; it names who may request runs.`);
+      const requester = await deps.getUser(r.createdBy);
+      if (!requester || !state.policy.triggers.some(t => t.handle === requester.handle && t.keyId === keyId(requester)))
+        throw new Error(`Your consent does not allow runs requested by @${r.createdBy}.`);
+      const expected = await toSign(r, user);
+      if ('error' in expected) throw new Error(`Nothing of yours can be authorized in this request: ${expected.error}.`);
+      const a = authorization?.body as RunAuthorization | undefined;
+      // The same request, enclave, consent and question; entries a subset of the owner's own, with the same hashes.
+      if (!a || canonical({ ...a, entries: null, expiresAt: null }) !== canonical({ ...expected.body, entries: null, expiresAt: null }))
+        throw new Error('The authorization does not match this request. Fetch it again from /api/insights/requests/mine.');
+      const allowed = new Map(expected.body.entries.map(e => [e.entryId, e.derivedSha256]));
+      if (!Array.isArray(a.entries) || !a.entries.length || !a.entries.every(e => allowed.get(e?.entryId) === e?.derivedSha256))
+        throw new Error('The authorization lists posts or traces that are not yours in this request.');
+      const expires = Date.parse(a.expiresAt);
+      if (!(expires >= Date.parse(r.deadline)) || expires - now() > AUTHORIZATION_MAX_MS) throw new Error('The authorization must last until the request deadline, and at most 8 days.');
+      let signedBy = '';
+      try { signedBy = verifyMessage(authorizationMessage(a), String(authorization?.signature)).toLowerCase(); } catch { /* below */ }
+      if (signedBy !== ownerAddress(user.tinycloud!.ownerDid)) throw new Error('The authorization must be signed with the key that owns your storage.');
+      r.answers.set(user.handle, { answer, at: iso(now()), authorization: { body: JSON.parse(canonical(a)), signature: String(authorization!.signature) } });
       await settle(r);
       return { ...publicRequest(r), your_answer: answer };
     },
@@ -570,65 +602,42 @@ export function insightsRelease(deps: ReleaseDeps) {
       for (const r of [...requests.values()]) if (r.status === 'open' && now() >= Date.parse(r.deadline)) await settle(r);
     },
 
-    getRun(user: User, runId: unknown) {
-      const run = typeof runId === 'string' ? runs.get(runId) : undefined;
-      if (!run || (run.trigger !== user.handle && !run.items.some(i => i.owner === user.handle))) return null;
-      const result: any = summary(run);
-      const mine = run.items.filter(i => i.owner === user.handle);
-      if (mine.length) result.your_traces = mine.map(i => ({ entry_id: i.entryId, answer: i.answer, note: i.note, note_status: i.noteStatus }));
-      return result;
+    /** Public: one request and its run, with the published result once every contributor approved it. */
+    runStatus(requestId: unknown) {
+      const r = typeof requestId === 'string' ? requests.get(requestId) : undefined;
+      return r ? publicRequest(r) : null;
     },
 
-    /** An owner approves or withholds the note written from one of their traces. */
-    async decideNote(user: ConsentUser, runId: unknown, entryId: unknown, approve: unknown) {
-      const run = typeof runId === 'string' ? runs.get(runId) : undefined;
-      const item = run?.items.find(i => i.owner === user.handle && i.entryId === entryId);
-      if (!run || !item) throw new Error('No such note of yours in a current run.');
-      if (item.noteStatus === 'none') throw new Error('That trace produced no note.');
-      item.noteStatus = approve === true ? 'approved' : 'withheld';
-      await writeReceipt(user, run, run.items.filter(i => i.owner === user.handle));
-      return { run_id: run.runId, entry_id: item.entryId, note_status: item.noteStatus };
+    /** The caller's preview of a run, sealed to their key. Router stores it but cannot open it. */
+    async getPreview(user: User, requestId: unknown) {
+      if (!validId(requestId)) throw new Error('run_id is required');
+      const raw = await (await deps.storeFor(binding(user))).get(`insights/previews/${requestId}`);
+      return raw === null ? null : JSON.parse(raw);
     },
 
+    /** A contributor's signed approval or veto, passed to the enclave, which checks the signature. */
+    async decide(user: User, requestId: unknown, approval: unknown) {
+      const e = needEnclave();
+      const r = typeof requestId === 'string' ? requests.get(requestId) : undefined;
+      const did = user.tinycloud?.ownerDid;
+      if (!r?.run || !did || !r.run.contributors.includes(did)) throw new Error('No run of yours with that id.');
+      const out = await e.client.decide({ run: r.requestId, did, approval });
+      r.run.status = out.status;
+      if (out.published) r.run.published = out.published;
+      return publicRequest(r);
+    },
+
+    /** The caller's sealed previews, newest last: what each run read of theirs and what it found. */
     async receipts(user: User) {
       const store = await deps.storeFor(binding(user));
       const out: unknown[] = [];
-      for (const key of (await store.list('insights/receipts/')).sort().slice(-50)) {
+      for (const key of (await store.list('insights/previews/')).sort().slice(-50)) {
         const raw = await store.get(key);
         if (raw) out.push(JSON.parse(raw));
       }
       return out;
     },
   };
-
-  async function writeReceipt(owner: User, run: RunRecord, items: RunItem[]) {
-    const receipt = { v: 1, kind: 'router-insights-read-receipt', run_id: run.runId, at: run.at, owner: owner.handle, started_by: run.trigger,
-      template: run.template, params: run.params, question_sha256: run.questionSha256, program: run.program, build: run.build,
-      release_key: releaseKey, sent_to: `Anthropic API (${program.model})`,
-      read: items.map(i => ({ entry_id: i.entryId, trace_sha256: i.traceSha256, answer: i.answer, note: i.note, note_status: i.noteStatus })) };
-    const { signer } = needRelease();
-    const signature = await signer.signMessage(canonical(receipt));
-    await (await deps.storeFor(owner.tinycloud!)).put(`insights/receipts/${run.runId}`, canonical({ receipt, signature, signer: signer.address }));
-  }
-
-  function summary(run: RunRecord) {
-    const count = (field: keyof Answer) => run.items.reduce<Record<string, number>>((acc, i) => { acc[i.answer[field]] = (acc[i.answer[field]] || 0) + 1; return acc; }, {});
-    const people = (pick: (i: RunItem) => boolean) => new Set(run.items.filter(pick).map(i => i.owner)).size;
-    const head = { run_id: run.runId, at: run.at, started_by: run.trigger, template: run.template, params: run.params,
-      question_sha256: run.questionSha256, program: run.program, build: run.build, ...(run.requestId ? { request_id: run.requestId } : {}) };
-    // Too few people for counts or notes to hide who said what: nothing about the answers comes out.
-    // Each owner still has their own answers in their receipt.
-    if (people(() => true) < MIN_PEOPLE) return { ...head, released: false as const, withheld: `fewer than ${MIN_PEOPLE} people's traces were read`, skipped: run.skipped };
-    // Approved notes carry no owner and no post, and come out in a fixed order unrelated to either.
-    const notes = run.items.filter(i => i.noteStatus === 'approved').map(i => i.note).sort();
-    return { ...head, released: true as const,
-      traces_read: run.items.length, people: people(() => true),
-      people_where_it_applies: people(i => i.answer.applies === 'yes'),
-      applies: count('applies'), effect: count('effect'), cost: count('cost'),
-      notes, notes_waiting_for_owner: run.items.filter(i => i.noteStatus === 'pending').length,
-      notes_withheld: run.items.filter(i => i.noteStatus === 'withheld').length,
-      skipped: run.skipped };
-  }
 }
 
 /** Accept only the fixed answer shape. A note that could carry trace content is dropped, not repaired. */
