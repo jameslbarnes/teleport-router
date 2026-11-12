@@ -190,7 +190,10 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
         for (const message of read.messages) {
           const owner = linked.get(message.authorId);
           if (message.automated || (options.since && message.timestamp < options.since) || (options.author && owner !== options.author)) continue;
-          found.push({...message, channelName: read.channelName, handle: owner});
+          // Discord writes a mention as an ID. Show who it means: a connected member's Router name, or the bot.
+          const content = message.content.replace(/<@!?(\d{16,22})>/g, (_, id: string) =>
+            linked.has(id) ? `@${linked.get(id)}` : id === viewers.botId ? '@Router (the bot)' : '@someone');
+          found.push({...message, content, channelName: read.channelName, handle: owner});
         }
       } catch { continue; } // an unreadable channel contributes nothing; the others still answer
     }

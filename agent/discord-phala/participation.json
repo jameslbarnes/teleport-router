@@ -2,5 +2,6 @@
     "mode":  "live",
     "private_conversation": true,
     "notes": "live",
+    "notes_channel_ids": ["1568051571751788644", "1568051146172403816"],
     "channel_note":  "This is a private test channel for the connected Router group. Members may discuss any subject. Use the group's current notes as shared context; do not assume notes from other groups are available. Scheduled research digests may appear here, but only the Router tools listed for this turn are available."
 }

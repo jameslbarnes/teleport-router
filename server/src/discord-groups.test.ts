@@ -379,14 +379,14 @@ describe('A group\'s Discord chat in a member\'s own search',()=>{
   async function chatting() {
     const f=await fixture('guild'); await f.link();
     await f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[f.context.channelId]});
-    f.chatState.messages=[said(1,'100000000000000003','The telescope decision was to wait.'),said(2,'100000000000000004','Lunch?'),
+    f.chatState.messages=[said(1,'100000000000000003','The telescope decision was to wait.'),said(2,'100000000000000004','<@100000000000000003> and <@100000000000000090> and <@!100000000000000077>: Lunch?'),
       said(3,'100000000000000090','Summary of a private note',{automated:true}),said(4,'100000000000000003','telescope budget and telescope mount')];
     return f;
   }
   it('shows a linked member the channels their own Discord account can see, newest first, without the bot\'s messages',async()=>{
     const f=await chatting();
     const all=await f.chat('alice','test-group',{limit:10});
-    expect(all.map(m=>m.content)).toEqual(['telescope budget and telescope mount','Lunch?','The telescope decision was to wait.']);
+    expect(all.map(m=>m.content)).toEqual(['telescope budget and telescope mount','@alice and @Router (the bot) and @someone: Lunch?','The telescope decision was to wait.']);
     expect(all[0]).toMatchObject({handle:'alice',channelName:'general'});
     expect(all[1].handle).toBeUndefined(); // written by a Discord account that is not linked now
     expect((await f.chat('alice','test-group',{query:'telescope decision',limit:10})).map(m=>m.content))
