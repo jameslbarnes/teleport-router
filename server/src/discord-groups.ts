@@ -4,6 +4,7 @@ import { hashSecretKey, isValidSecretKey } from './identity.js';
 import { tokenize } from './storage.js';
 import type { Channel, JournalEntry, Storage, User } from './storage.js';
 import type { DiscordAudienceReader } from './discord-audience.js';
+import type { DiscordChatMessage, DiscordHistoryReader } from './discord-history.js';
 import type { PostingRules } from './posting-rules.js';
 
 export interface DiscordGroupBinding {
@@ -38,6 +39,8 @@ const snowflake = (v: unknown): v is string => typeof v === 'string' && /^\d{16,
 const member = (group: Channel, handle: string) => group.subscribers.some(s => s.handle === handle);
 const privateGroup = (group: Channel) => (group.joinRule || (group.visibility === 'private' ? 'invite' : 'open')) === 'invite';
 type Body = Record<string, unknown>;
+/** A chat message with its channel's name and, when its author is a linked member, their Router handle. */
+export type DiscordChat = DiscordChatMessage & {channelName: string; handle?: string};
 
 /**
  * How far a person's own posting rules let a group's bot post for them in that group: without asking,
@@ -65,7 +68,7 @@ export function rankNotes<T extends {content: string}>(notes: T[], query: string
 }
 
 export function discordGroups(storage: Storage, published: Storage, authorStatus: AuthorStatus,
-  { baseUrl, now = Date.now, audience }: {baseUrl: string; now?: () => number; audience?: DiscordAudienceReader}) {
+  { baseUrl, now = Date.now, audience, history }: {baseUrl: string; now?: () => number; audience?: DiscordAudienceReader; history?: DiscordHistoryReader}) {
   const pending = new Map<string, {handle: string; groupId: string; discordUserId: string; binding: DiscordGroupBinding; expiresAt: number}>();
   type Pair = { groupId: string; discordUserId: string; channelId: string; displayName: string; username: string;
     binding: DiscordGroupBinding; expiresAt: number; owner?: string; grantId?: string; connected?: boolean;
@@ -143,21 +146,61 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     // reply before linking. The server must hide its group channels until a person has linked.
     if (viewers.open) return fail(403, 'I cannot use group notes here while this channel is visible to everyone who joins the Discord server. Private /router-recall still works.');
     if (!viewers.viewerIds.includes(grant.discordUserId)) return fail(403, 'The requesting Discord account cannot see this channel.');
-    const linked = new Set<string>();
-    for (const subscriber of group.subscribers) {
-      const person = await storage.getUser(subscriber.handle);
-      for (const permission of person?.discordGrants || []) {
-        if (permission.groupId === group.id && !permission.revokedAt && !permission.deliveryPending
-          && permission.expiresAt > now() && sameBinding(permission, group.discord)
-          && person?.linkedAccounts?.some(a => a.platform === 'discord' && a.verified === true && a.platformUserId === permission.discordUserId))
-          linked.add(permission.discordUserId);
-      }
-    }
+    const linked = await linkedMembers(group);
     if (viewers.viewerIds.some(id => id !== viewers.botId && !linked.has(id)))
       return fail(403, 'I cannot use group notes here until everyone who can see this channel has linked their account and joined the Router group. Private /router-recall still works.');
     // No claims about who saw a reply, and no trust in a member list supplied by the bot process.
     return {...auth, audienceVersion: digest(JSON.stringify([grant.guildId, body.channelId, viewers.botId, viewers.viewerIds]))};
   }
+  /** The Discord accounts of current members with an active, delivered link to this group's server, and whose they are. */
+  async function linkedMembers(group: Channel): Promise<Map<string, string>> {
+    const linked = new Map<string, string>();
+    for (const subscriber of group.subscribers) {
+      const person = await storage.getUser(subscriber.handle);
+      for (const permission of person?.discordGrants || []) {
+        if (group.discord && permission.groupId === group.id && !permission.revokedAt && !permission.deliveryPending
+          && permission.expiresAt > now() && sameBinding(permission, group.discord)
+          && person?.linkedAccounts?.some(a => a.platform === 'discord' && a.verified === true && a.platformUserId === permission.discordUserId))
+          linked.set(permission.discordUserId, subscriber.handle);
+      }
+    }
+    return linked;
+  }
+
+  /**
+   * Recent chat from this group's Discord server, for a member's own search. A member reads only channels
+   * their own linked Discord account can see, and only channels that pass the same test as shared replies:
+   * opted in by an admin, hidden from newcomers, and seen by nobody but linked members. So a search shows
+   * a person nothing they could not scroll to in Discord. The text is read from Discord at that moment and
+   * not kept. The bot's own messages are left out, since they can repeat notes that have since changed.
+   */
+  async function chat(handle: string, groupId: string, options: {query?: string; since?: number; author?: string; limit: number}): Promise<DiscordChat[]> {
+    if (!audience || !history) return [];
+    const group = await storage.getChannel(groupId), binding = group?.discord;
+    if (!group || !binding || !privateGroup(group) || !member(group, handle) || !member(group, binding.botHandle)) return [];
+    const linked = await linkedMembers(group);
+    const mine = [...linked].find(([, owner]) => owner === handle)?.[0];
+    if (!mine) return [];
+    const found: DiscordChat[] = [];
+    for (const channelId of (binding.conversationChannelIds || []).slice(0, 8)) {
+      try {
+        const viewers = await audience(binding.guildId, channelId);
+        if (viewers.open || !viewers.viewerIds.includes(mine) || viewers.viewerIds.some(id => id !== viewers.botId && !linked.has(id))) continue;
+        const read = await history(binding.guildId, channelId, 300);
+        for (const message of read.messages) {
+          const owner = linked.get(message.authorId);
+          if (message.automated || (options.since && message.timestamp < options.since) || (options.author && owner !== options.author)) continue;
+          found.push({...message, channelName: read.channelName, handle: owner});
+        }
+      } catch { continue; } // an unreadable channel contributes nothing; the others still answer
+    }
+    // Discord can take seconds. The member must still belong, and the server binding must be the same one.
+    const after = await storage.getChannel(groupId);
+    if (!after?.discord || !sameBinding(binding, after.discord) || !member(after, handle)) return [];
+    found.sort((a, b) => b.timestamp - a.timestamp);
+    return (options.query ? rankNotes(found, options.query) : found).slice(0, Math.max(1, Math.min(50, options.limit)));
+  }
+
   const conversationView = (entry: JournalEntry) => ({...view(entry), version: digest(JSON.stringify(view(entry)))});
 
   async function renewGrant(owner: User, grant: DiscordGroupGrant) {
@@ -460,5 +503,5 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     }
     return fail(400, 'Unknown private-group action.');
   }
-  return {serve};
+  return {serve, chat};
 }
