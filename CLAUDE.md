@@ -126,6 +126,8 @@ The home page is the Astro build of `web/` (`web/src/pages/index.astro`, `web/sr
 ### Change how pages look
 Colours, typefaces, spacing, buttons, inputs, badges, the header and the footer live in `router.css`, which every page links before its own styles. Change a colour or a component there, not in a page. A page's own `<style>` holds only its layout. Use the tokens (`var(--accent)`), never a colour literal, and the words in the "Words used here" list in `DOCS.md`. A new static file must also be added to a `COPY` line in the `Dockerfile`, or it will be missing in production.
 
+Asking someone to allow something uses the permission card in `router.css` (`r-perm`): who is asking whom, one sentence on what it wants, "To do this", "Under these conditions", anything still open, then Allow beside Not now. The Discord connection step in `group-setup.html` is the first use. Keep that order and those two button names on any new one.
+
 ### Showing other people's text
 Posts, names, bios, links and group descriptions are untrusted. Put them in a page with `textContent`, with `routerEscapeHtml` (text and quoted attributes), or, for long notes, with `routerMarkdown` from `safe-html.js`, which renders markdown through DOMPurify. Never pass them to `innerHTML` or `marked.parse` directly, and never load scripts from another origin. `server/scripts/untrusted-content-browser-smoke.mjs` posts a hostile note and checks that it cannot run on the feed, profile, settings or dashboard pages.
 

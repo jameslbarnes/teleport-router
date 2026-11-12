@@ -41,6 +41,12 @@
 .gs-skip .r-notice { margin-top: 0; max-width: 34em; }
 .gs-nav { margin-top: var(--s-5); }
 
+/* Asked to allow a Discord connection: the permission card (router.css) stands alone. */
+body[data-permission] .gs-intro, body[data-permission] #for-agent, body[data-permission] #steps, body[data-permission] #back,
+body[data-permission] #discord > :not(#discord-confirm) { display: none; }
+body[data-permission] #discord { border-top: 0; padding-top: 0; }
+.gs .r-perm-actions .r-btn { margin: 0; }
+
 @media (max-width: 480px) {
   .gs-steps { font-size: var(--t-xs); gap: var(--s-1); }
   .gs .r-btn:not(.r-btn--plain) { width: 100%; margin-right: 0; }

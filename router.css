@@ -299,6 +299,78 @@ code, kbd, pre, samp { font-family: var(--font-mono); font-size: 0.9em; }
 .r-notice--warning { border-color: var(--waiting); }
 .r-notice--danger { border-color: var(--danger); }
 
+/* ── Permissions: asking someone to allow something ───────────── */
+/*
+ * One card, used wherever a person is asked to let something act on their account. It reads top
+ * to bottom in a fixed order: who is asking whom, what it wants in one sentence, "To do this",
+ * "Under these conditions", anything still open, then Allow beside Not now. A page adds its own
+ * parts between those; it does not reorder them or rename the two buttons.
+ */
+.r-perm { max-width: 34rem; margin: 0 auto; font-family: var(--font-ui); font-size: var(--t-base); line-height: 1.55; }
+.r-perm-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: var(--s-7) var(--s-6) var(--s-6); }
+
+/* Who is asking, and whom: two circles joined by a short dotted line. The asker carries the accent. */
+.r-perm-parties { display: flex; align-items: center; justify-content: center; gap: var(--s-3); margin-bottom: var(--s-5); }
+.r-perm-party { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-sunk); border: 1px solid var(--border); font-family: var(--font-read); font-style: italic; font-size: var(--t-h2); line-height: 1; padding-bottom: 0.12em; }
+.r-perm-party--asker { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.r-perm-link { display: flex; gap: 6px; }
+.r-perm-link i { width: 4px; height: 4px; border-radius: 50%; background: var(--border-strong); opacity: 0.6; }
+
+.r-perm-title { font-family: var(--font-read); font-size: 1.75rem; font-weight: 400; line-height: 1.2; letter-spacing: -0.015em; text-align: center; margin: 0 auto var(--s-2); max-width: 15em; text-wrap: balance; overflow-wrap: anywhere; }
+.r-perm-title em { font-style: italic; }
+.r-perm-who { text-align: center; color: var(--fg-muted); font-size: var(--t-sm); margin: 0 0 var(--s-5); }
+.r-perm-lede { font-family: var(--font-read); font-size: var(--t-h3); line-height: 1.45; text-align: center; margin: 0 auto var(--s-6); max-width: 22em; text-wrap: balance; }
+.r-perm-mono { font-family: var(--font-mono); font-size: 0.92em; color: var(--fg); overflow-wrap: anywhere; }
+
+/* Something real shown back to the person: a saved choice of theirs, or one actual result. */
+.r-perm-example { margin: 0 0 var(--s-6); padding: var(--s-4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); }
+.r-perm-example figcaption { display: flex; justify-content: space-between; gap: var(--s-3); font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-muted); margin-bottom: var(--s-2); }
+.r-perm-example-main { font-family: var(--font-read); font-size: var(--t-read); line-height: 1.4; margin: 0 0 var(--s-1); }
+.r-perm-example-more { font-size: var(--t-sm); color: var(--fg-muted); margin: 0; overflow-wrap: anywhere; }
+.r-perm-example-more:empty { display: none; }
+
+/* The parts of the permission, each under a small heading. */
+.r-perm-part { margin: 0 0 var(--s-6); }
+.r-perm-h { font-family: var(--font-mono); font-size: var(--t-xs); font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-muted); margin: 0 0 var(--s-3); }
+
+/* What it may do: a verb in the margin, the plain sentence beside it. */
+.r-perm-list { margin: 0; }
+.r-perm-list > div { display: grid; grid-template-columns: 5.5rem 1fr; gap: var(--s-3); padding: var(--s-3) 0; border-top: 1px solid var(--border); }
+.r-perm-list > div:last-child { border-bottom: 1px solid var(--border); }
+.r-perm-list dt { font-family: var(--font-read); font-style: italic; font-size: var(--t-read); line-height: 1.35; }
+.r-perm-list dd { margin: 0; }
+
+/* The limits it works under. */
+.r-perm-conds { list-style: none; margin: 0; padding: 0; }
+.r-perm-conds li { padding: var(--s-3) 0; border-top: 1px solid var(--border); }
+.r-perm-conds li:last-child { border-bottom: 1px solid var(--border); }
+
+/* Facts about it: a filled dot for what holds, a hollow one for what is still open or outside its control. */
+.r-perm-checks { list-style: none; margin: 0; padding: 0; font-size: var(--t-sm); }
+.r-perm-checks li { position: relative; padding: var(--s-2) 0 var(--s-2) var(--s-5); border-top: 1px solid var(--border); }
+.r-perm-checks li:last-child { border-bottom: 1px solid var(--border); }
+.r-perm-checks li::before { content: ''; position: absolute; left: 3px; top: 0.95em; width: 7px; height: 7px; border-radius: 50%; }
+.r-perm-ok::before { background: var(--success); }
+.r-perm-open::before { border: 1.5px solid var(--waiting); }
+
+/* Something the person must confirm themselves before Allow becomes available. */
+.r-perm-confirm { display: flex; align-items: flex-start; gap: var(--s-3); margin: 0 0 var(--s-5); padding: var(--s-4); border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--bg); line-height: 1.5; }
+.r-perm-confirm input { width: 18px; height: 18px; margin: 0.2em 0 0; flex-shrink: 0; accent-color: var(--accent); }
+.r-perm-confirm small { display: block; margin-top: var(--s-1); font-size: var(--t-sm); color: var(--fg-muted); }
+
+/* The decision: Allow takes the width, Not now sits beside it. */
+.r-perm-actions { display: grid; grid-template-columns: 1fr auto; gap: var(--s-3); }
+.r-perm-actions .r-btn { margin: 0; }
+.r-perm-allow { min-height: 48px; }
+.r-perm-fine { font-size: var(--t-sm); color: var(--fg-muted); margin: var(--s-3) 0 0; }
+
+@media (max-width: 480px) {
+  .r-perm-card { padding: var(--s-6) var(--s-4) var(--s-5); border-radius: 12px; }
+  .r-perm-title { font-size: 1.5rem; }
+  .r-perm-list > div { grid-template-columns: 1fr; gap: 0; }
+  .r-perm-actions { grid-template-columns: 1fr; }
+}
+
 /* ── Rendered documents (markdown) ────────────────────────────── */
 
 /* Running text keeps a readable measure; tables, code and pictures may be wider. */

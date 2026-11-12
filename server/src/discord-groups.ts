@@ -4,6 +4,7 @@ import { hashSecretKey, isValidSecretKey } from './identity.js';
 import { tokenize } from './storage.js';
 import type { Channel, JournalEntry, Storage, User } from './storage.js';
 import type { DiscordAudienceReader } from './discord-audience.js';
+import type { PostingRules } from './posting-rules.js';
 
 export interface DiscordGroupBinding {
   guildId: string;
@@ -37,6 +38,17 @@ const snowflake = (v: unknown): v is string => typeof v === 'string' && /^\d{16,
 const member = (group: Channel, handle: string) => group.subscribers.some(s => s.handle === handle);
 const privateGroup = (group: Channel) => (group.joinRule || (group.visibility === 'private' ? 'invite' : 'open')) === 'invite';
 type Body = Record<string, unknown>;
+
+/**
+ * How far a person's own posting rules let a group's bot post for them in that group: without asking,
+ * only after asking, or only when they ask. Someone with no rules yet is asked each time, and so is
+ * someone whose automatic rules do not name this group.
+ */
+export function groupPostingMode(rules: PostingRules | undefined, groupId: string): 'automatic' | 'review' | 'manual' {
+  if (!rules) return 'review';
+  if (rules.mode !== 'automatic') return rules.mode;
+  return rules.audience === 'selected' && rules.destinations.includes(`#${groupId}`) ? 'automatic' : 'review';
+}
 type AuthorStatus = (handle: string) => Promise<{linked: boolean; available?: boolean}>;
 /** A permission lasts while it is used: 30 days after the last command, and never more than a year without relinking. */
 export const GRANT_IDLE_MS = 30 * 86400_000, GRANT_MAX_MS = 365 * 86400_000, GRANT_RENEW_EVERY_MS = 86400_000;
@@ -374,7 +386,27 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     const {owner, group, grant} = await authorize(user, body);
     // "member" is the bot's periodic question "is this person still linked and in the group?". It is not
     // the person using their permission, so it does not extend it.
-    const expiresAt = body.action === 'unlink' || body.action === 'member' ? grant.expiresAt : await renewGrant(owner, grant);
+    // "rules" is the bot reading how this person wants posts made for them. Like "member", it is the bot's
+    // question and not the person using their permission, so neither extends it.
+    const expiresAt = body.action === 'unlink' || body.action === 'member' || body.action === 'rules' ? grant.expiresAt : await renewGrant(owner, grant);
+    if (body.action === 'rules') {
+      const rules = owner.postingRules;
+      return {handle: owner.handle, groupId: group.id, mode: groupPostingMode(rules, group.id), revision: rules?.revision ?? 0,
+        rules: rules ? {purpose: rules.purpose, share: rules.share, avoid: rules.avoid, style: rules.style, instructions: rules.instructions} : null};
+    }
+    if (body.action === 'delete') {
+      // Only a note this permission could have written: saved from Discord, by this person, to this group alone.
+      const entryId = body.entryId;
+      if (typeof entryId !== 'string' || !/^discord-[a-f0-9]{40}$/.test(entryId)) return fail(400, 'Only a note saved from Discord can be deleted here.');
+      return exclusive(`save:${entryId}`, async () => {
+        const current = await authorize(user, body);
+        const entry = await published.getEntry(entryId);
+        if (!entry) return {deleted: true, groupId: group.id};
+        if (entry.handle !== current.owner.handle || entry.to?.length !== 1 || entry.to[0] !== `#${group.id}`) return fail(404, 'Note unavailable in this group.');
+        await published.deleteEntry(entry.id);
+        return {deleted: true, groupId: group.id};
+      });
+    }
     if (body.action === 'member') return {handle: owner.handle, groupId: group.id, expiresAt};
     if (body.action === 'status') return {handle: owner.handle, groupId: group.id, expiresAt,
       storage: await authorStatus(owner.handle)};

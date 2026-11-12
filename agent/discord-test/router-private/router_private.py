@@ -20,7 +20,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class PrivateRouter:
-    def __init__(self, settings, state_dir, bot_key, request=None):
+    def __init__(self, settings, state_dir, bot_key, request=None, notebook=None):
         self.settings = settings
         self.scope = settings.get("scope", "channel")
         snowflake = lambda value: isinstance(value, str) and re.fullmatch(r"\d{16,22}", value)
@@ -35,6 +35,7 @@ class PrivateRouter:
         self.bot_key = bot_key
         self.lock = asyncio.Lock()
         self.request = request or self._http_request
+        self.notebook = notebook or self._notebook_request
         parsed = urllib.parse.urlsplit(settings["base_url"])
         if (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost"))) or parsed.username or parsed.query or parsed.fragment:
             raise ValueError("Router base URL must be HTTPS (or loopback for tests)")
@@ -103,6 +104,44 @@ class PrivateRouter:
             except (urllib.error.URLError, TimeoutError, ValueError):
                 raise PrivateError("Router could not confirm the request. Please retry; no success is assumed.") from None
         return await asyncio.to_thread(call)
+
+    async def _notebook_request(self, method, path, payload=None):
+        """The bot's own account on the ordinary notebook API: its own notes, under its own name and rules."""
+        if not self.bot_key:
+            raise PrivateError("The Router bot connection is unavailable.")
+        def call():
+            req = urllib.request.Request(self.settings["base_url"].rstrip("/") + path,
+                data=None if payload is None else json.dumps(payload).encode("utf-8"), method=method,
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.bot_key})
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            try:
+                with opener.open(req, timeout=25) as response:
+                    return json.loads(response.read(200000))
+            except urllib.error.HTTPError as exc:
+                refusal = PrivateError("Router did not accept the bot's own note.")
+                refusal.status = exc.code
+                raise refusal from None
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                raise PrivateError("Router could not confirm the request. Please retry; no success is assumed.") from None
+        return await asyncio.to_thread(call)
+
+    async def own_note(self, text):
+        """A note by the bot itself, to this server's group only. Router applies the bot account's own posting
+        rules and holds the note for its waiting period before the group can read it."""
+        group = self.settings.get("group_id")
+        if not group:
+            raise PrivateError("This server's Router group is not configured.")
+        result = await self.notebook("POST", "/api/entries", {"content": text, "secret_key": self.bot_key,
+            "to": ["#" + group], "posting_intent": "automatic"})
+        entry = result.get("entry") if isinstance(result, dict) else None
+        if not isinstance(entry, dict) or not re.fullmatch(r"[\w-]{1,160}", str(entry.get("id", ""))) or entry.get("to") != ["#" + group]:
+            raise PrivateError("Router did not confirm the bot's own note.")
+        return {"id": entry["id"], "publishAt": entry.get("publishAt")}
+
+    async def delete_own(self, entry_id):
+        if not re.fullmatch(r"[\w-]{1,160}", str(entry_id)):
+            raise PrivateError("Invalid source reference.")
+        await self.notebook("DELETE", "/api/entries/" + entry_id)
 
     async def link(self, interaction, code):
         actor = self.actor(interaction)

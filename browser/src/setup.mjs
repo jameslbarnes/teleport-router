@@ -36,8 +36,10 @@ export async function request(path, body, credential = key) {
   if (!response.ok) throw Object.assign(Error(result.error || retryText), { status: response.status });
   return result;
 }
+// While someone is being asked to allow a connection, the page shows the permission card and nothing around it.
+const asking = on => document.body.toggleAttribute('data-permission', on);
 function screen(index) {
-  step = index; screens.forEach((id, i) => { $(id).hidden = i !== index; });
+  step = index; screens.forEach((id, i) => { $(id).hidden = i !== index; }); asking(false);
   $('no-invite').hidden = true; $('steps').hidden = false;
   document.querySelectorAll('#steps li').forEach((li, i) => { if (i === index) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current'); });
   $('back').hidden = index < 2; $('retry').hidden = true;
@@ -176,8 +178,26 @@ async function showDiscord(back = false) {
       }
       throw error;
     }
-    $('discord-account').textContent = 'Connect Discord ' + (pair.username ? '@' + pair.username : 'account ' + pair.discordUserId) + ' to Router @' + identity.handle + ' in #' + groupId + '? Only continue if this is your Discord account; someone else’s link would give them access under your Router name.';
-    $('discord-confirm').hidden = pair.status !== 'waiting';
+    const each = (name, value) => document.querySelectorAll('.' + name).forEach(el => { el.textContent = value; });
+    each('perm-discord', pair.username ? '@' + pair.username : 'Account ' + pair.discordUserId);
+    if (pair.status === 'waiting') {
+      // What the person is really agreeing to is their own rules, so the card shows those back.
+      const saved = (await request('/api/posting-rules')).rules, here = '#' + groupId;
+      $('perm-rules-line').textContent = !saved ? 'You have no posting rules yet, so it will ask you before each note.'
+        : saved.mode === 'manual' ? 'Only when you ask. It writes a note when you put 📝 on your own message.'
+        : saved.mode === 'automatic' && saved.audience === 'selected' && saved.destinations.includes(here) ? 'Post automatically, to ' + here + '.'
+        : saved.mode === 'automatic' ? 'Your automatic posting does not name ' + here + ', so it will ask you before each note.'
+        : 'Show you a draft first. It will ask you before each note.';
+      const own = saved?.instructions?.trim() || '';
+      $('perm-rules-own').textContent = own ? '“' + (own.length > 220 ? own.slice(0, 220).trimEnd() + '…' : own) + '”' : '';
+    }
+    $('perm-discord-initial').textContent = (Array.from(pair.username || '')[0] || 'd').toLowerCase();
+    $('perm-you-initial').textContent = identity.handle[0];
+    each('perm-display', pair.displayName ? 'Discord shows it as “' + pair.displayName + '”. ' : '');
+    each('perm-handle', '@' + identity.handle);
+    document.querySelectorAll('.perm-group').forEach(el => { el.textContent = '#' + groupId; });
+    $('discord-confirm').hidden = pair.status !== 'waiting'; asking(pair.status === 'waiting');
+    if (pair.status === 'waiting') return message('');
     if (pair.status === 'approved') { $('discord-state').textContent = 'Confirmed. Return to Discord; the bot is finishing the connection.'; $('discord-next').hidden = true; }
     if (pair.status === 'connected') { $('discord-state').textContent = 'Discord has confirmed the connection.'; $('discord-next').hidden = false; sessionStorage.removeItem('router_setup_pair'); pairing = undefined; }
   }
@@ -296,6 +316,10 @@ $('discord-self').onchange = () => { $('confirm-discord').disabled = !$('discord
 $('confirm-discord').onclick = () => act(async () => {
   if (!$('discord-self').checked) throw Error('Confirm only the Discord account you just used yourself.');
   await request('/api/discord/pair/confirm', { pairing, groupId, confirmed: true }); await showDiscord();
+});
+// Not now: nothing is sent. The link from Discord simply runs out, ten minutes after it was made.
+$('decline-discord').onclick = () => act(async () => {
+  pairing = undefined; sessionStorage.removeItem('router_setup_pair'); $('discord-self').checked = false; await showDiscord();
 });
 $('unlink-discord').onclick = () => act(async () => {
   if (!discord?.grantId) return;

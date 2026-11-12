@@ -31,6 +31,18 @@ def register(ctx):
         adapter.router_private = router
         guild = discord.Object(id=int(settings["guild_id"]))
 
+        # One button under the welcome message. It has a fixed ID and no timeout, so messages sent before a
+        # restart keep working.
+        connect_view = discord.ui.View(timeout=None)
+        connect_button = discord.ui.Button(label="Connect my Router account", style=discord.ButtonStyle.primary,
+                                           custom_id="router-private:connect")
+
+        async def connect_pressed(interaction):
+            await connect_in_browser(interaction)
+        connect_button.callback = connect_pressed
+        connect_view.add_item(connect_button)
+        native.add_view(connect_view)
+
         # The door: with a member role and a welcome channel configured, the rest of the server is shown
         # only to people linked to the group. See gate.py.
         gate = None
@@ -53,10 +65,10 @@ def register(ctx):
                 channel = native.get_channel(welcome_id) or await native.fetch_channel(welcome_id)
                 await channel.send(
                     f"Welcome <@{user_id}>. This server belongs to the #{settings['group_id']} group on Router. "
-                    "Type /router-link here to connect your Router account. The other channels open once you have.",
+                    "Connect your Router account with the button below and the other channels open. (/router-link does the same.)",
                     allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, replied_user=False,
                                                              users=[discord.Object(id=int(user_id))]),
-                    suppress_embeds=True)
+                    suppress_embeds=True, view=connect_view)
 
             gate = Gate(role_id, lambda user_id: router.membership(user_id, welcome_id), list_members,
                 lambda user_id: native.http.add_role(guild.id, int(user_id), role_id, reason="Linked to the Router group"),
@@ -99,43 +111,47 @@ def register(ctx):
                 await interaction.followup.send(message[start:start + 1800], ephemeral=True,
                     allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
 
+        async def connect_in_browser(interaction):
+            """What /router-link without a code does, and what the welcome button does."""
+            async def browser_operation():
+                actor = router.actor(interaction)
+                old = pair_tasks.pop(actor["discordUserId"], None)
+                if old:
+                    old.cancel()
+                started = await router.begin_pair(interaction)
+                # This is an ephemeral capability link. It never enters the conversational model.
+                await interaction.followup.send(
+                    f"[Connect your Router account]({started['url']})\nOpen this in the browser where you set up Router, then confirm your accounts. Keep this link to yourself; it expires in ten minutes.",
+                    ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                async def finish_pair():
+                    try:
+                        result = await router.wait_pair(interaction, started["pairing"])
+                        if gate:
+                            await gate.admit(actor["discordUserId"])
+                        message = f"Connected @{result['handle']} to #{result['groupId']}.{opened} Use /router-save for a selected note or /router-recall to read group notes."
+                    except asyncio.CancelledError:
+                        return
+                    except PrivateError as exc:
+                        message = str(exc)
+                    except Exception:
+                        message = "The connection could not finish. Use /router-status to check, or /router-link to retry."
+                    try:
+                        await interaction.followup.send(message, ephemeral=True,
+                            allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                    except Exception:
+                        logging.getLogger(__name__).warning("Discord connection reply unavailable; no request details logged.")
+                    finally:
+                        if pair_tasks.get(actor["discordUserId"]) is asyncio.current_task():
+                            pair_tasks.pop(actor["discordUserId"], None)
+                pair_tasks[actor["discordUserId"]] = asyncio.create_task(finish_pair())
+                return "Your existing sharing rules stay unchanged until you choose new ones in Router."
+            await run(interaction, browser_operation)
+
         @app_commands.command(name="router-link", description="Connect your Router account in the browser")
         @app_commands.describe(code="Optional legacy linking code; leave blank for browser setup. Never enter a secret key.")
         async def link(interaction, code: str = ""):
             if not code:
-                async def browser_operation():
-                    actor = router.actor(interaction)
-                    old = pair_tasks.pop(actor["discordUserId"], None)
-                    if old:
-                        old.cancel()
-                    started = await router.begin_pair(interaction)
-                    # This is an ephemeral capability link. It never enters the conversational model.
-                    await interaction.followup.send(
-                        f"[Connect your Router account]({started['url']})\nOpen this in the browser where you set up Router, then confirm your accounts. Keep this link to yourself; it expires in ten minutes.",
-                        ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
-                    async def finish_pair():
-                        try:
-                            result = await router.wait_pair(interaction, started["pairing"])
-                            if gate:
-                                await gate.admit(actor["discordUserId"])
-                            message = f"Connected @{result['handle']} to #{result['groupId']}.{opened} Use /router-save for a selected note or /router-recall to read group notes."
-                        except asyncio.CancelledError:
-                            return
-                        except PrivateError as exc:
-                            message = str(exc)
-                        except Exception:
-                            message = "The connection could not finish. Use /router-status to check, or /router-link to retry."
-                        try:
-                            await interaction.followup.send(message, ephemeral=True,
-                                allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
-                        except Exception:
-                            logging.getLogger(__name__).warning("Discord connection reply unavailable; no request details logged.")
-                        finally:
-                            if pair_tasks.get(actor["discordUserId"]) is asyncio.current_task():
-                                pair_tasks.pop(actor["discordUserId"], None)
-                    pair_tasks[actor["discordUserId"]] = asyncio.create_task(finish_pair())
-                    return "Your existing sharing rules stay unchanged until you choose new ones in Router."
-                await run(interaction, browser_operation)
+                await connect_in_browser(interaction)
                 return
             async def operation():
                 result = await router.link(interaction, code)

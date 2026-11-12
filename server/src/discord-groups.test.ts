@@ -1,7 +1,7 @@
 import {describe, it, expect} from 'vitest';
 import {MemoryStorage, type JournalEntry} from './storage.js';
 import {authorStorage, recordCodec} from './author-store.js';
-import {discordGroups, rankNotes, GRANT_IDLE_MS, GRANT_MAX_MS} from './discord-groups.js';
+import {discordGroups, groupPostingMode, rankNotes, GRANT_IDLE_MS, GRANT_MAX_MS} from './discord-groups.js';
 import {derivePseudonym, hashSecretKey} from './identity.js';
 import type {GroupStore} from './group-store.js';
 import {testWallet,versionedMemoryStore} from './author-test-fixtures.js';
@@ -274,6 +274,36 @@ describe('Scoped private Discord group access',()=>{
     expect((await f.layer.storage.getEntry(saved.entry.id))?.to).toEqual(['#test-group']);
     const search=await f.operate(linked.grant,{action:'search',query:'synthetic'});
     expect(search.entries.map((e:JournalEntry)=>e.id)).toEqual([saved.entry.id]);
+  });
+  it('tells the bot how far the person\'s own posting rules let it post for them here, without extending the permission',async()=>{
+    const f=await fixture(), linked=await f.link();
+    const draft={mode:'automatic' as const,audience:'selected' as const,destinations:['#test-group'],purpose:'p',share:'findings',avoid:'chatter',style:'plain',instructions:'fewer, fuller notes'};
+    expect(await f.operate(linked.grant,{action:'rules'})).toMatchObject({handle:'alice',groupId:'test-group',mode:'review',revision:0,rules:null});
+    await f.base.savePostingRules('alice',draft,0);
+    const automatic=await f.operate(linked.grant,{action:'rules'});
+    expect(automatic).toMatchObject({mode:'automatic',revision:1,rules:{share:'findings',avoid:'chatter',style:'plain',instructions:'fewer, fuller notes'}});
+    expect(JSON.stringify(automatic)).not.toContain('destinations');
+    await f.base.savePostingRules('alice',{...draft,destinations:['#another-group']},1);
+    expect((await f.operate(linked.grant,{action:'rules'})).mode).toBe('review');
+    await f.base.savePostingRules('alice',{...draft,audience:'public',destinations:[]},2);
+    expect((await f.operate(linked.grant,{action:'rules'})).mode).toBe('review');
+    await f.base.savePostingRules('alice',{...draft,mode:'manual'},3);
+    expect((await f.operate(linked.grant,{action:'rules'})).mode).toBe('manual');
+    const active=async()=>(await f.base.getUser('alice'))!.discordGrants!.find(g=>!g.revokedAt)!.expiresAt, expiry=await active();
+    f.advance(2*86400_000); await f.operate(linked.grant,{action:'rules'});
+    expect(await active()).toBe(expiry);
+    expect(groupPostingMode(undefined,'test-group')).toBe('review');
+    await expect(f.operate('rdg1.forged.grant',{action:'rules'})).rejects.toMatchObject({status:403});
+  });
+  it('deletes only a note this person saved from Discord to this group',async()=>{
+    const f=await fixture('guild'), alice=await f.link(), bob=await f.link('bob','100000000000000004');
+    const saved=await f.save(alice.grant);
+    await expect(f.operate(bob.grant,{action:'delete',entryId:saved.entry.id,discordUserId:'100000000000000004'})).rejects.toMatchObject({status:404});
+    await expect(f.operate(alice.grant,{action:'delete',entryId:'mwabc123-notdiscord'})).rejects.toMatchObject({status:400});
+    expect(await f.layer.storage.getEntry(saved.entry.id)).not.toBeNull();
+    expect(await f.operate(alice.grant,{action:'delete',entryId:saved.entry.id})).toMatchObject({deleted:true});
+    expect(await f.layer.storage.getEntry(saved.entry.id)).toBeNull();
+    expect(await f.operate(alice.grant,{action:'delete',entryId:saved.entry.id})).toMatchObject({deleted:true});
   });
   it('rejects spoofed authors/destinations and replay with changed content; identical retries are idempotent',async()=>{
     const f=await fixture(), {grant}=await f.link();
