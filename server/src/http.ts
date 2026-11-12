@@ -9527,13 +9527,14 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
       }
 
       // Map routes to HTML files.
-      // The published Router CLI opens /setup/cli?port=...&nonce=... and
-      // waits for the browser flow to POST the generated key back to localhost.
-      if (filePath === '/group-setup' || (filePath === '/join' && url.searchParams.has('channelinvite'))) {
+      // /join and /group-setup are one page: the guided setup, with or without an invitation.
+      // The published Router CLI opens /setup/cli?port=...&nonce=... and waits for the browser to POST the
+      // new key back to localhost. That needs a page allowed to reach localhost, so it keeps its own.
+      if (filePath === '/group-setup' || filePath === '/join') {
         filePath = '/group-setup.html';
       } else if (filePath === '/setup/cli') {
         filePath = '/join.html';
-      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe'].includes(filePath)) {
+      } else if (['/setup', '/prompt', '/dashboard', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe'].includes(filePath)) {
         filePath = `${filePath}.html`;
       }
 

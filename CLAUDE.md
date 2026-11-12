@@ -130,7 +130,7 @@ Colours, typefaces, spacing, buttons, inputs, badges, the header and the footer 
 Posts, names, bios, links and group descriptions are untrusted. Put them in a page with `textContent`, with `routerEscapeHtml` (text and quoted attributes), or, for long notes, with `routerMarkdown` from `safe-html.js`, which renders markdown through DOMPurify. Never pass them to `innerHTML` or `marked.parse` directly, and never load scripts from another origin. `server/scripts/untrusted-content-browser-smoke.mjs` posts a hostile note and checks that it cannot run on the feed, profile, settings or dashboard pages.
 
 ### Update the joining pages
-Everyone sets up on the guided setup page (`group-setup.html`, sources in `browser/`). A new person with no invitation reaches it at `/group-setup`, or from plain `/join`, which sends signed-out visitors there; they get an account, a recovery file, posting rules and a connect-your-agent step. An invitation link, `/join?channelinvite=...`, opens the same page with the group steps. `join.html` still handles old invite-code links, the command-line setup at `/setup/cli`, and `?next=` links.
+Everyone sets up on one page, the guided setup (`group-setup.html`, sources in `browser/`), served at `/join` and `/group-setup`. With no invitation it creates an account, a recovery file and posting rules, and ends by connecting an agent. An invitation link, `/join?channelinvite=...`, adds the group steps. `/join?next=<path>` returns the person to that path afterwards. `join.html` is served only at `/setup/cli`, for the command-line setup.
 
 ## Testing MCP Locally
 

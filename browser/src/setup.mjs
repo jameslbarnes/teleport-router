@@ -3,7 +3,22 @@ import { b64, encryptBackup, decryptBackup } from './recovery.mjs';
 
 const $ = id => document.getElementById(id), params = new URLSearchParams(location.search);
 const screens = ['account', 'storage', 'discord', 'rules', 'connect', 'ready'];
-let groupId = params.get('group'), invite = params.get('channelinvite'), key = localStorage.getItem('router_key');
+let groupId = params.get('group'), key = localStorage.getItem('router_key');
+let invite = params.get('channelinvite') || params.get('invite') || params.get('joincode') || params.get('join_code') || params.get('code');
+// Where to go once signed in, when another page sent the person here. Only a plain path on this site:
+// no host, scheme, backslash or leading double slash.
+export function safeNext(value) {
+  if (!value || !/^\/(?![\/\\])[^\\]*$/.test(value)) return null;
+  try {
+    const url = new URL(value, location.origin);
+    if (url.origin !== location.origin || url.pathname.startsWith('//')) return null;
+    return url.pathname + url.search + url.hash;
+  } catch { return null; }
+}
+// Kept for the tab, because the posting rules step leaves this page and comes back without the parameter.
+let next = safeNext(params.get('next'));
+try { if (next) sessionStorage.setItem('router_setup_next', next); else if (!invite && !groupId) next = safeNext(sessionStorage.getItem('router_setup_next')); } catch {}
+document.documentElement.dataset.safeNext = safeNext(params.get('next')) || '';
 let identity, context, storage, discord, rules, backup, envelope, step = 0, busy = false;
 let pairing;
 const retryText = 'This step did not finish. Try again.';
@@ -92,6 +107,8 @@ async function load() {
   }
   if (solo()) {
     showSolo();
+    // Already signed in and sent here by another page: there is nothing to set up, so go back to it.
+    if (identity && safeNext(params.get('next'))) { try { sessionStorage.removeItem('router_setup_next'); } catch {} location.replace(next); return; }
     if (!identity) {
       screen(0); $('step-discord').hidden = true; $('create-account').hidden = false; $('signed-in').hidden = true; accountView(false);
       message('Pick a handle to create your account.'); return;
@@ -224,7 +241,8 @@ async function finish() {
     $('ready-heading').textContent = 'Your account is set up';
     $('ready-intro').textContent = 'Nothing is posted until an agent you connected posts within your rules. When it does, it shows you the note in the conversation, with who can read it and a link to delete it.';
     $('ready-later').hidden = true; $('ready-discord').hidden = true;
-    $('read-group').href = '/'; $('read-group').textContent = 'Open the notebook';
+    $('read-group').href = next || '/'; $('read-group').textContent = next ? 'Continue where you were' : 'Open the notebook';
+    try { sessionStorage.removeItem('router_setup_next'); } catch {}
     $('ready-state').textContent = 'Your posting rules are saved. You can change them at any time.' +
       (!envelope && !storage?.linked ? ' Your Router key is kept only in this browser. Go back to the storage step and download a recovery file before clearing the browser’s data or moving to another device.' : '') +
       (envelope && (!storage?.linked || !storage?.available) ? ' Your recovery file is saved, but storage is not connected yet; you can finish that from the storage step.' : '');
