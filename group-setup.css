@@ -46,8 +46,6 @@ body[data-permission] .gs-intro, body[data-permission] #for-agent, body[data-per
 body[data-permission] #discord > :not(#discord-confirm) { display: none; }
 body[data-permission] #discord { border-top: 0; padding-top: 0; }
 .gs .r-perm-actions .r-btn { margin: 0; }
-/* The card has two forms: the bot's commands only, or the bot also writing notes for you. */
-#discord-confirm[data-notes='false'] [data-when='notes'], #discord-confirm[data-notes='true'] [data-when='plain'] { display: none; }
 
 @media (max-width: 480px) {
   .gs-steps { font-size: var(--t-xs); gap: var(--s-1); }

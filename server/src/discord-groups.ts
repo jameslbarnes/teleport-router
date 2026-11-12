@@ -15,12 +15,6 @@ export interface DiscordGroupBinding {
   version: string;
   /** Shared replies are opt-in and checked against everyone who can currently see the channel. */
   conversationChannelIds?: string[];
-  /**
-   * A group admin has let the bot write notes for members under their own posting rules. On a person's
-   * permission it means they were shown that, and agreed, when they connected: turning it on for the
-   * group does nothing for people who connected before.
-   */
-  notes?: boolean;
 }
 export interface DiscordGroupGrant extends DiscordGroupBinding {
   id: string;
@@ -193,9 +187,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
       return fail(409, 'This Router identity is already linked to another Discord account.');
     const id = randomBytes(12).toString('hex');
     const token = `rdg1.${owner.handle}.${id}.${randomBytes(32).toString('base64url')}`;
-    // Only the browser confirmation shows what notes mean, so only it can agree to them.
-    const {notes: offered, ...destination} = binding;
-    const grant: DiscordGroupGrant = {...destination, ...(pairing && offered ? {notes: true} : {}), id, groupId: group.id, discordUserId,
+    const grant: DiscordGroupGrant = {...binding, id, groupId: group.id, discordUserId,
       ...(pairing ? {deliveryPending: true, discordUsername: pairing.username} : {}),
       tokenHash: digest(token), createdAt: now(), expiresAt: now() + GRANT_IDLE_MS};
     const grants = (owner.discordGrants || []).filter(g => g.expiresAt > now() && !g.revokedAt
@@ -224,10 +216,8 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           || body.channelIds.some(id => !snowflake(id)) || new Set(body.channelIds).size !== body.channelIds.length
           || (group.discord.scope !== 'guild' && body.channelIds.some(id => id !== group.discord!.channelId)))
           return fail(400, 'Choose up to 20 text channels covered by the existing Discord connection.');
-        if (body.notes !== undefined && typeof body.notes !== 'boolean') return fail(400, 'Set notes to true or false.');
-        const notes = typeof body.notes === 'boolean' ? body.notes : !!group.discord.notes;
-        await storage.updateChannel(group.id, {discord: {...group.discord, conversationChannelIds: body.channelIds as string[], notes}});
-        return {groupId: group.id, channelIds: body.channelIds, notes};
+        await storage.updateChannel(group.id, {discord: {...group.discord, conversationChannelIds: body.channelIds as string[]}});
+        return {groupId: group.id, channelIds: body.channelIds};
       });
     }
     if (path === '/api/discord/conversation/operate') {
@@ -273,7 +263,6 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
         && user.linkedAccounts?.some(a => a.platform === 'discord' && a.verified && a.platformUserId === g.discordUserId));
       return {configured: true, linked: !!grant && !grant.deliveryPending, pending: !!grant?.deliveryPending,
         groupId: group.id, expiresAt: grant?.expiresAt, grantId: grant?.id, discordUserId: grant?.discordUserId, username: grant?.discordUsername,
-        notes: !!grant?.notes && !!binding.notes, notesOffered: !!binding.notes,
         channelUrl: `https://discord.com/channels/${binding.guildId}${binding.channelId ? '/' + binding.channelId : ''}`};
     }
     if (path === '/api/discord/pair/start') {
@@ -326,8 +315,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
         }
         // The author sees the account and state, never the bot's scoped grant.
         return {status: pair.connected ? 'connected' : pair.owner ? 'approved' : 'waiting', groupId: pair.groupId,
-          discordUserId: pair.discordUserId, username: pair.username, displayName: pair.displayName, expiresAt: pair.expiresAt,
-          notes: !!pair.binding.notes};
+          discordUserId: pair.discordUserId, username: pair.username, displayName: pair.displayName, expiresAt: pair.expiresAt};
       });
     }
     if (path === '/api/discord/bind') {
@@ -402,7 +390,6 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     // question and not the person using their permission, so neither extends it.
     const expiresAt = body.action === 'unlink' || body.action === 'member' || body.action === 'rules' ? grant.expiresAt : await renewGrant(owner, grant);
     if (body.action === 'rules') {
-      if (!grant.notes || !group.discord?.notes) return fail(403, 'This person has not allowed notes to be written for them here.');
       const rules = owner.postingRules;
       return {handle: owner.handle, groupId: group.id, mode: groupPostingMode(rules, group.id), revision: rules?.revision ?? 0,
         rules: rules ? {purpose: rules.purpose, share: rules.share, avoid: rules.avoid, style: rules.style, instructions: rules.instructions} : null};

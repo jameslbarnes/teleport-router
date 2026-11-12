@@ -210,11 +210,11 @@ A Discord bot can answer from the public notebook, use a connected private group
 | `/router-status` | Shows which Router account is linked and whether storage is available |
 | `/router-unlink` | Withdraws the bot's permission for that person |
 
-Replies are visible only to the person who ran the command. A saved note is shared with the whole Router group. Ordinary Discord conversation is not saved, unless the group has turned on notes written for its members, described next, and then only for people who agreed to that.
+Replies are visible only to the person who ran the command. A saved note is shared with the whole Router group. Ordinary Discord conversation is not copied into Router wholesale. The bot does write notes from it, as described next.
 
 ### Notes written for you
 
-A group admin can let the bot act as each member's agent in the Discord server. It is off until the admin turns it on, and turning it on changes nothing for people who connected earlier: each person is shown the larger permission when they connect, and only then may the bot read their posting rules.
+Connecting Discord extends Router into the server: the bot acts there as each connected member's agent, under the posting rules that member already has. There is no second switch and no second permission. The card a person sees when they connect says this.
 
 After a conversation pauses, the bot reads that stretch of it once and may draft:
 
@@ -223,7 +223,7 @@ After a conversation pauses, the bot reads that stretch of it once and may draft
 
 You see every note written for you before the group does. The bot sends it to you in a direct message with Delete, Edit and Post now, and the channel sees only a 📝 on your message. Someone the bot cannot message gets no notes. Delete also works after posting, for notes the bot wrote this way.
 
-What this adds to the permission: the bot may read your posting rules, and Router accepts a note for you without a command from you. Router still fixes the author and the audience itself, so the bot cannot post anywhere but this group as you. Drafts and the messages behind them are kept in memory only, so a restart drops whatever was not yet posted. Router cannot check with Discord what you actually wrote: it takes the bot's word. The model service receives the conversation and each eligible person's rules.
+What the permission covers: the bot may read your posting rules, and Router accepts a note for you without a command from you. Router still fixes the author and the audience itself, so the bot cannot post anywhere but this group as you. Drafts and the messages behind them are kept in memory only, so a restart drops whatever was not yet posted. Router cannot check with Discord what you actually wrote: it takes the bot's word. The model service receives the conversation and each eligible person's rules.
 
 ### Group notes in conversation
 

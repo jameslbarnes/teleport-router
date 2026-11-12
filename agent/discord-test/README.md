@@ -94,7 +94,7 @@ The native commands remain private to their requester and retain their configure
 
 With `"notes": "live"` in the participation settings of a private profile, the bot acts as each member's agent (`notes.py`, `notes_ui.py`). `"shadow"` reads and decides but shows and posts nothing; the default is `"off"`. Notes are kept from the channels in `notes_channel_ids` (default: the watched channel).
 
-Router must also allow it. A group admin calls `POST /api/discord/conversation/configure` with `notes: true`. After that, a person who connects in the browser is shown the larger permission, and only their permission lets the bot read their rules (`operate` with action `rules`). People who connected before must connect again; until they do they get no notes, and the bot is refused their rules.
+Router needs no extra switch: any linked member's permission lets the bot read their rules (`operate` with action `rules`), and the permission card they agree to when connecting says so. People who linked before this version saw an earlier card that named only the commands.
 
 After `notes_pause_seconds` (600) without a message, or `notes_max_burst` (40) messages, one model call reads the burst and proposes at most one note per eligible person and at most one about the discussion. The bot then:
 

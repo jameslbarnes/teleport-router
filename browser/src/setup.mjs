@@ -180,8 +180,7 @@ async function showDiscord(back = false) {
     }
     const each = (name, value) => document.querySelectorAll('.' + name).forEach(el => { el.textContent = value; });
     each('perm-discord', pair.username ? '@' + pair.username : 'Account ' + pair.discordUserId);
-    $('discord-confirm').dataset.notes = pair.notes ? 'true' : 'false';
-    if (pair.notes && pair.status === 'waiting') {
+    if (pair.status === 'waiting') {
       // What the person is really agreeing to is their own rules, so the card shows those back.
       const saved = (await request('/api/posting-rules')).rules, here = '#' + groupId;
       $('perm-rules-line').textContent = !saved ? 'You have no posting rules yet, so it will ask you before each note.'

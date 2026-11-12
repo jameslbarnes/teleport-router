@@ -276,21 +276,7 @@ describe('Scoped private Discord group access',()=>{
     expect(search.entries.map((e:JournalEntry)=>e.id)).toEqual([saved.entry.id]);
   });
   it('tells the bot how far the person\'s own posting rules let it post for them here, without extending the permission',async()=>{
-    const f=await fixture('guild'), body=async()=>({groupId:'test-group',pairing:(await f.call('router_bot','pair/start',{...f.context,groupId:'test-group'})).pairing});
-    const pair=async()=>{const b=await body(), info=await f.call('alice','pair/info',b); await f.call('alice','pair/confirm',{...b,confirmed:true});
-      const grant=(await f.call('router_bot','pair/poll',{...b,...f.context})).grant as string; await f.call('router_bot','pair/ack',{...b,...f.context});
-      return {info, grant};};
-    const configure=(notes?:boolean)=>f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[f.context.channelId],...(notes===undefined?{}:{notes})});
-    // Nobody is read for unless an admin turned notes on and the person agreed to them in the browser.
-    const before=await pair(); expect(before.info.notes).toBe(false);
-    await expect(f.operate(before.grant,{action:'rules'})).rejects.toMatchObject({status:403});
-    expect(await configure(true)).toMatchObject({notes:true});
-    await expect(f.operate(before.grant,{action:'rules'})).rejects.toMatchObject({status:403});
-    expect(await f.call('alice','link/status',{groupId:'test-group'})).toMatchObject({linked:true,notes:false,notesOffered:true});
-    const byCode=await f.link(); await expect(f.operate(byCode.grant,{action:'rules'})).rejects.toMatchObject({status:403});
-    const linked=await pair(); expect(linked.info.notes).toBe(true);
-    expect(await f.call('alice','link/status',{groupId:'test-group'})).toMatchObject({notes:true,notesOffered:true});
-    expect(await configure()).toMatchObject({notes:true});
+    const f=await fixture(), linked=await f.link();
     const draft={mode:'automatic' as const,audience:'selected' as const,destinations:['#test-group'],purpose:'p',share:'findings',avoid:'chatter',style:'plain',instructions:'fewer, fuller notes'};
     expect(await f.operate(linked.grant,{action:'rules'})).toMatchObject({handle:'alice',groupId:'test-group',mode:'review',revision:0,rules:null});
     await f.base.savePostingRules('alice',draft,0);
@@ -303,14 +289,11 @@ describe('Scoped private Discord group access',()=>{
     expect((await f.operate(linked.grant,{action:'rules'})).mode).toBe('review');
     await f.base.savePostingRules('alice',{...draft,mode:'manual'},3);
     expect((await f.operate(linked.grant,{action:'rules'})).mode).toBe('manual');
-    const active=async()=>(await f.base.getUser('alice'))!.discordGrants!.find(g=>!g.revokedAt&&g.notes)!.expiresAt, expiry=await active();
+    const active=async()=>(await f.base.getUser('alice'))!.discordGrants!.find(g=>!g.revokedAt)!.expiresAt, expiry=await active();
     f.advance(2*86400_000); await f.operate(linked.grant,{action:'rules'});
     expect(await active()).toBe(expiry);
     expect(groupPostingMode(undefined,'test-group')).toBe('review');
     await expect(f.operate('rdg1.forged.grant',{action:'rules'})).rejects.toMatchObject({status:403});
-    await configure(false);
-    await expect(f.operate(linked.grant,{action:'rules'})).rejects.toMatchObject({status:403});
-    expect((await f.operate(linked.grant,{action:'status'})).handle).toBe('alice');
   });
   it('deletes only a note this person saved from Discord to this group',async()=>{
     const f=await fixture('guild'), alice=await f.link(), bob=await f.link('bob','100000000000000004');
