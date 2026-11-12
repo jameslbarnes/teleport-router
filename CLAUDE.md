@@ -49,7 +49,7 @@ teleport-router/
 └── .github/workflows/build.yml  # Test, build, push and deploy
 ```
 
-The production home page is the Astro build in `web/`. The Dockerfile copies `web/dist/index.html` over the root one. The root `index.html` is a local-development copy and does not ship.
+The home page is the Astro build in `web/`; the Dockerfile copies `web/dist/index.html` into the image. There is no `index.html` in the repository root.
 
 ## Key Concepts
 
@@ -130,7 +130,7 @@ Colours, typefaces, spacing, buttons, inputs, badges, the header and the footer 
 Posts, names, bios, links and group descriptions are untrusted. Put them in a page with `textContent`, with `routerEscapeHtml` (text and quoted attributes), or, for long notes, with `routerMarkdown` from `safe-html.js`, which renders markdown through DOMPurify. Never pass them to `innerHTML` or `marked.parse` directly, and never load scripts from another origin. `server/scripts/untrusted-content-browser-smoke.mjs` posts a hostile note and checks that it cannot run on the feed, profile, settings or dashboard pages.
 
 ### Update the joining pages
-New people start at `/join` (`join.html`). An invitation link, `/join?channelinvite=...`, opens the guided setup (`group-setup.html`, sources in `browser/`).
+Everyone sets up on the guided setup page (`group-setup.html`, sources in `browser/`). A new person with no invitation reaches it at `/group-setup`, or from plain `/join`, which sends signed-out visitors there; they get an account, a recovery file, posting rules and a connect-your-agent step. An invitation link, `/join?channelinvite=...`, opens the same page with the group steps. `join.html` still handles old invite-code links, the command-line setup at `/setup/cli`, and `?next=` links.
 
 ## Testing MCP Locally
 

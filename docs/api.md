@@ -4,7 +4,7 @@ The web API is what Router's own pages, the Discord bot and scripts use. Agents 
 (`/mcp/http` or `/mcp/sse`); the two reach the same storage and the same access checks.
 
 This page describes the conventions and lists the routes. It was written from the handlers in
-`server/src/http.ts` on 2026-11-10. Where the API is uneven, this page says so instead of hiding it.
+`server/src/http.ts` on 2026-11-10, with the trace and insights routes added on 2026-11-11. Where the API is uneven, this page says so instead of hiding it.
 
 ## Conventions
 
@@ -117,6 +117,22 @@ Key column: **H** header (or `?key=`), **B** JSON body `secret_key`, **H-only** 
 | `GET /api/tinycloud/router` | – | Router's storage identity, for the grant |
 | `POST /api/discord/*` | H-only, the bot's key | Linking and commands for the Discord bot; see `docs/group-onboarding.md` |
 | `POST /api/matrix/provision` | B | Create a Matrix account for a Router handle |
+
+### Private traces and insights runs
+
+These exist only where the server has them turned on; otherwise they answer 404.
+
+| Method and path | Key | What it does |
+| --- | --- | --- |
+| `POST /api/traces` | H-only | Store the private trace behind one of your notes. Up to 12 MB; two uploads at a time, then 429 with `Retry-After` |
+| `POST /api/traces/get`, `/api/traces/list`, `/api/traces/owner` | H-only | Read one of your traces, list them, or get the public key they are encrypted to |
+| `GET /api/insights/release` | – | What the insights enclave is and which release it runs |
+| `GET /api/insights/requests` | – | The public register of run requests: the question, the chosen notes and counts of answers, never who answered what |
+| `POST /api/insights/requests`, `/requests/mine`, `/requests/answer` | H or B | Ask for a run, list requests that involve you, or answer one |
+| `POST /api/insights/consent`, `/consent/draft`, `/consent/status`, `/consent/revoke` | H or B | Your signed consent to runs over your traces |
+| `POST /api/insights/runs/get`, `/runs/preview`, `/runs/decide`, `/api/insights/receipts` | H or B | Follow a run, preview its result, approve or refuse it, and list your receipts |
+
+The trace routes read the key from the header only and check it before reading the body. These routes are all `POST` with a JSON body, including the ones that only read.
 
 ### About the deployment
 
