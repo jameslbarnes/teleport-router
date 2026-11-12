@@ -75,6 +75,19 @@ def register(ctx):
                     raise
             controller.turn_factory = make_turn
 
+        # Notes for the group from what is said here (notes.py). Private profiles only: Router must be able
+        # to confirm that everyone who can see the channel is in the group.
+        notes, note_channels = None, set()
+        if private_conversation and settings.get("notes", "off") != "off":
+            from .notes import DEFAULTS as NOTE_DEFAULTS, NOTE_EMOJI, NoteTaker
+            from .notes_ui import NotesUI
+            note_channels = {int(c) for c in settings.get("notes_channel_ids", [channel_id])}
+            private = lambda: getattr(adapter, "router_private", None)
+            ui = NotesUI(native, settings.get("router_base_url", "https://router.teleport.computer"),
+                         lambda: private().settings.get("group_id") if private() else None,
+                         settings.get("notes_delay_seconds", NOTE_DEFAULTS["notes_delay_seconds"]))
+            notes = ui.taker = NoteTaker(settings, guild.id, ui, lambda: controller.brain, private)
+
         def watched(channel_or_id, parent_id=None):
             cid = getattr(channel_or_id, "id", channel_or_id)
             parent = getattr(channel_or_id, "parent_id", parent_id)
@@ -90,6 +103,10 @@ def register(ctx):
         async def on_message(message):
             key = watched(message.channel)
             summoned = native.user is not None and native.user in message.mentions
+            if (notes and message.channel.id in note_channels and getattr(getattr(message, "guild", None), "id", None) == guild.id
+                    and message.type in (discord.MessageType.default, discord.MessageType.reply)
+                    and not message.author.bot and not (message.content or "").startswith("/")):
+                notes.observe(message.channel.id, to_msg(message))
             if key is None and private_conversation and summoned and getattr(message.channel, "type", None) == discord.ChannelType.text:
                 # A mention is answered in any ordinary text channel of the server. Nothing else said
                 # there is recorded or checked, and Router still decides whether group notes may be used.
@@ -118,10 +135,22 @@ def register(ctx):
 
         async def on_raw_message_delete(payload):
             store.delete_message(payload.message_id)
+            if notes:
+                notes.forget(payload.message_id)
 
         async def on_raw_reaction_add(payload):
             if native.user and payload.user_id != native.user.id and store.get_message(payload.message_id):
                 store.add_reaction(payload.message_id, payload.user_id, str(payload.emoji))
+            if (notes and native.user and payload.user_id != native.user.id and payload.channel_id in note_channels
+                    and str(payload.emoji) == NOTE_EMOJI):
+                # The memo on your own message asks for a note on it. On anyone else's it means nothing.
+                try:
+                    channel = native.get_channel(payload.channel_id) or await native.fetch_channel(payload.channel_id)
+                    message = await channel.fetch_message(payload.message_id)
+                    if message.author.id == payload.user_id and not message.author.bot:
+                        await notes.requested(payload.channel_id, to_msg(message), payload.user_id)
+                except Exception as exc:
+                    log.warning("A requested note could not be written (%s).", type(exc).__name__)
 
         async def on_raw_reaction_remove(payload):
             store.remove_reaction(payload.message_id, payload.user_id, str(payload.emoji))

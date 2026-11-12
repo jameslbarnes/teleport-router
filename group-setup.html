@@ -72,11 +72,66 @@
       <div id="discord-start" hidden><a id="open-discord" class="r-btn r-btn--primary" target="_blank" rel="noopener noreferrer">Open Discord</a>
         <p>In the connected server, use <code>/router-link</code> without a code. Its private reply gives you a link back here to confirm your account.</p>
         <p class="r-hint"><a id="discord-invite" target="_blank" rel="noopener noreferrer" hidden>Join the Discord server first.</a> <span id="discord-invite-missing">Join the Discord server using your host’s invitation first.</span> Discord membership and Router group membership are managed separately.</p></div>
-      <div id="discord-confirm" hidden><p id="discord-account"></p>
-        <label class="check"><input type="checkbox" id="discord-self">I just ran /router-link myself from the Discord account shown above.</label>
-        <p>The bot will be able to save notes you submit, retrieve this group’s notes for you, and check your connection. Replies to private commands are shown only to you; saved notes are shared with the whole Router group, whichever Discord channel you save from.</p>
-        <p class="r-hint">Discord can see what you type into its commands and what the bot replies. Summaries from <code>/router-recall</code> are written by an AI model service, which receives the notes being summarized.</p>
-        <button id="confirm-discord" class="r-btn r-btn--primary" disabled>Connect these accounts</button></div>
+      <div id="discord-confirm" class="r-perm" hidden>
+        <article class="r-perm-card" aria-labelledby="perm-title">
+          <div class="r-perm-parties" aria-hidden="true"><span class="r-perm-party r-perm-party--asker" id="perm-discord-initial">d</span><span class="r-perm-link"><i></i><i></i><i></i></span><span class="r-perm-party" id="perm-you-initial"></span></div>
+          <h2 class="r-perm-title" id="perm-title"><span data-when="plain"><em class="perm-discord"></em> on Discord wants to act as you in this group</span><span data-when="notes">The bot in this Discord wants to be your agent there</span></h2>
+          <p class="r-perm-who" data-when="plain"><span class="perm-display"></span>Signed in to Router as <span class="r-perm-mono perm-handle"></span></p>
+          <p class="r-perm-who" data-when="notes">Discord <span class="r-perm-mono perm-discord"></span> is Router <span class="r-perm-mono perm-handle"></span>. <span class="perm-display"></span></p>
+          <p class="r-perm-lede" data-when="plain">One thing is new: text that Discord account submits with <code>/router-save</code> is posted to <span class="r-perm-mono perm-group"></span> under your Router name. Nobody gains access to anything they could not already read.</p>
+          <p class="r-perm-lede" data-when="notes">It would write notes for you from what you say there, under your name, following the posting rules your own agent already follows.</p>
+          <figure class="r-perm-example" data-when="notes">
+            <figcaption><span>Your posting rules, as saved</span><a href="/posting-rules" target="_blank" rel="noopener">Change them</a></figcaption>
+            <p class="r-perm-example-main" id="perm-rules-line"></p>
+            <p class="r-perm-example-more" id="perm-rules-own"></p>
+          </figure>
+          <div class="r-perm-part" role="group" aria-labelledby="perm-does-h">
+            <h3 class="r-perm-h" id="perm-does-h">To do this</h3>
+            <dl class="r-perm-list" data-when="plain">
+              <div><dt>Save</dt><dd>Only the text you type into <code>/router-save</code>. It goes to the whole Router group, whichever Discord channel you save from. Ordinary Discord chat is never saved.</dd></div>
+              <div><dt>Find</dt><dd>This group’s notes, when you ask for them. You can already read these as a member; this brings them into Discord. Replies to private commands are shown only to you.</dd></div>
+              <div><dt>Check</dt><dd>That this connection is still active, and that your note storage is working.</dd></div>
+            </dl>
+            <dl class="r-perm-list" data-when="notes">
+              <div><dt>Read</dt><dd>Your posting rules, and what you write in the channels of this server where notes are kept.</dd></div>
+              <div><dt>Post</dt><dd>Notes for you in <span class="r-perm-mono perm-group"></span>, under your name, as far as those rules allow.</dd></div>
+              <div><dt>Find</dt><dd>The group’s notes, when you ask it something. You can already read these as a member.</dd></div>
+              <div><dt>Check</dt><dd>That this connection is still active, and that your note storage is working.</dd></div>
+            </dl>
+          </div>
+          <div class="r-perm-part" role="group" aria-labelledby="perm-cond-h">
+            <h3 class="r-perm-h" id="perm-cond-h">Under these conditions</h3>
+            <ul class="r-perm-conds" data-when="plain">
+              <li>Only in <span class="r-perm-mono perm-group"></span>. It cannot post anywhere else as you, publicly or to another group, and it cannot read your other groups or messages sent to you.</li>
+              <li>Your public notes are not part of this. Anyone can already read them.</li>
+              <li>One Discord account for each Router account.</li>
+              <li>It stays active while you use it: it ends 30 days after your last command, and after one year in any case. You can withdraw it at any time, here or with <code>/router-unlink</code>.</li>
+            </ul>
+            <ul class="r-perm-conds" data-when="notes">
+              <li><b>You see every note first.</b> The bot sends you its text in a direct message. It waits, usually an hour, before the group sees it, and you can edit or delete it.</li>
+              <li><b>Your rules stay in charge.</b> Set them to show a draft first and it asks before each note. Set them to manual and it writes one only when you put 📝 on your own message.</li>
+              <li>Only in <span class="r-perm-mono perm-group"></span>. It cannot post anywhere else as you, publicly or to another group, and it cannot read your other groups or messages sent to you.</li>
+              <li>One Discord account for each Router account. It ends 30 days after you last use it, and after one year in any case. You can withdraw it at any time, here or with <code>/router-unlink</code>.</li>
+            </ul>
+          </div>
+          <div class="r-perm-part" role="group" aria-labelledby="perm-open-h">
+            <h3 class="r-perm-h" id="perm-open-h">What rests on others</h3>
+            <ul class="r-perm-checks" data-when="plain">
+              <li class="r-perm-open">Router takes the bot’s word that a save came from your command. It cannot check that with Discord itself.</li>
+              <li class="r-perm-open">Discord can see what you type into the bot’s commands and what the bot replies.</li>
+              <li class="r-perm-open">Summaries from <code>/router-recall</code> are written by an AI model service, which receives the notes being summarized.</li>
+            </ul>
+            <ul class="r-perm-checks" data-when="notes">
+              <li class="r-perm-open">The bot runs beside Router, in the same enclave. Even so, Router takes its word for what you wrote and cannot check that with Discord itself.</li>
+              <li class="r-perm-open">An AI model service reads the conversation to write the notes. Discord sees everything said in the server.</li>
+              <li class="r-perm-open">The bot also keeps its own notes on discussions, under its own name. They can mention what you said. Until the group can read one, you can have your part left out.</li>
+            </ul>
+          </div>
+          <label class="r-perm-confirm"><input type="checkbox" id="discord-self"><span>I just asked to connect from this Discord account, and it is my own.<small>Someone else’s link would let their Discord account act under your Router name.</small></span></label>
+          <div class="r-perm-actions"><button id="confirm-discord" class="r-btn r-btn--primary r-perm-allow" disabled>Allow</button><button id="decline-discord" class="r-btn">Not now</button></div>
+          <p class="r-perm-fine">Allowing connects these two accounts for this group. Then go back to Discord; the bot finishes the connection there.</p>
+        </article>
+      </div>
       <p id="discord-state"></p><button id="check-discord" class="r-btn">Check connection</button>
       <button id="unlink-discord" class="r-btn r-btn--danger" hidden>Withdraw this group’s Discord permission</button>
       <button id="discord-next" class="r-btn r-btn--primary">Continue to posting rules</button><button id="skip-discord" class="r-btn">Continue without Discord</button>

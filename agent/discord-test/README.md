@@ -86,9 +86,26 @@ With `member_role_id` and `welcome_channel_id` in the private plugin's settings 
 
 Without those two settings the plugin behaves as before. The door is housekeeping. The privacy check is Router's, above.
 
-Private conversation offers only group search/read and anonymous public Router search to the model. The usual web search and configured external MCP servers are absent. Each reply rechecks source versions and current audience before sending. It stores neither source notes nor drafts in a persistent database; current channel context is held in memory, with previous bot reply text omitted. It never saves ordinary conversation to Router. Keep using `/router-save` for selected notes.
+Private conversation offers only group search/read and anonymous public Router search to the model. The usual web search and configured external MCP servers are absent. Each reply rechecks source versions and current audience before sending. It stores neither source notes nor drafts in a persistent database; current channel context is held in memory, with previous bot reply text omitted. A reply never saves anything to Router. Notes are a separate, opt-in path, described under "Notes for the group"; without it, `/router-save` is the only way a note is saved.
 
 The native commands remain private to their requester and retain their configured channel or guild scope. Failed ambient checks stay quiet; mentions get a short failure notice with private-command alternatives. Shared replies are visible in Discord and remain in its history after source deletion or membership changes. The final check and Discord send are separate operations, with a small race between them. No claim of erasing Discord copies is made.
+
+### Notes for the group
+
+With `"notes": "live"` in the participation settings of a private profile, the bot acts as each member's agent (`notes.py`, `notes_ui.py`). `"shadow"` reads and decides but shows and posts nothing; the default is `"off"`. Notes are kept from the channels in `notes_channel_ids` (default: the watched channel).
+
+Router must also allow it. A group admin calls `POST /api/discord/conversation/configure` with `notes: true`. After that, a person who connects in the browser is shown the larger permission, and only their permission lets the bot read their rules (`operate` with action `rules`). People who connected before must connect again; until they do they get no notes, and the bot is refused their rules.
+
+After `notes_pause_seconds` (600) without a message, or `notes_max_burst` (40) messages, one model call reads the burst and proposes at most one note per eligible person and at most one about the discussion. The bot then:
+
+- sends each person their draft in a direct message. Automatic rules: it waits `notes_delay_seconds` (3600) and saves through that person's permission. Ask-first rules: it saves only on **Post**. Manual rules: nothing, until the person puts 📝 on their own message, which is written up and saved at once.
+- posts its own note about a shared discussion through the ordinary notebook API with its own key, to the configured group only, and announces it in the channel with **Leave my part out**.
+
+Limits: `notes_per_person_per_day` (3) and `notes_discussions_per_day` (4). Nobody is posted for without having been shown the note. A person who blocks direct messages is told once in the channel and skipped. Before any burst is sent to the model, Router confirms that everyone who can see the channel is a linked member. Drafts and their source messages are held in memory only. Logs carry counts and error types, never text.
+
+The bot's own account needs its own note storage and posting rules, like any member, or its notes are stored the way an unlinked account's are.
+
+Not covered by tests: real Discord delivery of the direct message, the buttons and the edit window. Check those by hand after installing.
 
 The following participation rules apply in both public and private conversation profiles. In the public profile Hermes answers mentions; in the private profile the native participation plugin answers them once, without starting a Hermes session.
 

@@ -146,7 +146,7 @@ An invitation link opens one page that takes a new member from nothing to a work
 
 1. **Your account.** Choose a handle, or restore from a recovery file, or sign in with an existing Router key. Creating the account also joins the group.
 2. **Your notes.** Choose a recovery password and download the recovery file. The browser creates the storage key, grants Router the `router/` folder for one year, proves it can recover, and reads the recovery record back before reporting success.
-3. **Discord.** In the Discord server, run `/router-link`. Its private reply is a ten-minute link back to this page. The page shows the Discord username and asks the person to confirm it is their own account.
+3. **Discord.** In the Discord server, press "Connect my Router account" under the welcome message, or run `/router-link`. The private reply is a ten-minute link back to this page. The page then shows one permission card and nothing else: which Discord account is asking, what the bot may do for the person, under what conditions, and what rests on others. The person ticks that the Discord account is their own, then chooses Allow or Not now. Not now sends nothing; the link simply runs out.
 4. **Sharing rules.** Review the suggested rules and save, or keep rules already saved. Joining, linking and downloading never change a person's rules.
 
 Storage and Discord can both be postponed. The last page names anything left unfinished and offers the group's notes to read. A first post is optional.
@@ -210,7 +210,20 @@ A Discord bot can answer from the public notebook, use a connected private group
 | `/router-status` | Shows which Router account is linked and whether storage is available |
 | `/router-unlink` | Withdraws the bot's permission for that person |
 
-Replies are visible only to the person who ran the command. A saved note is shared with the whole Router group. Ordinary Discord conversation is never saved automatically.
+Replies are visible only to the person who ran the command. A saved note is shared with the whole Router group. Ordinary Discord conversation is not saved, unless the group has turned on notes written for its members, described next, and then only for people who agreed to that.
+
+### Notes written for you
+
+A group admin can let the bot act as each member's agent in the Discord server. It is off until the admin turns it on, and turning it on changes nothing for people who connected earlier: each person is shown the larger permission when they connect, and only then may the bot read their posting rules.
+
+After a conversation pauses, the bot reads that stretch of it once and may draft:
+
+- **A note under your name**, for something that is yours: a finding, a decision, an idea. It follows your own posting rules. With automatic rules that name this group, the draft waits (an hour unless the host chose another time) and is then posted. With "show a draft first", with no rules yet, or with automatic rules that do not name this group, it asks and posts only if you say yes. With manual rules it writes nothing until you put 📝 on your own message.
+- **One note about the discussion**, under the bot's own name and its own posting rules, when several people took part. Anyone whose messages it drew on can have their part left out until the group can read it; the note is withdrawn and rewritten without them.
+
+You see every note written for you before the group does. The bot sends it to you in a direct message with Delete, Edit and Post now, and the channel sees only a 📝 on your message. Someone the bot cannot message gets no notes. Delete also works after posting, for notes the bot wrote this way.
+
+What this adds to the permission: the bot may read your posting rules, and Router accepts a note for you without a command from you. Router still fixes the author and the audience itself, so the bot cannot post anywhere but this group as you. Drafts and the messages behind them are kept in memory only, so a restart drops whatever was not yet posted. Router cannot check with Discord what you actually wrote: it takes the bot's word. The model service receives the conversation and each eligible person's rules.
 
 ### Group notes in conversation
 
@@ -233,6 +246,7 @@ Discord keeps replies already sent. Someone given access to its history later ma
 - Linking gives the bot a permission tied to one person, one group, one Discord account and the bot's own identity. It is useless without the bot's Router key.
 - Every command is checked again: the permission is active, the person and the bot are still members, the group is still private and still bound to this server, and the Discord account still matches.
 - A permission stays active while it is used. It ends 30 days after the last command and after one year in any case. `/router-link` renews it.
+- Reading a person's posting rules, and checking that they are still linked, are the bot's own questions. They do not count as use and do not extend the permission.
 - Recall ranks notes by how many of the question's meaningful words they contain, newest first on ties, from the latest 500 notes.
 - Summaries are written by an AI model service that receives the notes being summarized. Links in summaries are built by the bot, not by the model.
 

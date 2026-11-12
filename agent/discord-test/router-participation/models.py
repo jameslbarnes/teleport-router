@@ -18,6 +18,7 @@ import httpx
 from .participation import AXES, INTENTS, Classification, Decision, Msg, format_context  # noqa: F401 (re-exported)
 from .prompts import CLASSIFIER, COMPOSE
 from .group_memory import GROUP_TOOLS, PRIVATE_SYSTEM
+from .notes import NOTES_SCHEMA, NOTES_SYSTEM
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +133,36 @@ class Brain:
                     return None, {**usage, "skipped": True}
                 return text[:1900], usage
         return None, {**usage, "error": "too many rounds"}
+
+    async def take_notes(self, payload: str, discussion: bool, word_cap: int = 200) -> dict:
+        """Read one burst of a private channel and propose notes (see notes.py). No tools, no earlier
+        history, and nothing kept: the burst goes in and schema-checked JSON comes out. A failed call
+        proposes nothing."""
+        nothing = {"personal": [], "discussion": {"worth_noting": False, "text": "", "people": []}}
+        rule = "" if discussion else "Do not write a discussion note this time: set \"worth_noting\" to false.\n"
+        try:
+            resp = await self.client.messages.create(
+                model=self.s.get("notes_model", self.s.get("compose_model", "claude-opus-5-5")),
+                max_tokens=3000,
+                output_config={"effort": "medium", "format": {"type": "json_schema", "schema": NOTES_SCHEMA}},
+                system=NOTES_SYSTEM.format(word_cap=word_cap, discussion_rule=rule, channel_note=self.note),
+                messages=[{"role": "user", "content": payload}],
+            )
+        except anthropic.APIStatusError as exc:
+            log.warning("Note pass failed: HTTP %s", exc.status_code)
+            return nothing
+        except anthropic.APIConnectionError:
+            log.warning("Note pass failed: connection error")
+            return nothing
+        if resp.stop_reason != "end_turn":
+            return nothing
+        try:
+            found = json.loads(next((b.text for b in resp.content if b.type == "text"), ""))
+        except ValueError:
+            return nothing
+        if not discussion:
+            found["discussion"] = nothing["discussion"]
+        return found
 
     async def _run_tool(self, block, call_mcp) -> dict:
         try:
