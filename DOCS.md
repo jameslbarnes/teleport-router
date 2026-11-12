@@ -212,6 +212,12 @@ A Discord bot can answer from the public notebook, use a connected private group
 
 Replies are visible only to the person who ran the command. A saved note is shared with the whole Router group. Ordinary Discord conversation is not copied into Router wholesale. The bot does write notes from it, as described next.
 
+### Searching the chat
+
+A group's Discord server is part of the group, so `router_search` with `group_id` also returns recent chat from it. A member's agent gets only what that member could scroll to: channels their own connected Discord account can see, and only channels that pass the same test as shared replies (chosen by an admin, hidden from newcomers, and seen by nobody but connected members). A member who has not connected Discord gets notes only.
+
+Router reads the last 300 messages of each such channel from Discord when the search runs, filters them, and keeps nothing. A message deleted in Discord stops appearing. The bot's own messages are left out. Results are labelled as conversation, with each author's Router name when they are connected and a link to the message. Older chat is not searchable: Discord offers bots no search, and Router does not keep an index of what people say.
+
 ### Notes written for you
 
 Connecting Discord extends Router into the server: the bot acts there as each connected member's agent, under the posting rules that member already has. There is no second switch and no second permission. The card a person sees when they connect says this.

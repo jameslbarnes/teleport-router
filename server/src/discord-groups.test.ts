@@ -14,6 +14,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const revoked = new Set<string>();
   const audienceState = {botId:'100000000000000090',viewerIds:['100000000000000003','100000000000000090'], open:false, unavailable:false,
     beforeRead:async()=>{}};
+  const chatState = {messages:[] as any[], reads:[] as string[], unavailable:false};
   const layer = authorStorage(base, async b => {
     const check = () => {if (revoked.has(b.space)) throw new Error('revoked');};
     const records = data.get(b.space)!;
@@ -30,7 +31,9 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   await base.createChannel({id:'test-group', name:'Private test', visibility:'private', joinRule:'invite', createdBy:'alice', createdAt:clock,
     skills:[], subscribers:['alice','bob','router_bot'].map(handle=>({handle,role:handle==='alice'?'admin':'member',joinedAt:clock}))});
   const service = discordGroups(layer.storage, layer.storage, layer.status, {baseUrl:'https://router.example',now:()=>clock,
-    audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {botId:audienceState.botId,open:audienceState.open,viewerIds:[...audienceState.viewerIds]};}});
+    audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {botId:audienceState.botId,open:audienceState.open,viewerIds:[...audienceState.viewerIds]};},
+    history:async(_guild,channelId)=>{chatState.reads.push(channelId);if(chatState.unavailable)throw Error('unavailable');
+      return {channelName:'general',messages:chatState.messages.filter(m=>m.channelId===channelId)};}});
   const context = {guildId:'100000000000000001', channelId:'100000000000000002', discordUserId:'100000000000000003'};
   const call = (who: keyof typeof keys, path: string, body: Record<string,unknown>) => service.serve('/api/discord/'+path, `Bearer ${keys[who]}`, body) as Promise<any>;
   await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',
@@ -41,7 +44,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   }
   const operate = (grant: string, body: Record<string,unknown> = {}) => call('router_bot','operate',{grant,...context,...body});
   const save = (grant: string, content='Selected synthetic note', interactionId='100000000000000010') => operate(grant,{action:'save',content,interactionId});
-  return {base,layer,data,revoked,keys,context,call,link,operate,save,audienceState,advance:(ms=60001)=>{clock+=ms;}};
+  return {base,layer,data,revoked,keys,context,call,link,operate,save,audienceState,chatState,chat:service.chat,advance:(ms=60001)=>{clock+=ms;}};
 }
 
 describe('Shared conversational group access',()=>{
@@ -367,6 +370,63 @@ describe('Scoped private Discord group access',()=>{
     await expect(f.operate(alice.grant,{action:'read',entryId:second.entry.id})).rejects.toMatchObject({status:404});
     await expect(f.operate(bob.grant,{discordUserId:'100000000000000004',action:'save',content:'After revoke',interactionId:'100000000000000012'})).rejects.toMatchObject({status:503});
     expect(f.data.get('bob')!.has(`posts/${second.entry.id}`)).toBe(true);
+  });
+});
+
+describe('A group\'s Discord chat in a member\'s own search',()=>{
+  const said=(n:number,authorId:string,content:string,extra:Record<string,unknown>={})=>({id:String(200000000000000000n+BigInt(n)),channelId:'100000000000000002',
+    authorId,author:'Discord name',automated:false,content,timestamp:1_000_000+n,url:'https://discord.com/channels/x/y/'+n,...extra});
+  async function chatting() {
+    const f=await fixture('guild'); await f.link();
+    await f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[f.context.channelId]});
+    f.chatState.messages=[said(1,'100000000000000003','The telescope decision was to wait.'),said(2,'100000000000000004','Lunch?'),
+      said(3,'100000000000000090','Summary of a private note',{automated:true}),said(4,'100000000000000003','telescope budget and telescope mount')];
+    return f;
+  }
+  it('shows a linked member the channels their own Discord account can see, newest first, without the bot\'s messages',async()=>{
+    const f=await chatting();
+    const all=await f.chat('alice','test-group',{limit:10});
+    expect(all.map(m=>m.content)).toEqual(['telescope budget and telescope mount','Lunch?','The telescope decision was to wait.']);
+    expect(all[0]).toMatchObject({handle:'alice',channelName:'general'});
+    expect(all[1].handle).toBeUndefined(); // written by a Discord account that is not linked now
+    expect((await f.chat('alice','test-group',{query:'telescope decision',limit:10})).map(m=>m.content))
+      .toEqual(['The telescope decision was to wait.','telescope budget and telescope mount']);
+    expect((await f.chat('alice','test-group',{since:1_000_003,limit:10})).map(m=>m.content)).toEqual(['telescope budget and telescope mount']);
+    expect(await f.chat('alice','test-group',{author:'bob',limit:10})).toEqual([]);
+    expect(await f.chat('alice','test-group',{limit:1})).toHaveLength(1);
+  });
+  it('shows nothing to a member with no Discord link, an outsider, or a linked member who cannot see the channel',async()=>{
+    const f=await chatting();
+    expect(await f.chat('bob','test-group',{limit:10})).toEqual([]);
+    expect(await f.chat('outsider','test-group',{limit:10})).toEqual([]);
+    expect(await f.chat('alice','another-group',{limit:10})).toEqual([]);
+    expect(f.chatState.reads).toEqual([]); // none of those reached Discord's messages
+    f.audienceState.viewerIds=['100000000000000090'];
+    expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+    expect(f.chatState.reads).toEqual([]);
+  });
+  it('reads no channel that is open to newcomers, seen by an unlinked account, not opted in, or unreadable',async()=>{
+    const f=await chatting();
+    f.audienceState.open=true; expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+    f.audienceState.open=false; f.audienceState.viewerIds.push('100000000000000055');
+    expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+    f.audienceState.viewerIds.pop(); f.audienceState.unavailable=true;
+    expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+    expect(f.chatState.reads).toEqual([]);
+    f.audienceState.unavailable=false; f.chatState.unavailable=true;
+    expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+    f.chatState.unavailable=false;
+    await f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[]});
+    expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+  });
+  it('gives nothing to someone removed from the group while Discord was answering, or after they unlink',async()=>{
+    const f=await chatting();
+    f.audienceState.beforeRead=async()=>{await f.base.removeSubscriber('test-group','alice');};
+    expect(await f.chat('alice','test-group',{limit:10})).toEqual([]);
+    const g=await chatting(), linked=await g.link();
+    expect(await g.chat('alice','test-group',{limit:10})).toHaveLength(3);
+    await g.operate(linked.grant,{action:'unlink'});
+    expect(await g.chat('alice','test-group',{limit:10})).toEqual([]);
   });
 });
 
