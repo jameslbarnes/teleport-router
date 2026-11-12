@@ -1364,10 +1364,6 @@ if (insights && insights.releaseEnabled) {
 }
 
 // Initialize SendGrid client for email notifications
-// Debug: show all env vars containing SEND or GRID
-const envKeys = Object.keys(process.env).filter(k => k.includes('SEND') || k.includes('GRID') || k.includes('send') || k.includes('grid'));
-console.log(`[Email] Env vars matching SEND/GRID: ${envKeys.length > 0 ? envKeys.join(', ') : '(none found)'}`);
-console.log(`[Email] All env var names: ${Object.keys(process.env).join(', ')}`);
 console.log(`[Email] SENDGRID_API_KEY present: ${!!process.env.SENDGRID_API_KEY}`);
 console.log(`[Email] SENDGRID_FROM_EMAIL: ${process.env.SENDGRID_FROM_EMAIL || '(not set, using default)'}`);
 const emailClient = process.env.SENDGRID_API_KEY
