@@ -7,12 +7,16 @@
 //   node scripts/insights-owner.mjs <command> [options]
 //     enclave [--pin]                           check what the enclave says about itself; --pin remembers it
 //     status                                    your consent as Router reports it, beside the one kept here
-//     consent --triggers h1[,h2] [--groups g1,g2] [--days 30] [--yes]
+//     consent --triggers h1[,h2] [--groups g1,g2] [--days 30] [--weekly] [--yes]
+//                                               --weekly allows the weekly pipeline: no signature for each run. Then --triggers may be left out.
 //     requests                                  run requests that involve your posts
 //     authorize <request_id> [--yes] [--unchecked-posts]
 //     decline <request_id>
 //     preview <run_id>                          open your sealed preview: your own answers and notes only
 //     approve <run_id> [--yes] | veto <run_id> [--yes]
+//     weekly                                    the weekly pipeline's public register, with each plan checked against the pinned enclave
+//     weekly-preview <run>                      open your sealed preview of a week's draft: the draft and your own findings
+//     weekly-veto <run> [--yes]                 cancel a week's draft before it is published; one contributor is enough
 //
 // Without --yes, signing commands only print what would be signed.
 // Environment: ROUTER_URL (default https://router.teleport.computer), ROUTER_KEY or ROUTER_KEY_FILE (your Router key),
@@ -27,12 +31,14 @@ import { Wallet, computeAddress, verifyMessage } from 'ethers';
 import { canonical } from '../dist/author-records.js';
 import { consentMessage, authorizationMessage, approvalMessage, questionSha256 } from '../dist/insights-release.js';
 import { openPreview, contributionCommitment } from '../dist/insights-enclave.js';
+import { openWeeklyPreview } from '../dist/insights-weekly.js';
+import { vetoMessage } from '../dist/insights-program.js';
 import { sha256Hex } from '../dist/trace-envelope.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const flags = {}, args = [];
 for (let i = 0; i < rest.length; i++) {
-  if (['--yes', '--pin', '--unchecked-posts'].includes(rest[i])) flags[rest[i].slice(2)] = true;
+  if (['--yes', '--pin', '--unchecked-posts', '--weekly'].includes(rest[i])) flags[rest[i].slice(2)] = true;
   else if (rest[i].startsWith('--')) flags[rest[i].slice(2)] = rest[++i];
   else args.push(rest[i]);
 }
@@ -97,7 +103,8 @@ else if (command === 'consent') {
   const triggers = (flags.triggers || '').split(',').filter(Boolean).map(h => h.replace(/^@/, ''));
   const groups = flags.groups ? flags.groups.split(',').filter(Boolean) : ['insights-notes'];
   const days = flags.days ? Number(flags.days) : 30;
-  const draft = await api('/api/insights/consent/draft', { triggers, groups, days });
+  const weekly = flags.weekly === true;
+  const draft = await api('/api/insights/consent/draft', { triggers, groups, days, weekly });
   const p = draft.policy;
   // Sign only text this tool derives itself, for exactly what was asked, naming the enclave pinned here.
   const problems = [];
@@ -106,10 +113,15 @@ else if (command === 'consent') {
   if (p.program.sha256 !== pin.program_sha256) problems.push('it names a program other than the pinned one');
   if (canonical(p.scope.groups) !== canonical(groups)) problems.push('its groups differ from the ones asked for');
   if (canonical(p.triggers.map(t => t.handle)) !== canonical(triggers)) problems.push('its requesters differ from the ones asked for');
+  if (p.weekly !== weekly) problems.push(weekly ? 'it does not allow the weekly pipeline, which was asked for' : 'it allows the weekly pipeline, which was not asked for');
   if (Math.abs(Date.parse(p.expiresAt) - Date.parse(p.issuedAt) - days * 86400_000) > 60_000) problems.push('its length differs from the one asked for');
   const wallet = await ownerWallet();
   if (`did:pkh:eip155:1:${wallet.address}`.toLowerCase() !== p.owner.did.toLowerCase()) problems.push('OWNER_KEY_FILE is not the key that owns this account\'s storage');
   if (problems.length) throw new Error('Not signing: ' + problems.join('; ') + '.');
+  // Said first and apart from the rest, because it is the difference between signing every run and signing none.
+  console.log(weekly
+    ? '*** THIS CONSENT ALLOWS THE WEEKLY PIPELINE. ***\nOnce a week the program may read the traces behind your posts in these groups WITHOUT ASKING YOU AGAIN.\nYou get each week\'s draft first and can cancel it (weekly-veto) before it is published. Revoking stops later weeks.\n'
+    : 'This consent does NOT allow the weekly pipeline: every run needs your signature. (Add --weekly to allow it.)\n');
   console.log(draft.message);
   if (!flags.yes) { console.log('\n(not signed: add --yes to sign and save this consent)'); process.exit(0); }
   const signature = await wallet.signMessage(draft.message);
@@ -179,6 +191,44 @@ else if (command === 'preview' || command === 'approve' || command === 'veto') {
   show({ your_items: preview.body.your_items, decision: body.approve ? 'publish these, counted with the others' : 'leave them out' });
   if (!flags.yes) { console.log('\n(not signed: add --yes to sign this decision)'); process.exit(0); }
   show(await api('/api/insights/runs/decide', { run_id: id, approval: { body, signature: await wallet.signMessage(approvalMessage(body)) } }));
+}
+
+else if (command === 'weekly') {
+  const pin = await readJson(pinPath);
+  const { weeks } = await api('/api/insights/weekly');
+  show(weeks.map(w => {
+    let signedBy = '';
+    try { signedBy = w.plan ? verifyMessage(canonical(w.plan.plan), w.plan.signature) : ''; } catch { /* shown as false */ }
+    return { week: w.week, run: w.run, status: w.status, reason: w.reason, question: w.plan?.plan.question ?? null, posts: w.plan?.plan.entries ?? [],
+      run_after: w.plan?.plan.runAfter ?? null, plan_signed_by_pinned_enclave: w.plan ? (pin ? signedBy === pin.signer && w.plan.plan.enclave?.releaseKey === pin.release_key : 'no enclave pinned') : null,
+      people_invited: w.people_invited, people_with_weekly_consent: w.people_with_weekly_consent, contributors: w.contributors,
+      publish_after: w.publish_after, published_skill: w.published?.body?.skill ?? null, note: w.router_note };
+  }));
+}
+
+else if (command === 'weekly-preview' || command === 'weekly-veto') {
+  const run = args[0];
+  const pin = await needPin();
+  const wallet = await ownerWallet();
+  const did = `did:pkh:eip155:1:${wallet.address}`;
+  const sealed = await api('/api/insights/weekly/preview', { run_id: run });
+  const preview = openWeeklyPreview(sealed, did, run, wallet.privateKey);
+  // Anyone can seal a message to your key; only the enclave you pinned can sign one with its release key.
+  const problems = [];
+  let signedBy = '';
+  try { signedBy = verifyMessage(canonical(preview.body), preview.signature); } catch { /* below */ }
+  if (signedBy !== pin.signer || preview.signer !== pin.signer) problems.push('it is not signed by the pinned enclave');
+  if (preview.body.run !== run || preview.body.enclave?.releaseKey !== pin.release_key || preview.body.enclave?.appId !== pin.app_id) problems.push('it is for another run or enclave');
+  if (problems.length) throw new Error('Not trusting this preview: ' + problems.join('; ') + '.');
+  show({ week: preview.body.week, run, question: preview.body.question, status: preview.body.status, reason: preview.body.reason,
+    draft: preview.body.draft, your_findings: preview.body.your_findings, contributors: preview.body.contributors,
+    publish_after: preview.body.publish_after, sent_to: preview.body.sent_to });
+  if (command === 'weekly-preview') process.exit(0);
+  if (preview.body.status !== 'waiting') throw new Error(`Nothing to cancel: this run is ${preview.body.status}.`);
+  const body = { v: 1, domain: 'teleport-router/insights-weekly-veto', run, enclave: { appId: pin.app_id, releaseKey: pin.release_key } };
+  console.log('\nCancelling means this draft is never published. It cannot be undone.\n\n' + vetoMessage(body));
+  if (!flags.yes) { console.log('\n(not signed: add --yes to sign this cancellation)'); process.exit(0); }
+  show(await api('/api/insights/weekly/veto', { run_id: run, veto: { body, signature: await wallet.signMessage(vetoMessage(body)) } }));
 }
 
 else throw new Error(`Unknown command ${command}. Try: help`);

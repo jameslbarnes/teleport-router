@@ -21,7 +21,7 @@ import { pathToFileURL } from 'node:url';
 export const WATCHED = {
   words: ['server/src/insights-spec.ts'],
   code: ['server/src/author-records.ts', 'server/src/insights-enclave-server.ts', 'server/src/insights-enclave.ts', 'server/src/insights-program.ts',
-    'server/src/trace-envelope.ts', 'server/scripts/bundle-insights-enclave.mjs'],
+    'server/src/insights-weekly.ts', 'server/src/trace-envelope.ts', 'server/scripts/bundle-insights-enclave.mjs'],
   dependencies: ['server/package.json', 'server/package-lock.json'],
   image: ['insights-enclave/Dockerfile'],
   gate: ['insights-enclave/gate.mjs', 'insights-enclave/embed.mjs'],

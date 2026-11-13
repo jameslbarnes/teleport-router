@@ -24,7 +24,10 @@ async function world(opts: { upgrades?: UpgradePolicy; noEnclave?: boolean } = {
     complete: async ({ user }) => { calls.push(user); return JSON.stringify(user.includes('timeout')
       ? { applies: 'yes', effect: 'would_have_helped', cost: 'tens_of_minutes', note: 'A tiny trial run first would have exposed the mistake early.' }
       : { applies: 'no', effect: 'not_applicable', cost: 'none', note: '' }); } });
-  const client: EnclaveClient = { info: () => enclave.info(), run: input => enclave.run(input as any), decide: input => enclave.decide(input as any) };
+  // The weekly pipeline has its own tests (insights-weekly-release.test.ts); nothing here may reach it.
+  const noWeekly = async (): Promise<never> => { throw new Error('the weekly pipeline is not part of these tests'); };
+  const client: EnclaveClient = { info: () => enclave.info(), run: input => enclave.run(input as any), decide: input => enclave.decide(input as any),
+    weeklyPlan: noWeekly, weeklyRun: noWeekly, weeklyVeto: noWeekly, weeklyPreviews: noWeekly, weeklyStatus: noWeekly };
   const release = insightsRelease({
     enclave: opts.noEnclave ? null : { client, info: await client.info() }, baseUrl: BASE, model: 'model-under-test',
     getUser: async h => users.get(h) || null,
@@ -127,6 +130,9 @@ describe('Private traces and insights runs', () => {
     expect(message).toContain(`Program SHA-256: ${insightsProgram('model-under-test').sha256}`);
     expect(message).toContain('not tied to one code version');
     expect(message).toContain('in runs I authorize one at a time');
+    // Unless asked for, a consent does not allow the weekly pipeline, and says so in the text that is signed.
+    expect(policy.weekly).toBe(false);
+    expect(message).toContain('Weekly pipeline: no. Every run needs my signature.');
     const widened = { ...policy, scope: { groups: ['insights-notes', 'everything'] } };
     await expect(w.release.saveConsent(alice.user, widened, await alice.wallet.signMessage(message))).rejects.toThrow('signed with the key');
     const otherProgram = { ...policy, program: { ...policy.program, sha256: '0'.repeat(64) } };

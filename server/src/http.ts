@@ -40,6 +40,8 @@ import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
 import { insightsRelease, checkUpgradePolicy, type UpgradePolicy, type EnclaveClient, type EnclaveInfo } from './insights-release.js';
 import { insightsEnclave } from './insights-enclave.js';
+import { insightsWeekly } from './insights-weekly.js';
+import { insightsWeeklyRelease, insightsModelStub } from './insights-weekly-release.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
@@ -1317,12 +1319,14 @@ const insightsComplete = anthropic
       const block = reply.content.find(b => b.type === 'text');
       return block?.type === 'text' ? block.text : '';
     }
-  // Stand-in for runs without a model key: a fixed answer keyed on one word of the synthetic log.
+  // Stand-in for runs without a model key: fixed answers keyed on one word of the synthetic log.
   : process.env.INSIGHTS_MODEL_STUB === '1'
-    ? async ({ user }: { user: string }) => JSON.stringify(/<log>[\s\S]*timeout[\s\S]*<\/log>/.test(user)
-        ? { applies: 'yes', effect: 'would_have_helped', cost: 'tens_of_minutes', note: 'A tiny trial run first would have exposed the mistake early.' }
-        : { applies: 'no', effect: 'not_applicable', cost: 'none', note: '' })
+    ? async ({ user }: { user: string }) => insightsModelStub(user)
     : null;
+// The clock every insights part reads. Local test runs can move it forward (POST /api/insights/weekly/clock)
+// to get through the weekly pipeline's waits; nothing else changes it, so in production it is the real time.
+let insightsClockAheadMs = 0;
+const insightsNow = () => Date.now() + insightsClockAheadMs;
 
 async function insightsEnclaveLink(): Promise<{ client: EnclaveClient; info: EnclaveInfo } | null> {
   const url = process.env.INSIGHTS_ENCLAVE_URL;
@@ -1337,16 +1341,25 @@ async function insightsEnclaveLink(): Promise<{ client: EnclaveClient; info: Enc
       if (!res.ok) throw new Error(`Insights enclave ${path}: HTTP ${res.status}${json?.error ? ` (${String(json.error).slice(0, 200)})` : ''}`);
       return json;
     };
-    const client: EnclaveClient = { info: () => call('/info'), run: input => call('/run', input, 15 * 60_000), decide: input => call('/decide', input) };
+    const client: EnclaveClient = { info: () => call('/info'), run: input => call('/run', input, 15 * 60_000), decide: input => call('/decide', input),
+      weeklyPlan: input => call('/weekly/plan', input, 5 * 60_000), weeklyRun: input => call('/weekly/run', input, 30 * 60_000), weeklyVeto: input => call('/weekly/veto', input),
+      weeklyPreviews: async run => (await call('/weekly/previews', { run })).previews,
+      // GET /weekly answers { weeks: [...] }; GET /weekly/<run> answers one week, or 404.
+      weeklyStatus: async run => run === undefined ? (await call('/weekly')).weeks
+        : call(`/weekly/${encodeURIComponent(run)}`).catch(err => { if (/HTTP 404/.test(String(err?.message))) return null; throw err; }) };
     try { return { client, info: await client.info() }; }
     catch (err) { console.error(`[Insights] the enclave did not answer at startup, so runs stay off: ${err instanceof Error ? err.message : err}`); return null; }
   }
   if (insightsRunsEnabled && insightsUpgradesOk && authorIdentity && insightsComplete) {
+    const releasePrivateKey = '0x' + createHmac('sha256', Buffer.from(authorIdentity.privateKey.slice(2), 'hex')).update('teleport-router/test-trace-release/v1').digest('hex');
     const local = insightsEnclave({
-      releasePrivateKey: '0x' + createHmac('sha256', Buffer.from(authorIdentity.privateKey.slice(2), 'hex')).update('teleport-router/test-trace-release/v1').digest('hex'),
-      appId: 'local-test', model: insightsModel, upgrades: insightsUpgrades, complete: insightsComplete,
+      releasePrivateKey, appId: 'local-test', model: insightsModel, upgrades: insightsUpgrades, complete: insightsComplete, now: insightsNow,
       build: { gitSha: process.env.GIT_SHA || null, imageDigest: process.env.IMAGE_DIGEST || null } });
-    const client: EnclaveClient = { info: () => local.info(), run: input => local.run(input as any), decide: input => local.decide(input as any) };
+    // The weekly pipeline's enclave side, with the same key, program and model call. Its weeks last as long as this process.
+    const weekly = insightsWeekly({ releasePrivateKey, appId: 'local-test', model: insightsModel, upgrades: insightsUpgrades, complete: insightsComplete, now: insightsNow });
+    const client: EnclaveClient = { info: () => local.info(), run: input => local.run(input as any), decide: input => local.decide(input as any),
+      weeklyPlan: input => weekly.plan(input), weeklyRun: input => weekly.run(input), weeklyVeto: async input => weekly.veto(input as any), weeklyPreviews: async run => weekly.previews(run),
+      weeklyStatus: async run => weekly.status(run) };
     return { client, info: await client.info() };
   }
   return null;
@@ -1354,19 +1367,46 @@ async function insightsEnclaveLink(): Promise<{ client: EnclaveClient; info: Enc
 // Without an enclave this only stores and returns owner-only traces: ciphertext Router cannot open.
 // TRACE_STORAGE=off switches all of it off.
 let traceUploads = 0;
+const insightsLink = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 'off' ? await insightsEnclaveLink() : null;
 const insights = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 'off'
   ? insightsRelease({
-      enclave: await insightsEnclaveLink(), baseUrl: BASE_URL, model: insightsModel,
+      enclave: insightsLink, baseUrl: BASE_URL, model: insightsModel,
       getUser: handle => storage.getUser(handle),
       updateUser: (handle, updates) => storage.updateUser(handle, updates as any),
       getEntry: id => storage.getEntry(id),
       storeFor: binding => authorCloud.accessFor(binding.delegation),
+      now: insightsNow,
     })
   : null;
-// Requests whose deadline passes start (if enough people agreed) or close, within a minute.
+// The weekly pipeline (insights-weekly-release.ts), only when runs are on.
+const insightsWeeklyJob = insights && insights.releaseEnabled && authorCloud
+  ? insightsWeeklyRelease({
+      enclave: insightsLink, release: insights, baseUrl: BASE_URL,
+      getUser: handle => storage.getUser(handle),
+      updateUser: (handle, updates) => storage.updateUser(handle, updates as any),
+      listUsers: () => storage.getAllUsers(),
+      getEntry: id => storage.getEntry(id),
+      storeFor: binding => authorCloud.accessFor(binding.delegation),
+      getGroup: id => storage.getChannel(id),
+      listGroupEntries: (group, limit) => storage.getChannelEntries(group, limit),
+      // An invitation is an addressed note, private to its recipient, sent the way group invitations are. It has
+      // no handle: it comes from the system, not from an account someone could hold or later register.
+      sendMessage: async (handle, text) => {
+        await storage.addEntry({ pseudonym: 'Router insights', client: 'code', content: text, timestamp: Date.now(), humanVisible: true,
+          to: [`@${handle}`], visibility: 'private' }, 60_000);
+      },
+      now: insightsNow,
+    })
+  : null;
+// Requests whose deadline passes start (if enough people agreed) or close, within a minute. The weekly
+// pipeline plans, invites and hands weeks over on the same beat; INSIGHTS_WEEKLY_TIMER=off leaves it to be
+// driven by hand (local tests do that).
 if (insights && insights.releaseEnabled) {
-  const release = insights;
-  setInterval(() => { release.checkRequests().catch(err => console.error('[Insights] request check failed:', err)); }, 60_000).unref();
+  const release = insights, weekly = process.env.INSIGHTS_WEEKLY_TIMER === 'off' ? null : insightsWeeklyJob;
+  setInterval(() => {
+    release.checkRequests().catch(err => console.error('[Insights] request check failed:', err));
+    weekly?.tick().catch(err => console.error('[Insights] weekly check failed:', err instanceof Error ? err.message : err));
+  }, 60_000).unref();
 }
 
 // Initialize SendGrid client for email notifications
@@ -7450,6 +7490,13 @@ const server = createServer(async (req, res) => {
       if (!insights?.releaseEnabled) { res.writeHead(404); res.end(JSON.stringify({ error: 'Insights runs are not enabled on this server.' })); return; }
       res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ requests: insights.listRequests() })); return;
     }
+    // The public register of the weekly pipeline: each week's signed plan, counts, and the skill once published. Never who.
+    if (req.method === 'GET' && url.pathname === '/api/insights/weekly') {
+      if (!insightsWeeklyJob) { res.writeHead(404); res.end(JSON.stringify({ error: 'Insights runs are not enabled on this server.' })); return; }
+      try { const weeks = await insightsWeeklyJob.listWeeks(); res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ weeks })); }
+      catch { res.writeHead(502); res.end(JSON.stringify({ error: 'The insights enclave did not answer.' })); }
+      return;
+    }
     if (req.method === 'POST' && (url.pathname.startsWith('/api/insights/') || url.pathname.startsWith('/api/traces'))) {
       let releaseUpload = () => {};
       // Storing and returning an owner-only trace needs no release key. Everything else does.
@@ -7501,6 +7548,20 @@ const server = createServer(async (req, res) => {
           case '/api/insights/runs/preview': result = await insights.getPreview(user, body.run_id); break;
           case '/api/insights/runs/decide': result = await insights.decide(user, body.run_id, body.approval); break;
           case '/api/insights/receipts': result = { receipts: await insights.receipts(user) }; break;
+          case '/api/insights/weekly/preview': result = insightsWeeklyJob ? await insightsWeeklyJob.getWeeklyPreview(user, body.run_id) : null; break;
+          case '/api/insights/weekly/veto': result = insightsWeeklyJob ? await insightsWeeklyJob.vetoWeek(user, body.run_id, body.veto) : null; break;
+          case '/api/insights/invites': result = insightsWeeklyJob ? await insightsWeeklyJob.setInvites(user, body.invites) : null; break;
+          // Local test runs only, never production: drive the weekly pipeline by hand, and move its clock forward.
+          case '/api/insights/weekly/plan-now': result = insightsRunsEnabled && insightsWeeklyJob ? await insightsWeeklyJob.planWeek() : null; break;
+          case '/api/insights/weekly/run-now': result = insightsRunsEnabled && insightsWeeklyJob ? { runs: await insightsWeeklyJob.runWeek() } : null; break;
+          case '/api/insights/weekly/clock': {
+            if (!insightsRunsEnabled || !insightsWeeklyJob) { result = null; break; }
+            const hours = Number(body.advance_hours);
+            if (!(hours > 0 && hours <= 24 * 14)) throw new Error('advance_hours must be more than 0 and at most 336');
+            insightsClockAheadMs += Math.round(hours * 3600_000);
+            result = { now: new Date(insightsNow()).toISOString() };
+            break;
+          }
           default: res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return;
         }
         if (result === null) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return; }

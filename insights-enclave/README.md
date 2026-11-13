@@ -5,15 +5,31 @@ copies, asks a model one listed question about each trace its owner authorized, 
 folder holds what makes that checkable by someone other than the operator. The program itself is in
 `server/src/insights-enclave*.ts`, `insights-program.ts` and `insights-spec.ts`.
 
+## The two things it does
+
+- **Skill check.** A request names one listed question; each owner signs for that one run; the answer is three
+  fixed choices; each contributor approves their own; counts are published with three or more people.
+- **Weekly pipeline** (`server/src/insights-weekly.ts`). A person who allows it in their consent agrees to the
+  whole of it once. Each week the program is shown the week's public posts and may sign a plan: one question
+  about how agents work, and the posts that bear on it. No trace is opened before the plan's invitation time
+  (48 hours) has passed, so people who have not consented can be asked first. It then reads the planned
+  traces of people whose consent allows it, keeps at most a general sentence from each, and, with three or
+  more people, drafts one skill. The draft is sealed to the people it draws on for 72 hours. Any one of them
+  can cancel it. If nobody does, it is published.
+
 ## What limits the program
 
 These are rules in code and configuration. None of them depends on a model behaving well.
 
 | Rule | Where it is enforced |
 |---|---|
-| A run asks only a question listed in the program, named by id. Nobody types a question. | `checkQuestion`, in Router and again in the enclave |
+| A skill check asks only a question listed in the program, named by id. Nobody types a question. | `checkQuestion`, in Router and again in the enclave |
+| A weekly question is written by the program from public posts, before any trace is opened, and signed. One plan a week. | `plan` in `insights-weekly.ts` |
+| Words the program writes (question, findings, skill) must be short and in a small character set, with no addresses, long numbers or long tokens. Text that fails is dropped. | `cleanText` |
+| A drafted skill is published only after its wait, and never if a contributor cancelled it. A second reading can stop a draft and cannot approve one. | `run`, `veto`, `tick` in `insights-weekly.ts` |
+| A week is never read twice, across restarts. | the state file on the CVM's disk |
 | The model never sees what tools returned (web pages, search results, files, mail, other people's notes): only that a call returned, how much, and whether it failed. | `renderLog` in the enclave; the capture client also leaves it out of the extraction copy |
-| Nothing the model writes is kept except three fixed choices. | `parseAnswer` |
+| In a skill check, nothing the model writes is kept except three fixed choices. | `parseAnswer` |
 | The program has no route to the internet and no model key. | the `sealed` network in `docker-compose.insights-enclave.yml` |
 | The only request that leaves is one message to the named model at one address. | `gate.mjs`, embedded in the compose file |
 | The program's words have a hash that every consent names. | `insightsProgram`; a change means each owner signs again |
@@ -27,6 +43,14 @@ What they do not cover, said plainly:
 - The model provider sees the text it is sent.
 - The sealed previews that go back to Router are opaque to the gate.
 - Timing, and how much is sent to the model, can carry a little information.
+- In the weekly pipeline, words do come out of private logs, and the rules on them rest partly on a model
+  behaving: the text rules catch addresses, numbers and tokens, not a plain sentence that describes
+  something private. The guards are the wait and each contributor's power to cancel.
+- Router chooses which public posts the program is shown, and anyone in a group can write a post meant to
+  push the weekly question somewhere it should not go.
+- Every contributor sees the same draft, so someone who controls the others learns what the remaining
+  person's findings added.
+- Whoever can roll the CVM's disk back could make a week run twice. The clock is the CVM's.
 
 ## The image
 

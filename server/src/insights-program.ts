@@ -31,8 +31,9 @@ export function insightsProgram(model: string) {
         logView: s.logView,
       },
     },
+    weekly: s.weekly,
     limits: { derivedMaxBytes: DERIVED_MAX, derivedTextMaxChars: DERIVED_TEXT_MAX, entriesPerRun: MAX_ENTRIES_PER_RUN, eachTraceReadOncePerQuestion: true, minPeopleToRelease: MIN_PEOPLE },
-    released: `Each contributor gets only their own answers, sealed to them, and approves or vetoes publishing them. Once everyone has decided, a result (counts of the fixed answers, nothing written by the model) is built from the approved contributions only and published if at least ${MIN_PEOPLE} people approved; otherwise nothing.`,
+    released: `Skill checks: each contributor gets only their own answers, sealed to them, and approves or vetoes publishing them; once everyone has decided, counts of the fixed answers are published if at least ${MIN_PEOPLE} people approved, otherwise nothing. Weekly pipeline: at most one drafted skill a week, built from general findings of at least ${MIN_PEOPLE} people; the draft is sealed to those people for ${s.weekly.vetoHours} hours, any one of them can cancel it, and it is published only if none did.`,
   };
   return { ...spec, sha256: sha256Hex(canonical(spec)) };
 }
@@ -87,7 +88,54 @@ export interface InsightsPolicy {
   triggers: { handle: string; keyId: string }[];
   egress: { provider: 'Anthropic API'; model: string };
   limits: { maxTracesPerRun: number };
+  /** True: the owner agrees to the whole weekly pipeline, with no signature for each run. False: skill checks only, each authorized by the owner. */
+  weekly: boolean;
   issuedAt: string; expiresAt: string;
+}
+
+/** What the enclave signs once it has picked a week's question from public posts, before any trace is opened. */
+export interface WeeklyPlan {
+  v: 1; kind: 'router-insights-weekly-plan';
+  week: string; run: string;
+  question: string;
+  /** The public posts whose traces the run may read. */
+  entries: string[];
+  program: { name: string; version: number; sha256: string };
+  enclave: { appId: string; releaseKey: string };
+  plannedAt: string;
+  /** The run may not start before this: the time people who have not consented get to answer an invitation. */
+  runAfter: string;
+}
+export interface SignedPlan { plan: WeeklyPlan; signature: string; signer: string }
+export interface WeeklySkill { title: string; when: string; steps: string[] }
+/** What a contributor signs to cancel a week's draft before it is published. */
+export interface WeeklyVeto { v: 1; domain: 'teleport-router/insights-weekly-veto'; run: string; enclave: { appId: string; releaseKey: string } }
+export const vetoMessage = (v: WeeklyVeto) => 'Teleport Router: cancel this week\'s drafted skill before it is published\n\n' + canonical(v);
+export type WeeklyStatus = 'planned' | 'running' | 'waiting' | 'published' | 'vetoed' | 'nothing' | 'withheld';
+/** A week of the year as the pipeline names it, for example 2026-W46 (ISO 8601). */
+export function isoWeek(ms: number): string {
+  const d = new Date(ms); d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() + 3 - ((d.getUTCDay() + 6) % 7));           // the Thursday of this week
+  const first = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((d.getTime() - first.getTime()) / 86400_000 - 3 + ((first.getUTCDay() + 6) % 7)) / 7);
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+/** The only words of its own the program may keep or publish. Text that fails is dropped, not repaired. */
+export function cleanText(value: unknown, maxChars: number): string {
+  if (typeof value !== 'string') return '';
+  // Typographic apostrophes and dashes are read as plain ones; nothing else is changed.
+  const t = value.replace(/[\u2018\u2019]/g, "'").replace(/[\u2013\u2014]/g, '-').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > maxChars || !/^[A-Za-z0-9 ,.;:'()?-]+$/.test(t) || /https?:|www\.|\d{4,}|[A-Za-z0-9-]{24,}/i.test(t)) return '';
+  return t;
+}
+/** The first JSON object in a model reply. */
+export function replyJson(reply: string): Record<string, unknown> {
+  const start = reply.indexOf('{'), end = reply.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('No JSON answer');
+  const raw = JSON.parse(reply.slice(start, end + 1));
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('No JSON answer');
+  return raw;
 }
 
 /** What an owner signs to let one run read some of their traces. */
@@ -124,8 +172,11 @@ export function consentMessage(p: InsightsPolicy): string {
     `Enclave release key: ${p.enclave.releaseKey}`,
     upgradesLine(p.enclave.upgrades),
     `May read: traces of my published posts in ${p.scope.groups.map(g => '#' + g).join(', ')}`,
-    `May be requested by: ${p.triggers.map(t => `@${t.handle} [${t.keyId}]`).join(', ')}`,
-    'May ask: only the questions listed in the program, chosen by id',
+    `May be requested by: ${p.triggers.length ? p.triggers.map(t => `@${t.handle} [${t.keyId}]`).join(', ') : 'nobody (no skill checks; the weekly pipeline starts itself)'}`,
+    'May ask: in a skill check, only the questions listed in the program, chosen by id',
+    p.weekly
+      ? `Weekly pipeline: yes. Once a week the program may read the public posts in those groups, choose one question about how agents work, read the traces behind the posts it picked without asking me again, and draft one skill. I get the draft first, sealed to me, and can cancel it for ${INSIGHTS_SPEC.weekly.vetoHours} hours; if nobody cancels, it is published.`
+      : 'Weekly pipeline: no. Every run needs my signature.',
     `Leaves the enclave during a run: what I typed, what my agent wrote and which tools it called, sent to the ${p.egress.provider} (model ${p.egress.model}). What the tools returned is left out.`,
     `Comes out: my own answers, sealed to me; a published result of counts built only from contributions their owners approved, and only with ${MIN_PEOPLE} or more of them`,
     `Limits: at most ${p.limits.maxTracesPerRun} of my traces per run; each trace read once per question`,

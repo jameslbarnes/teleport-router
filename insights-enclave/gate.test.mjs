@@ -57,7 +57,7 @@ test('the gate passes that request to one address with the key, and refuses ever
   } finally { gate.outbound.close(); }
 });
 
-test('the gate passes the enclave\'s five requests in, and nothing else', async () => {
+test('the gate passes the enclave\'s own requests in, and nothing else', async () => {
   const seen = [];
   const app = createServer((req, res) => {
     let body = ''; req.on('data', c => body += c);
@@ -75,8 +75,10 @@ test('the gate passes the enclave\'s five requests in, and nothing else', async 
     assert.equal(run.status, 200);
     assert.deepEqual(seen.at(-1), { method: 'POST', url: '/run', auth: 'Bearer link-secret', body: '{"run":"r1"}' });
     assert.equal((await fetch(`${base}/decide`, { method: 'POST', body: '{}' })).status, 200);
+    for (const [method, path] of [['GET', '/weekly'], ['GET', '/weekly/weekly-2026-W46'], ['POST', '/weekly/plan'], ['POST', '/weekly/run'], ['POST', '/weekly/veto'], ['POST', '/weekly/previews']])
+      assert.equal((await fetch(base + path, { method, body: method === 'GET' ? undefined : '{}' })).status, 200, `${method} ${path}`);
     const before = seen.length;
-    for (const [method, path] of [['GET', '/'], ['GET', '/run'], ['POST', '/info'], ['GET', '/v1/messages'], ['POST', '/debug'], ['DELETE', '/runs/r1']])
+    for (const [method, path] of [['GET', '/'], ['GET', '/run'], ['POST', '/info'], ['GET', '/v1/messages'], ['POST', '/debug'], ['DELETE', '/runs/r1'], ['POST', '/weekly'], ['POST', '/weekly/publish'], ['GET', '/weekly/plan/x']])
       assert.equal((await fetch(base + path, { method, body: method === 'GET' ? undefined : '{}' })).status, 404, `${method} ${path}`);
     assert.equal(seen.length, before);
   } finally { gate.inbound.close(); app.close(); }

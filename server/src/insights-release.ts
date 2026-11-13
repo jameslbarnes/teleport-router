@@ -22,6 +22,10 @@
  *
  * A request can only name one of the questions listed in the program, and the published result is counts
  * of fixed answers: no words typed by a requester reach the model, and no words written by the model come out.
+ *
+ * A consent may also allow the weekly pipeline (`weekly: true`): the owner agrees once and signs no run.
+ * Router's side of that pipeline is in insights-weekly-release.ts; the two methods it needs from here are
+ * `weeklyConsent` and `weeklyOwner`.
  */
 import { randomUUID } from 'node:crypto';
 import { verifyMessage } from 'ethers';
@@ -29,6 +33,7 @@ import { canonical } from './author-records.js';
 import type { AuthorBinding } from './author-store.js';
 import { GroupStoreConflictError, type GroupStore } from './group-store.js';
 import type { JournalEntry, User } from './storage.js';
+import type { insightsWeekly } from './insights-weekly.js';
 import { checkPartMeta, compressPublicKey, sha256Hex, type PartMeta } from './trace-envelope.js';
 import { insightsProgram, checkQuestion, checkUpgradePolicy, consentMessage, authorizationMessage, MIN_PEOPLE, AUTHORIZATION_MAX_MS, DERIVED_MAX, MAX_ENTRIES_PER_RUN,
   type UpgradePolicy, type InsightsPolicy, type RunAuthorization } from './insights-program.js';
@@ -49,10 +54,24 @@ export interface InsightsConsentRecord { policy: InsightsPolicy; signature: stri
 /** What the enclave says about itself. Its attestation binds these fields. */
 export interface EnclaveInfo { release_key: string; app_id: string; program_sha256: string; upgrades: UpgradePolicy; min_people: number; [field: string]: unknown }
 export interface SealedPreview { did: string; meta: PartMeta; ciphertext: string }
+type Weekly = ReturnType<typeof insightsWeekly>;
+/** One week as the enclave shows it in public: the signed plan, counts, and the skill once published. Never a waiting draft. */
+export type WeekView = Awaited<ReturnType<Weekly['plan']>>;
+export type WeeklyRunResult = Awaited<ReturnType<Weekly['run']>>;
+/** One person's part of a weekly run: their consent and the extraction copies of their planned posts. */
+export interface WeeklyOwnerInput { did: string; publicKey: string; consent: { policy: InsightsPolicy; signature: string }; traces: { entryId: string; meta: PartMeta; ciphertext: string }[] }
 export interface EnclaveClient {
   info(): Promise<EnclaveInfo>;
   run(input: unknown): Promise<{ run: string; status: string; contributors: number; skipped: Record<string, number>; previews: SealedPreview[] }>;
   decide(input: unknown): Promise<{ run: string; status: string; published?: unknown }>;
+  /** The weekly pipeline (insights-weekly.ts). A week gets one plan; asking again returns the same one. */
+  weeklyPlan(input: { week: string; posts: { entryId: string; handle: string; group: string; text: string }[] }): Promise<WeekView>;
+  weeklyRun(input: { run: string; owners: WeeklyOwnerInput[] }): Promise<WeeklyRunResult>;
+  weeklyVeto(input: { run: unknown; did: string; veto: unknown }): Promise<WeekView>;
+  /** A run's sealed previews again, in case the run's own answer never arrived. */
+  weeklyPreviews(run: string): Promise<SealedPreview[]>;
+  /** Without a run: the recent weeks. With one: that week, or null. */
+  weeklyStatus(run?: string): Promise<WeekView[] | WeekView | null>;
 }
 
 type ConsentUser = User & { insightsConsent?: InsightsConsentRecord };
@@ -267,13 +286,17 @@ export function insightsRelease(deps: ReleaseDeps) {
     },
 
     /** A policy for this owner to read and sign. Nothing is saved. */
-    async draftPolicy(user: User, input: { groups?: unknown; triggers?: unknown; days?: unknown; max_traces_per_run?: unknown }) {
+    async draftPolicy(user: User, input: { groups?: unknown; triggers?: unknown; days?: unknown; max_traces_per_run?: unknown; weekly?: unknown }) {
       const b = binding(user);
       const e = needEnclave();
       const groups = Array.isArray(input.groups) && input.groups.length ? input.groups : ['insights-notes'];
       if (groups.length > 8 || !groups.every(groupId)) throw new Error('groups must be up to 8 group IDs');
+      if (input.weekly !== undefined && typeof input.weekly !== 'boolean') throw new Error('weekly must be true or false');
+      const weekly = input.weekly === true;
       const handles = Array.isArray(input.triggers) ? input.triggers : [];
-      if (!handles.length || handles.length > 8 || !handles.every(h => typeof h === 'string')) throw new Error('triggers must name 1 to 8 accounts that may request a run');
+      // The weekly pipeline starts itself, so a consent that allows it need not name anyone who may request a run.
+      if ((!handles.length && !weekly) || handles.length > 8 || !handles.every(h => typeof h === 'string'))
+        throw new Error(weekly ? 'triggers must name at most 8 accounts that may request a run' : 'triggers must name 1 to 8 accounts that may request a run');
       const triggers: InsightsPolicy['triggers'] = [];
       for (const handle of handles as string[]) {
         const found = await deps.getUser(handle.replace(/^@/, ''));
@@ -292,7 +315,7 @@ export function insightsRelease(deps: ReleaseDeps) {
         enclave: { appId: e.appId, releaseKey: e.releaseKey, upgrades: e.upgrades },
         scope: { groups: groups as string[] }, triggers,
         egress: { provider: 'Anthropic API', model: program.model },
-        limits: { maxTracesPerRun: maxTraces },
+        limits: { maxTracesPerRun: maxTraces }, weekly,
         issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + days * 86400_000).toISOString(),
       };
       return { policy, message: consentMessage(policy) };
@@ -308,7 +331,8 @@ export function insightsRelease(deps: ReleaseDeps) {
         || p.program?.name !== program.name || p.program?.version !== program.version || p.program?.sha256 !== program.sha256
         || p.enclave?.appId !== e.appId || p.enclave?.releaseKey !== e.releaseKey || canonical(p.enclave?.upgrades ?? null) !== canonical(e.upgrades)
         || !Array.isArray(p.scope?.groups) || !p.scope.groups.length || p.scope.groups.length > 8 || !p.scope.groups.every(groupId)
-        || !Array.isArray(p.triggers) || !p.triggers.length || p.triggers.length > 8
+        || typeof p.weekly !== 'boolean'
+        || !Array.isArray(p.triggers) || (!p.triggers.length && !p.weekly) || p.triggers.length > 8
         || !p.triggers.every(x => x && typeof x.handle === 'string' && /^[a-f0-9]{16}$/.test(x.keyId || ''))
         || p.egress?.provider !== 'Anthropic API' || p.egress?.model !== program.model
         || !Number.isInteger(p.limits?.maxTracesPerRun) || p.limits.maxTracesPerRun < 1 || p.limits.maxTracesPerRun > MAX_ENTRIES_PER_RUN
@@ -339,6 +363,31 @@ export function insightsRelease(deps: ReleaseDeps) {
       return { ...state, release_key: releaseKey, program_sha256: program.sha256,
         owner_public_key: user.tinycloud?.ownerPublicKey ? compressPublicKey(user.tinycloud.ownerPublicKey) : null,
         owner_did: user.tinycloud?.ownerDid || null };
+    },
+
+    /** The person's current consent if it allows the weekly pipeline, otherwise null. Checked like every other use: signature included. */
+    weeklyConsent(user: ConsentUser): InsightsPolicy | null {
+      const state = consentState(user);
+      return state.active && state.policy.weekly === true ? state.policy : null;
+    },
+
+    /** One person's part of a weekly run: the extraction copies of those of `entryIds` that are their own published
+     * posts, in a group their consent names, uploaded under that same consent. Null unless their current consent
+     * allows the weekly pipeline. The enclave checks the consent again itself. */
+    async weeklyOwner(user: ConsentUser, entryIds: string[]): Promise<WeeklyOwnerInput | null> {
+      const state = consentState(user);
+      const b = user.tinycloud, record = user.insightsConsent;
+      if (!state.active || state.policy.weekly !== true || !b?.ownerPublicKey || !record) return null;
+      const store = await deps.storeFor(b);
+      const traces: WeeklyOwnerInput['traces'] = [];
+      for (const entryId of new Set(entryIds)) {
+        if (traces.length >= state.policy.limits.maxTracesPerRun) break;
+        if (!validId(entryId) || (await deps.getEntry(entryId))?.handle !== user.handle || !await inScope(entryId, state.policy)) continue;
+        const trace = await traceRecord(store, entryId);
+        if (!trace?.derived || trace.ownerDid !== b.ownerDid || trace.derived.policyId !== state.policy.policyId) continue;
+        traces.push({ entryId, meta: trace.derived, ciphertext: (await readPart(store, entryId, 'derived', trace.derived, trace.upload)).toString('base64') });
+      }
+      return { did: b.ownerDid, publicKey: b.ownerPublicKey, consent: { policy: record.policy, signature: record.signature }, traces };
     },
 
     /** Store the trace of one of the caller's own posts. Write-once: a post never gets a second trace. */

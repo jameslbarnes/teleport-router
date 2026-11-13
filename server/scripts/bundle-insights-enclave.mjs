@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const ENCLAVE_SOURCES = ['src/author-records.ts', 'src/insights-enclave-server.ts', 'src/insights-enclave.ts', 'src/insights-program.ts',
-  'src/insights-spec.ts', 'src/trace-envelope.ts'];
+  'src/insights-spec.ts', 'src/insights-weekly.ts', 'src/trace-envelope.ts'];
 
 export async function bundleEnclave(outDir) {
   const server = join(dirname(fileURLToPath(import.meta.url)), '..');

@@ -14,7 +14,7 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY server/tsconfig.json ./
 COPY server/src/insights-enclave-server.ts server/src/insights-enclave.ts server/src/insights-program.ts server/src/insights-spec.ts \
-     server/src/trace-envelope.ts server/src/author-records.ts ./src/
+     server/src/insights-weekly.ts server/src/trace-envelope.ts server/src/author-records.ts ./src/
 COPY server/scripts/bundle-insights-enclave.mjs ./scripts/
 RUN node scripts/bundle-insights-enclave.mjs /out
 

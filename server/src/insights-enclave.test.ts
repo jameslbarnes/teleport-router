@@ -41,7 +41,7 @@ function setup(opts: { failFirst?: boolean; slow?: Promise<void> } = {}) {
     const policy: InsightsPolicy = { v: 1, domain: 'teleport-router/insights-consent', server: 'https://router.example', policyId: `policy-${name}`,
       owner: { handle: name, did }, program: { name: program.name, version: program.version, sha256: opts2.program || program.sha256 },
       enclave: { appId: APP, releaseKey, upgrades: { by: 'operator' } }, scope: { groups: ['insights-notes'] }, triggers: [],
-      egress: { provider: 'Anthropic API', model: MODEL }, limits: { maxTracesPerRun: 5 },
+      egress: { provider: 'Anthropic API', model: MODEL }, limits: { maxTracesPerRun: 5 }, weekly: false,
       issuedAt: new Date(clock).toISOString(), expiresAt: new Date(clock + 30 * 86400_000).toISOString() };
     const entryId = `post-${name}`;
     const sealed = sealPart(gzipSync(Buffer.from(log)), { ownerDid: did, entryId }, 'derived', { owner: wallet.signingKey.compressedPublicKey, release: releaseKey });

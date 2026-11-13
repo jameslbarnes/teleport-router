@@ -20,7 +20,7 @@ export function gateBlock(root = ROOT) {
   const b64 = Buffer.from(lf(readFileSync(join(root, 'insights-enclave/gate.mjs'), 'utf8')), 'utf8').toString('base64');
   return [
     BEGIN,
-    '  # The only container with a route out. It passes the enclave\'s five requests in, and one kind of',
+    '  # The only container with a route out. It passes the enclave\'s own requests in, and one kind of',
     '  # request out: a message to the model named below. See insights-enclave/gate.mjs.',
     '  gate:',
     `    image: ${NODE_IMAGE}`,

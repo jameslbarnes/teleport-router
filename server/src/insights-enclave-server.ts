@@ -6,6 +6,14 @@
  *   POST /run             Router only (link secret): one run, with owners' signed consents and authorizations
  *   POST /decide          anyone may relay a contributor's signed approval or veto; the signature is what counts
  *
+ * The weekly pipeline (insights-weekly.ts):
+ *   POST /weekly/plan     Router only: this week's public posts; the enclave may sign a plan
+ *   POST /weekly/run      Router only: the planned traces of people whose consent allows the weekly pipeline
+ *   POST /weekly/previews Router only: the sealed previews of a run again, in case its first answer was lost
+ *   POST /weekly/veto     anyone may relay a contributor's signed cancellation of a waiting draft
+ *   GET  /weekly          public: recent weeks; GET /weekly/<run>: one week. A waiting draft is never shown.
+ * Its weeks are remembered in INSIGHTS_STATE_FILE, on the CVM's own disk, so a restart cannot make a week run twice.
+ *
  * The release key comes from the CVM's dstack key service (INSIGHTS_KEY_SOURCE=dstack). Outside a CVM, for
  * local tests only, INSIGHTS_TEST_RELEASE_KEY is used and /info carries no quote.
  *
@@ -17,6 +25,9 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { insightsWeekly } from './insights-weekly.js';
 import { insightsEnclave } from './insights-enclave.js';
 import { checkUpgradePolicy, type UpgradePolicy } from './insights-program.js';
 
@@ -56,10 +67,8 @@ const upgrades: UpgradePolicy = env.INSIGHTS_UPGRADES === 'timelock'
       delayHours: Number(env.INSIGHTS_TIMELOCK_HOURS || 48) })
   : { by: 'operator' };
 
-const enclave = insightsEnclave({
-  releasePrivateKey, appId, upgrades, quote, model: env.INSIGHTS_MODEL || 'claude-sonnet-5-5',
-  build: { gitSha: env.GIT_SHA || null, imageDigest: env.IMAGE_DIGEST || null },
-  complete: async ({ model, system, user, maxTokens }) => {
+const MODEL = env.INSIGHTS_MODEL || 'claude-sonnet-5-5';
+const complete = async ({ model, system, user, maxTokens }: { model: string; system: string; user: string; maxTokens: number }) => {
     // Current models think before answering by default, and the thinking counts against max_tokens,
     // so leave room beyond the answer and read the text block, which need not come first.
     const res = await fetch(`${MODEL_URL || 'https://api.anthropic.com'}/v1/messages`, { method: 'POST', signal: AbortSignal.timeout(180_000),
@@ -70,8 +79,18 @@ const enclave = insightsEnclave({
     if (reply.stop_reason === 'refusal') throw new Error('The model declined this trace.');
     const block = (reply.content || []).find(b => b.type === 'text');
     return typeof block?.text === 'string' ? block.text : '';
-  },
-});
+};
+const enclave = insightsEnclave({ releasePrivateKey, appId, upgrades, quote, model: MODEL, complete,
+  build: { gitSha: env.GIT_SHA || null, imageDigest: env.IMAGE_DIGEST || null } });
+
+// The weekly pipeline's memory. Written whole, to a new file that then replaces the old one.
+const STATE_FILE = env.INSIGHTS_STATE_FILE || '';
+if (env.NODE_ENV === 'production' && !STATE_FILE) throw new Error('The production enclave requires INSIGHTS_STATE_FILE: where the weekly pipeline remembers its weeks');
+const weekly = insightsWeekly({ releasePrivateKey, appId, upgrades, model: MODEL, complete, state: STATE_FILE ? {
+  load: () => { try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch (err) { if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null; throw err; } },
+  save: value => { mkdirSync(dirname(STATE_FILE), { recursive: true }); writeFileSync(STATE_FILE + '.new', JSON.stringify(value), { mode: 0o600 }); renameSync(STATE_FILE + '.new', STATE_FILE); },
+} : undefined });
+setInterval(() => { try { weekly.tick(); } catch (err) { console.error('[insights-enclave] weekly tick failed:', err instanceof Error ? err.message : err); } }, 60_000).unref();
 
 const secretMatches = (header: string | undefined) => {
   const given = Buffer.from((header || '').replace(/^Bearer /i, ''));
@@ -105,6 +124,17 @@ createServer(async (req, res) => {
       return send(res, 200, await enclave.run(await readJson(req, 40 * 1024 * 1024)));
     }
     if (req.method === 'POST' && url.pathname === '/decide') return send(res, 200, await enclave.decide(await readJson(req, 64 * 1024)));
+    if (req.method === 'GET' && url.pathname === '/weekly') return send(res, 200, { weeks: weekly.status() });
+    if (req.method === 'GET' && url.pathname.startsWith('/weekly/')) {
+      const status = weekly.status(decodeURIComponent(url.pathname.slice('/weekly/'.length)));
+      return status ? send(res, 200, status) : send(res, 404, { error: 'No such week' });
+    }
+    if (req.method === 'POST' && (url.pathname === '/weekly/plan' || url.pathname === '/weekly/run' || url.pathname === '/weekly/previews')) {
+      if (!secretMatches(req.headers.authorization)) return send(res, 401, { error: 'Only Router hands this enclave a week.' });
+      if (url.pathname === '/weekly/previews') return send(res, 200, { previews: weekly.previews((await readJson(req, 64 * 1024)).run) });
+      return send(res, 200, url.pathname === '/weekly/plan' ? await weekly.plan(await readJson(req, 4 * 1024 * 1024)) : await weekly.run(await readJson(req, 40 * 1024 * 1024)));
+    }
+    if (req.method === 'POST' && url.pathname === '/weekly/veto') return send(res, 200, weekly.veto(await readJson(req, 64 * 1024)));
     return send(res, 404, { error: 'Not found' });
   } catch (err) {
     return send(res, err instanceof RangeError ? 413 : 400, { error: err instanceof Error ? err.message : 'Request failed' });

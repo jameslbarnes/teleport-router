@@ -4,8 +4,8 @@
 // network with no way out. Everything it sends or receives passes through this gate, which does two things
 // and nothing else:
 //
-//   in:   the five requests the enclave serves (GET /health, /info, /runs/<id>; POST /run, /decide) are
-//         passed to it unchanged;
+//   in:   the requests the enclave serves (GET /health, /info, /runs/<id>, /weekly, /weekly/<run>;
+//         POST /run, /decide, /weekly/plan, /weekly/run, /weekly/veto, /weekly/previews) are passed to it unchanged;
 //   out:  one kind of request is passed on, to one address: POST /v1/messages on the model provider, for
 //         the model named in INSIGHTS_MODEL, holding one system text and one user text. The gate adds the
 //         model key, which the enclave program never has. Any other request from inside is refused, so the
@@ -22,7 +22,8 @@ import { createServer, request as httpRequest } from 'node:http';
 
 export const UPSTREAM = 'https://api.anthropic.com/v1/messages';
 const OUT_MAX = 8 * 1024 * 1024, IN_MAX = 41 * 1024 * 1024;
-const IN_ROUTES = [['GET', /^\/health$/], ['GET', /^\/info$/], ['GET', /^\/runs\/[\w%-]{1,480}$/], ['POST', /^\/run$/], ['POST', /^\/decide$/]];
+const IN_ROUTES = [['GET', /^\/health$/], ['GET', /^\/info$/], ['GET', /^\/runs\/[\w%-]{1,480}$/], ['POST', /^\/run$/], ['POST', /^\/decide$/],
+  ['GET', /^\/weekly$/], ['GET', /^\/weekly\/[\w%-]{1,480}$/], ['POST', /^\/weekly\/(plan|run|veto|previews)$/]];
 
 /** The one request allowed out. Returns the exact body to send; throws on anything else. */
 export function checkModelRequest(text, model) {
@@ -66,7 +67,7 @@ export function createGate({ model, apiKey, appUrl, send = fetch }) {
     } catch { json(res, 502, { error: 'The model could not be reached.' }); }
   });
 
-  // In: the enclave's own five requests, passed through unchanged.
+  // In: the enclave's own requests, passed through unchanged.
   const inbound = createServer(async (req, res) => {
     try {
       const path = (req.url || '/').split('?')[0];
