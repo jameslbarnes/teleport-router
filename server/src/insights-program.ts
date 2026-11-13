@@ -31,7 +31,7 @@ export function insightsProgram(model: string) {
         logView: s.logView,
       },
     },
-    weekly: s.weekly,
+    weekly: s.weekly, digestView: s.digestView,
     limits: { derivedMaxBytes: DERIVED_MAX, derivedTextMaxChars: DERIVED_TEXT_MAX, entriesPerRun: MAX_ENTRIES_PER_RUN, eachTraceReadOncePerQuestion: true, minPeopleToRelease: MIN_PEOPLE },
     released: `Skill checks: each contributor gets only their own answers, sealed to them, and approves or vetoes publishing them; once everyone has decided, counts of the fixed answers are published if at least ${MIN_PEOPLE} people approved, otherwise nothing. Weekly pipeline: at most one drafted skill a week, built from general findings of at least ${MIN_PEOPLE} people; the draft is sealed to those people for ${s.weekly.vetoHours} hours, any one of them can cancel it, and it is published only if none did.`,
   };
@@ -107,7 +107,7 @@ export interface WeeklyPlan {
   runAfter: string;
 }
 export interface SignedPlan { plan: WeeklyPlan; signature: string; signer: string }
-export interface WeeklySkill { title: string; when: string; steps: string[] }
+export interface WeeklySkill { title: string; when: string; steps: string[]; pitfalls: string[]; checks: string[]; examples: string[] }
 /** What a contributor signs to cancel a week's draft before it is published. */
 export interface WeeklyVeto { v: 1; domain: 'teleport-router/insights-weekly-veto'; run: string; enclave: { appId: string; releaseKey: string } }
 export const vetoMessage = (v: WeeklyVeto) => 'Teleport Router: cancel this week\'s drafted skill before it is published\n\n' + canonical(v);
@@ -126,7 +126,8 @@ export function cleanText(value: unknown, maxChars: number): string {
   if (typeof value !== 'string') return '';
   // Typographic apostrophes and dashes are read as plain ones; nothing else is changed.
   const t = value.replace(/[\u2018\u2019]/g, "'").replace(/[\u2013\u2014]/g, '-').replace(/\s+/g, ' ').trim();
-  if (!t || t.length > maxChars || !/^[A-Za-z0-9 ,.;:'()?-]+$/.test(t) || /https?:|www\.|\d{4,}|[A-Za-z0-9-]{24,}/i.test(t)) return '';
+  // A slash is allowed (A/B, input/output); anything shaped like a path is not: two slashes in one word, a leading slash or dot-slash, or a drive letter.
+  if (!t || t.length > maxChars || !/^[A-Za-z0-9 ,.;:'()?\/%+-]+$/.test(t) || /https?:|www\.|\d{4,}|[A-Za-z0-9-]{24,}|\S*\/\S*\/|(^|\s)[.~]?\/|[A-Za-z]:\//i.test(t)) return '';
   return t;
 }
 /** The first JSON object in a model reply. */
@@ -193,10 +194,11 @@ const elapsed = (ms: number) => {
   return `+${Math.floor(s / 3600)}h${String(Math.floor(s / 60) % 60).padStart(2, '0')}m${String(s % 60).padStart(2, '0')}s`;
 };
 // The view is wrapped in <log> tags, so no angle bracket from a trace may reach it; and one line per item.
-const plain = (text: string, max: number) => {
+const shown = (text: string, max: number) => plain(text, max);
+function plain(text: string, max: number) {
   const t = text.replace(/\s+/g, ' ').trim().replace(/</g, '‹').replace(/>/g, '›');
   return t.length <= max ? t : `${t.slice(0, max)} … (${t.length - max} more characters)`;
-};
+}
 const sizeOf = (value: unknown): number => typeof value === 'string' ? value.length
   : Array.isArray(value) ? value.reduce<number>((n, v) => n + sizeOf(v), 0)
   : value && typeof value === 'object' ? sizeOf((value as any).text ?? (value as any).content ?? '') : 0;
@@ -253,6 +255,87 @@ export function renderLog(raw: string, view: { personTextMaxChars: number; agent
     text = [...head, `[… ${j - i + 1} lines left out to fit the size limit …]`, ...tail].join('\n');
   }
   return text;
+}
+
+// ── What the model is shown of a person's /insights output ───────────────────────────────
+
+export interface DigestSession { id: string; outcome: string; type: string; helpfulness: string; friction: Record<string, number>;
+  wentWrong: string; summary: string; goal: string; minutes: number | null; toolErrors: number | null; interruptions: number | null }
+export interface Digest { sessions: DigestSession[]; report: { heading: string; text: string }[] }
+export const DIGEST_KIND = 'claude-code-insights-digest';
+const label = (v: unknown) => typeof v === 'string' && /^[a-z0-9_]{1,40}$/.test(v) ? v : '';
+const count = (v: unknown, max: number) => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(Math.round(v), max) : null;
+
+/** True if an uploaded extraction copy is an /insights digest rather than a work log. */
+export const isDigest = (raw: string) => { try { return JSON.parse(raw)?.kind === DIGEST_KIND; } catch { return false; } };
+
+/**
+ * Take from an uploaded digest only the fields the program names, in the shapes it expects, and nothing else.
+ * The enclave does this itself: whatever else a client put in the upload (a first prompt, a folder, a date)
+ * never reaches the model, the tally or anything that is published.
+ */
+export function readDigest(raw: string, view = INSIGHTS_SPEC.digestView): Digest {
+  let doc: any;
+  try { doc = JSON.parse(raw); } catch { throw new Error('The upload is not an insights digest'); }
+  if (!doc || doc.kind !== DIGEST_KIND || !Array.isArray(doc.sessions)) throw new Error('The upload is not an insights digest');
+  const sessions: DigestSession[] = [];
+  const seen = new Set<string>();
+  for (const s of doc.sessions.slice(0, view.maxSessions)) {
+    if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !/^[0-9a-f]{16}$/.test(s.id) || seen.has(s.id)) continue;
+    seen.add(s.id);
+    const friction: Record<string, number> = {};
+    if (s.friction_counts && typeof s.friction_counts === 'object' && !Array.isArray(s.friction_counts)) {
+      for (const [k, v] of Object.entries(s.friction_counts).slice(0, 10)) { const n = count(v, 99); if (label(k) && n) friction[k] = n; }
+    }
+    const text = (v: unknown, max: number) => typeof v === 'string' ? shown(v, max) : '';
+    sessions.push({ id: s.id, outcome: label(s.outcome), type: label(s.session_type), helpfulness: label(s.claude_helpfulness), friction,
+      wentWrong: text(s.friction_detail, view.wentWrongMaxChars), summary: text(s.brief_summary, view.summaryMaxChars), goal: text(s.underlying_goal, view.goalMaxChars),
+      minutes: count(s.duration_minutes, 100_000), toolErrors: count(s.tool_errors, 100_000), interruptions: count(s.user_interruptions, 100_000) });
+  }
+  const report: Digest['report'] = [];
+  for (const r of Array.isArray(doc.report) ? doc.report.slice(0, 12) : []) {
+    if (!r || typeof r.heading !== 'string' || typeof r.text !== 'string' || !(view.reportSections as readonly string[]).includes(r.heading) || report.some(x => x.heading === r.heading)) continue;
+    report.push({ heading: r.heading, text: shown(r.text, view.reportSectionMaxChars) });
+  }
+  if (!sessions.length && !report.length) throw new Error('The digest has nothing the program can show');
+  return { sessions, report };
+}
+
+/** Several nights' digests of one person as one: each session once, and the newest copy of each report section. */
+export function mergeDigests(digests: Digest[]): Digest {
+  const sessions = new Map<string, DigestSession>(), report = new Map<string, string>();
+  for (const d of digests) { for (const s of d.sessions) sessions.set(s.id, s); for (const r of d.report) report.set(r.heading, r.text); }
+  return { sessions: [...sessions.values()], report: [...report].map(([heading, text]) => ({ heading, text })) };
+}
+
+/** The view of one person's digest that the model reads. Sessions that went wrong come first, so they survive the size limit. */
+export function renderDigest(d: Digest, maxChars = DERIVED_TEXT_MAX): string {
+  const weight = (s: DigestSession) => Object.values(s.friction).reduce((n, v) => n + v, 0);
+  const lines = [`SESSIONS REVIEWED: ${d.sessions.length}`];
+  for (const s of [...d.sessions].sort((a, b) => weight(b) - weight(a))) {
+    const friction = Object.entries(s.friction).map(([k, v]) => `${k} x${v}`).join(', ');
+    lines.push('- ' + [s.outcome && `outcome: ${s.outcome}`, s.type && `kind: ${s.type}`, s.helpfulness && `agent was: ${s.helpfulness}`, friction && `friction: ${friction}`,
+      s.wentWrong && `what went wrong: ${s.wentWrong}`, s.summary && `summary: ${s.summary}`, s.goal && `goal: ${s.goal}`,
+      s.minutes !== null && `minutes: ${s.minutes}`, s.toolErrors && `tool errors: ${s.toolErrors}`, s.interruptions && `interruptions: ${s.interruptions}`].filter(Boolean).join('; '));
+  }
+  for (const r of d.report) lines.push(`REPORT, ${r.heading.toUpperCase()}: ${r.text}`);
+  let text = '';
+  for (const line of lines) { if (text.length + line.length + 1 > maxChars) { text += `\n[… the rest left out to fit the size limit …]`; break; } text += (text ? '\n' : '') + line; }
+  return text;
+}
+
+/** Friction categories counted across people, by arithmetic alone. A category appears only if at least MIN_PEOPLE people had it. */
+export function tallyFriction(people: DigestSession[][]): { category: string; people: number; share_of_sessions: number }[] {
+  const total = people.reduce((n, p) => n + p.length, 0);
+  const byCategory = new Map<string, { people: number; sessions: number }>();
+  for (const person of people) {
+    const mine = new Map<string, number>();
+    for (const s of person) for (const k of Object.keys(s.friction)) mine.set(k, (mine.get(k) || 0) + 1);
+    for (const [k, n] of mine) { const c = byCategory.get(k) || { people: 0, sessions: 0 }; c.people++; c.sessions += n; byCategory.set(k, c); }
+  }
+  return [...byCategory].filter(([, c]) => c.people >= MIN_PEOPLE && total > 0)
+    .map(([category, c]) => ({ category, people: c.people, share_of_sessions: Math.round(c.sessions / total * 20) / 20 }))
+    .sort((a, b) => b.share_of_sessions - a.share_of_sessions || b.people - a.people || a.category.localeCompare(b.category));
 }
 
 /** Accept only the fixed answer shape: three choices from the listed values. Anything else the model wrote is dropped. */

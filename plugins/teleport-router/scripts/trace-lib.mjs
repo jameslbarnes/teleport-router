@@ -359,6 +359,53 @@ export function buildTrace({ post, lines, source = {}, extraSecrets = [], maxByt
   return { plaintext, summary: { withheld: false, records: records.length, shortened_to: shortenedTo, oldest_left_out: droppedOldest, ...cleaned.stats } };
 }
 
+// ── The /insights digest ────────────────────────────────────────────────────────────────
+
+const DIGEST_REPORT_SECTIONS = ['Where Things Go Wrong', 'Existing CC Features to Try', 'New Ways to Use Claude Code'];
+const unHtml = html => html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+
+/**
+ * The extraction copy for a nightly insights note: Claude Code's own /insights review of recent sessions,
+ * cut down to what the insights program names. For each session reviewed in the window: how it turned out,
+ * friction categories, a few lines on what went wrong, a short summary, the goal, and three numbers. From the
+ * report: the three sections about what to do differently. Left on the machine: the first thing you typed,
+ * project folders, dates and times, real session ids, which tools were used, and the rest of the report.
+ * The enclave applies the same list again, so a different client cannot widen it.
+ *
+ * `facets` and `metas` are the parsed files of usage-data/facets and usage-data/session-meta.
+ */
+export function buildInsightsDigest({ facets = [], metas = [], reportHtml = '', ownerDid, sinceMs = 0, untilMs = Infinity, extraSecrets = [] }) {
+  if (!ownerDid) throw new Error('ownerDid is required');
+  const scrub = v => typeof v === 'string' ? scrubText(v, extraSecrets).text : '';
+  const meta = new Map(metas.filter(m => m && typeof m.session_id === 'string').map(m => [m.session_id, m]));
+  const sessions = [];
+  for (const f of facets) {
+    if (!f || typeof f.session_id !== 'string') continue;
+    const m = meta.get(f.session_id);
+    const started = Date.parse(m?.start_time ?? '');
+    // A session with no known start cannot be placed in the window, so it is left out.
+    if (!Number.isFinite(started) || started < sinceMs || started > untilMs) continue;
+    sessions.push({
+      // Lets the enclave count a session once across several nights' digests without learning which session it is.
+      id: createHash('sha256').update(`${ownerDid.toLowerCase()}\n${f.session_id}`).digest('hex').slice(0, 16),
+      outcome: f.outcome, session_type: f.session_type, claude_helpfulness: f.claude_helpfulness,
+      friction_counts: f.friction_counts && typeof f.friction_counts === 'object' ? f.friction_counts : {},
+      friction_detail: scrub(f.friction_detail), brief_summary: scrub(f.brief_summary), underlying_goal: scrub(f.underlying_goal),
+      duration_minutes: m.duration_minutes, tool_errors: m.tool_errors, user_interruptions: m.user_interruptions,
+    });
+  }
+  const report = [];
+  const body = String(reportHtml).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '');
+  for (const part of body.split(/<h2[^>]*>/i).slice(1)) {
+    const end = part.search(/<\/h2>/i);
+    if (end < 0) continue;
+    const heading = unHtml(part.slice(0, end));
+    if (DIGEST_REPORT_SECTIONS.includes(heading) && !report.some(r => r.heading === heading)) report.push({ heading, text: scrub(unHtml(part.slice(end + 5))).slice(0, 6000) });
+  }
+  const doc = { v: 1, kind: 'claude-code-insights-digest', sessions, report };
+  return { plaintext: gzipSync(Buffer.from(JSON.stringify(doc))), summary: { sessions: sessions.length, report_sections: report.map(r => r.heading) } };
+}
+
 /** Where a post's session ran: read from the log itself, never from outside it. */
 export function sourceOf(lines, post) {
   if (post.agent === 'codex') {

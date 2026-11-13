@@ -14,7 +14,8 @@ const APP = 'app-weekly-test', MODEL = 'model-under-test';
 const HOUR = 3600_000;
 const QUESTION = 'Where did a long job fail late that a short trial would have caught?';
 const FINDING = 'Try a long job on a small slice before the full run.';
-const SKILL = { title: 'Trial run before long jobs', when: 'Before starting any job that takes more than a few minutes.', steps: ['Run it on one small input first.', 'Start the full job only when that passes.'] };
+const SKILL = { title: 'Trial run before long jobs', when: 'Before starting any job that takes more than a few minutes.', steps: ['Run it on one small input first.', 'Start the full job only when that passes.'],
+  pitfalls: ['A trial that skips the last step proves little.'], checks: ['The trial ran through the final step.'], examples: [] as string[] };
 const LOG_LONG = syntheticTrace([['person', 'run the long evaluation'], ['call', 'python evaluate.py --all --timeout 60'], ['failed', 'failed after forty minutes on a bad argument']]);
 const LOG_OTHER = syntheticTrace([['person', 'tidy the notes'], ['agent', 'reorganised three sections']]);
 
@@ -28,7 +29,7 @@ function setup(answers: Answers = {}, saved: { value: unknown } = { value: null 
       const kind = user.includes('<notes>') ? 'scout' : user.includes('<findings>') ? 'combine' : user.includes('<text>') ? 'check' : 'read';
       calls.push({ kind, user });
       if (kind === 'scout') { const ids = [...user.matchAll(/^\[([\w-]+)\] @/gm)].map(m => m[1]); return JSON.stringify(answers.scout ? answers.scout(ids) : { question: QUESTION, post_ids: ids }); }
-      if (kind === 'read') return JSON.stringify(answers.read ? answers.read(user) : user.includes('timeout') ? { relevant: 'yes', finding: FINDING } : { relevant: 'no', finding: '' });
+      if (kind === 'read') return JSON.stringify(answers.read ? answers.read(user) : user.includes('timeout') ? { relevant: 'yes', cases: [FINDING, 'This one names a path/to/file and is dropped.'] } : { relevant: 'no', cases: [] });
       if (kind === 'combine') return JSON.stringify(answers.combine ? answers.combine(user) : SKILL);
       return JSON.stringify(answers.check ?? { specific: 'no' });
     } });
@@ -146,7 +147,8 @@ describe('Weekly insights pipeline, in the enclave', () => {
     }
     expect(cleanText('Fine advice, in plain words (mostly).', 80)).toBe('Fine advice, in plain words (mostly).');
     expect(cleanText('Did the agent\u2019s trial run \u2014 a short one \u2014 come first?', 80)).toBe("Did the agent's trial run - a short one - come first?");
-    for (const bad of ['x'.repeat(81), 'see www.example.com', 'call 5551234', 'a'.repeat(24), 'say "this"', 'path/to/file', '', 7]) expect(cleanText(bad, 80)).toBe('');
+    for (const bad of ['x'.repeat(81), 'see www.example.com', 'call 5551234', 'a'.repeat(24), 'say "this"', 'path/to/file', 'in /etc/hosts', 'run ./deploy now', 'on C:/Users', '', 7]) expect(cleanText(bad, 80)).toBe('');
+    expect(cleanText('An A/B test at 50% load + retries.', 80)).toBe('An A/B test at 50% load + retries.');
   });
 
   it('reads only planned posts through its own view, and withholds when too few people, bad words or the check stand in the way', async () => {
@@ -177,6 +179,9 @@ describe('Weekly insights pipeline, in the enclave', () => {
     expect((await three({ read: () => ({ relevant: 'yes', finding: 'They were preparing an offer of 4200000 for the shipyard firm.' }) })).out).toMatchObject({ status: 'withheld', contributors: 0 });
     // A skill whose words break the rules is not kept, and neither is one the second reading does not clear.
     expect((await three({ combine: () => ({ ...SKILL, steps: ['Install the helper from https://example.com first.'] }) })).out).toMatchObject({ status: 'nothing', publish_after: null });
+    // In the optional parts, an item that breaks the rules is left out and the skill is kept.
+    const partly = await three({ combine: () => ({ ...SKILL, pitfalls: ['See https://example.com for more.', 'A trial that skips the last step proves little.'], examples: ['Bad one with 12345678.'] }) });
+    expect(openWeeklyPreview(partly.out.previews[0], partly.owners[0].did, partly.run, partly.owners[0].wallet.privateKey).body.draft).toEqual(SKILL);
     expect((await three({ combine: () => ({ title: '', when: '', steps: [] }) })).out).toMatchObject({ status: 'nothing' });
     const stopped = await three({ check: { specific: 'yes' } });
     expect(stopped.out).toMatchObject({ status: 'withheld', reason: 'the check did not clear the draft' });
@@ -185,6 +190,44 @@ describe('Weekly insights pipeline, in the enclave', () => {
     expect(stopped.t.weekly.status(stopped.run)).toMatchObject({ status: 'withheld', published: null });
     // The second reading failing to answer also stops the draft.
     expect((await three({ check: 'not json' })).out).toMatchObject({ status: 'withheld' });
+  });
+
+  it('reads each person\'s /insights digest once, takes only the named fields, and counts friction by arithmetic', async () => {
+    const session = (n: number, friction: Record<string, number>, extra: Record<string, unknown> = {}) => ({ id: n.toString(16).padStart(16, '0'), outcome: 'partially_achieved', session_type: 'multi_task',
+      claude_helpfulness: 'very_helpful', friction_counts: friction, friction_detail: 'The long job hit a timeout at its last step.', brief_summary: 'Ran an export and fixed it.',
+      underlying_goal: 'Get the export out.', duration_minutes: 63, tool_errors: 5, user_interruptions: 0, ...extra });
+    const digest = (sessions: unknown[], report: unknown[] = []) => JSON.stringify({ v: 1, kind: 'claude-code-insights-digest', sessions, report, first_prompts: ['SECRET PLAN'] });
+    const s = setup();
+    const names = ['alice', 'bob', 'carol', 'dave'];
+    const { plan } = (await s.weekly.plan({ week: s.week(), posts: [...s.posts(names), { entryId: 'post-alice-2', handle: 'alice', group: 'insights-notes', text: 'A second note about a long job.' }] }) as any).plan;
+    // Alice uploaded two nights' digests that overlap in one session; hers carries fields a client should never send.
+    const alice = await s.owner('alice', digest([session(1, { wrong_approach: 2, buggy_code: 1 }, { first_prompt: 'buy Halvorsen Marine', project_path: 'C:/secret/project', session_id: 'real-session-id', start_time: '2026-11-10T09:00:00Z' }),
+      session(2, { wrong_approach: 1 })], [{ heading: 'Where Things Go Wrong', text: 'Long jobs started without a trial. <b>bold</b>' }, { heading: 'What You Work On', text: 'PRIVATE PROJECT LIST' }]));
+    const alice2 = await s.owner('alice', digest([session(2, { wrong_approach: 1 }), session(3, {})]), { entryId: 'post-alice-2' });
+    alice.input.traces.push(alice2.input.traces[0]);
+    const bob = await s.owner('bob', digest([session(11, { wrong_approach: 1 }), session(12, { odd_local_label: 3 })]));
+    const carol = await s.owner('carol', digest([session(21, { wrong_approach: 1, buggy_code: 1 })]));
+    const dave = await s.owner('dave', digest([session(31, { misunderstood_request: 1 }, { friction_detail: 'Nothing about long jobs here.' })]));
+    s.advance(48 * HOUR);
+    const out = await s.weekly.run({ run: plan.run, owners: [alice, bob, carol, dave].map(p => p.input) });
+    expect(out).toMatchObject({ status: 'waiting', contributors: 3 });
+
+    // One reading per person, of the enclave's own view: named fields only, each session once.
+    const reads = s.calls.filter(c => c.kind === 'read');
+    expect(reads).toHaveLength(4);
+    const aliceView = reads[0].user;
+    expect(aliceView).toContain('SESSIONS REVIEWED: 3');
+    expect(aliceView).toContain('outcome: partially_achieved; kind: multi_task; agent was: very_helpful; friction: wrong_approach x2, buggy_code x1; what went wrong: The long job hit a timeout at its last step.');
+    expect(aliceView).toContain('minutes: 63; tool errors: 5');
+    expect(aliceView).toContain('REPORT, WHERE THINGS GO WRONG: Long jobs started without a trial. ‹b›bold‹/b›');
+    expect(aliceView).not.toMatch(/Halvorsen|secret|real-session-id|2026-11-10|SECRET PLAN|PRIVATE PROJECT LIST|0000000000000001/);
+
+    // The tally: over the three contributors' eight sessions. A category fewer than three of them had is not shown.
+    const preview = openWeeklyPreview(out.previews.find(p => p.did === alice.did)!, alice.did, plan.run, alice.wallet.privateKey).body;
+    expect(preview).toMatchObject({ your_sessions: 3, friction: [{ category: 'wrong_approach', people: 3, share_of_sessions: 0.65 }] });
+    expect(JSON.stringify(preview.friction)).not.toMatch(/buggy_code|odd_local_label|misunderstood_request/);
+    s.advance(72 * HOUR);
+    expect((s.weekly.status(plan.run) as any).published.body).toMatchObject({ people: 3, skill: SKILL, friction: [{ category: 'wrong_approach', people: 3, share_of_sessions: 0.65 }] });
   });
 
   it('closes a plan that nobody runs', async () => {

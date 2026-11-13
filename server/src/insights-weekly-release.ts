@@ -389,8 +389,8 @@ export function insightsModelStub(user: string): string {
       steps: ['Run the job on one small input first.', 'Start the full job only when the trial has passed.'] });
   if (user.includes('<text>')) return JSON.stringify({ specific: 'no' });
   const timeout = /<log>[\s\S]*timeout[\s\S]*<\/log>/.test(user);
-  if (user.startsWith('Question:'))
-    return JSON.stringify(timeout ? { relevant: 'yes', finding: 'Try a long job on a small slice first, so a mistake shows in seconds and not at the timeout.' } : { relevant: 'no', finding: '' });
+  if (user.startsWith('Brief:'))
+    return JSON.stringify(timeout ? { relevant: 'yes', cases: ['Try a long job on a small slice first, so a mistake shows in seconds and not at the timeout.'] } : { relevant: 'no', cases: [] });
   // A skill check: a fixed answer keyed on the same word.
   return JSON.stringify(timeout
     ? { applies: 'yes', effect: 'would_have_helped', cost: 'tens_of_minutes', note: 'A tiny trial run first would have exposed the mistake early.' }

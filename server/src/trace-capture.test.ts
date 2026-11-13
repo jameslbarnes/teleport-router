@@ -7,7 +7,7 @@ import type { JournalEntry, User } from './storage.js';
 import type { GroupStore } from './group-store.js';
 // The capture client ships with the plugin as plain JavaScript.
 // @ts-ignore
-import { findPosts, buildTrace, sourceOf, cleanRecords, scrubText, sealFull, sealDerived, openFull, readTrace, withoutToolResults } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
+import { findPosts, buildTrace, buildInsightsDigest, sourceOf, cleanRecords, scrubText, sealFull, sealDerived, openFull, readTrace, withoutToolResults } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
 // Synthetic session logs only, in the shape Claude Code writes them.
 const SESSION = 'synthetic-session';
@@ -200,6 +200,39 @@ describe('The extraction copy', () => {
       { type: 'tool_result', tool_use_id: 't2', is_error: true, content: '', left_out_characters: 11 }]);
     expect(out.slice(0, 2)).toEqual(records.slice(0, 2));
     expect(JSON.stringify(records)).toContain('answer yes');   // the input, and so the owner's full record, is not changed
+  });
+});
+
+describe('The /insights digest', () => {
+  it('keeps what the insights program names and leaves first prompts, folders, dates and session ids on the machine', async () => {
+    const { gunzipSync } = await import('node:zlib');
+    const { readDigest } = await import('./insights-program.js');
+    const facets = [
+      { session_id: 'aaaa-1111', outcome: 'mostly_achieved', session_type: 'multi_task', claude_helpfulness: 'very_helpful', friction_counts: { wrong_approach: 2 },
+        friction_detail: 'Started the long job without a trial; token=abcdefgh12345678 was pasted.', brief_summary: 'Ran the export.', underlying_goal: 'Ship the export.', goal_categories: { approve_secret_project: 1 } },
+      { session_id: 'bbbb-2222', outcome: 'fully_achieved', friction_counts: {}, friction_detail: '', brief_summary: 'An old session.', underlying_goal: 'Old.' },
+      { session_id: 'cccc-3333', outcome: 'fully_achieved', brief_summary: 'No metadata for this one.' },
+    ];
+    const metas = [
+      { session_id: 'aaaa-1111', start_time: '2026-11-11T10:00:00Z', duration_minutes: 63, tool_errors: 5, user_interruptions: 1, first_prompt: 'buy the shipyard firm', project_path: 'C:/secret/project', tool_counts: { mcp__mail__send: 3 } },
+      { session_id: 'bbbb-2222', start_time: '2026-10-01T10:00:00Z', duration_minutes: 5, tool_errors: 0, user_interruptions: 0, first_prompt: 'old prompt' },
+    ];
+    const reportHtml = '<html><style>h2{color:red}</style><h2 id="a">What You Work On</h2><p>PRIVATE PROJECT LIST</p><h2>Where Things Go Wrong</h2><p>Long jobs &amp; no <b>trial</b>.</p><script>x()</script><h2>On the Horizon</h2><p>Later.</p></html>';
+    const built = buildInsightsDigest({ facets, metas, reportHtml, ownerDid: 'did:pkh:eip155:1:0xAbC', sinceMs: Date.parse('2026-11-10T00:00:00Z') });
+    expect(built.summary).toEqual({ sessions: 1, report_sections: ['Where Things Go Wrong'] });
+    const text = gunzipSync(built.plaintext).toString('utf8');
+    expect(text).not.toMatch(/shipyard|secret.project|aaaa-1111|2026-11-11|mcp__mail|approve_secret_project|abcdefgh12345678|PRIVATE PROJECT LIST|old prompt|An old session|No metadata/);
+    const doc = JSON.parse(text);
+    expect(doc).toMatchObject({ v: 1, kind: 'claude-code-insights-digest', report: [{ heading: 'Where Things Go Wrong', text: 'Long jobs & no trial .' }] });
+    expect(doc.sessions[0]).toMatchObject({ outcome: 'mostly_achieved', friction_counts: { wrong_approach: 2 }, brief_summary: 'Ran the export.', duration_minutes: 63, tool_errors: 5, user_interruptions: 1 });
+    expect(doc.sessions[0].id).toMatch(/^[0-9a-f]{16}$/);
+    expect(doc.sessions[0].friction_detail).toContain('[secret removed]');
+    // The same session gets the same opaque id on another night, and a different one for another person.
+    const again = JSON.parse(gunzipSync(buildInsightsDigest({ facets, metas, ownerDid: 'did:pkh:eip155:1:0xabc', sinceMs: 0, untilMs: Date.parse('2026-11-12T00:00:00Z') }).plaintext).toString('utf8'));
+    expect(again.sessions.map((x: any) => x.id)).toContain(doc.sessions[0].id);
+    expect(JSON.parse(gunzipSync(buildInsightsDigest({ facets, metas, ownerDid: 'did:pkh:eip155:1:0xdef', sinceMs: Date.parse('2026-11-10T00:00:00Z') }).plaintext).toString('utf8')).sessions[0].id).not.toBe(doc.sessions[0].id);
+    // What the client builds is what the enclave accepts.
+    expect(readDigest(text).sessions[0]).toMatchObject({ outcome: 'mostly_achieved', friction: { wrong_approach: 2 }, minutes: 63 });
   });
 });
 

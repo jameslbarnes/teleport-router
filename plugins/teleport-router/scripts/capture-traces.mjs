@@ -33,6 +33,11 @@
 //                            stops if Router reports a different key. The key is then remembered.
 //   --extraction-copy        also upload a shorter extraction copy that the insights enclave may open, in runs
 //                            you authorize one at a time. Needs a current insights consent. Withheld traces get none.
+//   --insights-digest <dir>  with --extraction-copy: make the extraction copy from Claude Code's /insights output in <dir>
+//                            (usually ~/.claude/usage-data) instead of from the session log. It holds, for each session
+//                            reviewed in the last --insights-days days (default 2): the outcome, friction categories, what
+//                            went wrong, a short summary, the goal and three numbers; and three sections of the report.
+//                            Your first prompts, folders, dates and session ids stay here. Use it for the nightly insights note.
 //   --release-key <k>        the enclave key you checked (scripts/insights-owner.mjs enclave); required with the
 //                            first extraction copy, then remembered. The run stops if Router or your consent names
 //                            another key.
@@ -40,7 +45,7 @@ import { readFile, writeFile, readdir, stat, mkdir, rename, rm } from 'node:fs/p
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
-import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+import { findPosts, sessionOrigin, buildTrace, buildInsightsDigest, sourceOf, mentionsNeverUpload, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
 
 // The extraction copy must fit the enclave's limit on what it opens (400 KiB of ciphertext).
 const EXTRACTION_MAX_BYTES = 380 * 1024;
@@ -215,6 +220,18 @@ try {
     return owner = { did: reported.owner_did, publicKey: mine, maxBytes: Math.min(reported.full_max_bytes || 6 * 1024 * 1024, 6 * 1024 * 1024) };
   }
   const extraction = flag('--extraction-copy');
+  const digestDir = value('--insights-digest');
+  const digestDays = Number(value('--insights-days') || 2);
+  if (digestDir && (!extraction || !(digestDays > 0 && digestDays <= 31))) await stop('--insights-digest needs --extraction-copy, and --insights-days must be 1 to 31. Nothing was uploaded.');
+  /** Claude Code's /insights output for the last few days, cut down to what the insights program names. */
+  const insightsDigest = async did => {
+    const readAll = async sub => { const out = []; for (const name of await readdir(join(digestDir, sub)).catch(() => [])) { if (name.endsWith('.json')) { try { out.push(JSON.parse(await readFile(join(digestDir, sub, name), 'utf8'))); } catch { /* an unreadable file is skipped */ } } } return out; };
+    const built = buildInsightsDigest({ facets: await readAll('facets'), metas: await readAll('session-meta'), reportHtml: await readFile(join(digestDir, 'report.html'), 'utf8').catch(() => ''),
+      ownerDid: did, sinceMs: Date.now() - digestDays * 86400_000, extraSecrets: [routerKey].filter(Boolean) });
+    if (!built.summary.sessions && !built.summary.report_sections.length) throw new Error(`No /insights output for the last ${digestDays} days in ${digestDir}.`);
+    if (built.plaintext.length > EXTRACTION_MAX_BYTES) throw new Error('The /insights digest does not fit the extraction copy size limit; use fewer --insights-days.');
+    return built;
+  };
   let release = null;
   async function releaseKey() {
     if (release) return release;
@@ -246,8 +263,9 @@ try {
       if (post.withheld && !item.withheld) item.withheld = post.withheld;
       built = buildTrace({ post, lines, source: { log: basename(item.log), ...sourceOf(lines, post) }, extraSecrets: [routerKey].filter(Boolean), maxBytes: (await ownerKey()).maxBytes - 64 * 1024 });
       if (extraction && !built.summary.withheld)
-        // The copy the enclave may open leaves out what tools returned: only its size and whether the call failed.
-        small = buildTrace({ post, lines, source: { log: basename(item.log), ...sourceOf(lines, post) }, extraSecrets: [routerKey].filter(Boolean), maxBytes: EXTRACTION_MAX_BYTES, leaveOutToolResults: true });
+        // The copy the enclave may open: the /insights digest when asked for, otherwise the session with what tools returned left out.
+        if (digestDir) small = await insightsDigest((await ownerKey()).did);
+        else small = buildTrace({ post, lines, source: { log: basename(item.log), ...sourceOf(lines, post) }, extraSecrets: [routerKey].filter(Boolean), maxBytes: EXTRACTION_MAX_BYTES, leaveOutToolResults: true });
     } catch (err) { totals.failed++; report.push({ ...line, error: err.code === 'ENOENT' ? 'The session log is no longer on this machine.' : err.message }); continue; }
     Object.assign(line, { records: built.summary.records, bytes: built.plaintext.length, withheld: built.summary.withheld, secrets_removed: built.summary.secrets_removed ?? 0, shortened_to: built.summary.shortened_to });
     if (built.summary.withheld) totals.withheld++;

@@ -7,8 +7,11 @@
  *          yet, so the plan, and any invitation Router sends because of it, carries nothing private. A week
  *          gets one plan, and the run may not start until the plan's invitation time has passed.
  *   run    Router hands over the extraction copies behind the planned posts, for the people whose consent
- *          allows the weekly pipeline. The enclave checks each consent itself, shows the model its own view
- *          of each trace (renderLog: no tool results), and keeps at most a general sentence per trace. With
+ *          allows the weekly pipeline. The enclave checks each consent itself. An extraction copy is normally
+ *          the person's /insights digest: their own agent's review of their recent sessions. The enclave takes
+ *          from it only the fields the program names (readDigest), counts friction categories across people by
+ *          arithmetic, shows the model its own view of each person's digest, and keeps at most a general
+ *          sentence or two per person. (A work log is still accepted, shown through renderLog: no tool results.) With
  *          findings from at least MIN_PEOPLE people it asks for one drafted skill, and a second reading that
  *          can only stop the draft.
  *   wait   The draft is sealed to each person it draws on, with their own findings. For `vetoHours` any one
@@ -29,11 +32,11 @@ import { randomBytes } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { computeAddress, verifyMessage, Wallet } from 'ethers';
 import { canonical } from './author-records.js';
-import { checkUpgradePolicy, cleanText, consentMessage, insightsProgram, isoWeek, renderLog, replyJson, vetoMessage, DERIVED_MAX, DERIVED_TEXT_MAX, MIN_PEOPLE,
-  type InsightsPolicy, type SignedPlan, type UpgradePolicy, type WeeklyPlan, type WeeklySkill, type WeeklyStatus, type WeeklyVeto } from './insights-program.js';
+import { checkUpgradePolicy, cleanText, consentMessage, insightsProgram, isDigest, isoWeek, mergeDigests, readDigest, renderDigest, renderLog, replyJson, tallyFriction, vetoMessage,
+  DERIVED_MAX, DERIVED_TEXT_MAX, MIN_PEOPLE, type Digest, type DigestSession, type InsightsPolicy, type SignedPlan, type UpgradePolicy, type WeeklyPlan, type WeeklySkill, type WeeklyStatus, type WeeklyVeto } from './insights-program.js';
 import { checkPartMeta, compressPublicKey, openPart, publicKeyOf, sealPart, sha256Hex, type PartMeta } from './trace-envelope.js';
 
-const MAX_OWNERS = 50, MAX_TRACES = 50, FINDINGS_PER_PERSON = 2, WEEKS_KEPT = 60;
+const MAX_OWNERS = 50, MAX_TRACES = 50, WEEKS_KEPT = 60;
 /** A plan nobody runs is closed this long after its run could have started. */
 const PLAN_LAPSES_MS = 7 * 24 * 3600_000;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
@@ -58,6 +61,7 @@ interface WeekRecord {
   contributors: { did: string; publicKey: string }[];
   publishAfter: string | null;
   draft: WeeklySkill | null;
+  friction?: { category: string; people: number; share_of_sessions: number }[];
   /** The sealed previews, kept so Router can fetch them again if the run's answer was lost. Only their owners can open them. */
   previews?: { did: string; meta: PartMeta; ciphertext: string }[];
   published: { body: unknown; signature: string; signer: string } | null;
@@ -117,7 +121,7 @@ export function insightsWeekly(deps: WeeklyDeps) {
       if (r.status === 'planned' && r.plan && now() > Date.parse(r.plan.plan.runAfter) + PLAN_LAPSES_MS) { r.status = 'nothing'; r.reason = 'the plan was never run'; changed = true; continue; }
       if (r.status !== 'waiting' || !r.publishAfter || now() < Date.parse(r.publishAfter) || !r.draft || !r.plan) continue;
       const body = { v: 1, kind: 'router-insights-weekly-skill', week: r.week, run: r.run, question: r.plan.plan.question, people: r.contributors.length,
-        skill: r.draft, program: { name: program.name, version: program.version, sha256: program.sha256 }, enclave, published_at: new Date(now()).toISOString() };
+        skill: r.draft, friction: r.friction || [], program: { name: program.name, version: program.version, sha256: program.sha256 }, enclave, published_at: new Date(now()).toISOString() };
       r.published = { body, signature: signer.signMessageSync(canonical(body)), signer: signer.address };
       r.status = 'published'; r.draft = null; changed = true;
     }
@@ -183,7 +187,7 @@ export function insightsWeekly(deps: WeeklyDeps) {
       const question = r.plan.plan.question;
       const skipped: Record<string, number> = {};
       const skip = (reason: string) => { skipped[reason] = (skipped[reason] || 0) + 1; };
-      const found: { did: string; publicKey: string; findings: string[] }[] = [];
+      const found: { did: string; publicKey: string; findings: string[]; sessions: DigestSession[] }[] = [];
       try {
         const seen = new Set<string>();
         let total = 0;
@@ -192,7 +196,15 @@ export function insightsWeekly(deps: WeeklyDeps) {
           try { c = checkConsent(o); } catch { skip('no_weekly_consent'); continue; }
           if (seen.has(c.address)) { skip('duplicate_owner'); continue; }
           seen.add(c.address);
-          const findings: string[] = [], done = new Set<string>();
+          const findings: string[] = [], done = new Set<string>(), digests: Digest[] = [];
+          const keep = (reply: Record<string, unknown>) => {
+            if (reply.relevant !== 'yes') return;
+            // Each case is checked against the text rules by itself; one that fails is dropped and the rest are kept.
+            for (const item of Array.isArray(reply.cases) ? reply.cases : [reply.finding]) {
+              const finding = cleanText(item, w.read.findingMaxChars);
+              if (finding && findings.length < w.read.maxCases && !findings.includes(finding)) findings.push(finding);
+            }
+          };
           let mine = 0;
           for (const t of Array.isArray(o.traces) ? o.traces : []) {
             if (++total > MAX_TRACES) { skip('too_many_traces'); break; }
@@ -210,14 +222,21 @@ export function insightsWeekly(deps: WeeklyDeps) {
               const packed = openPart(meta, ciphertext, { ownerDid: o.did as string, entryId: t.entryId }, 'derived', 'release', deps.releasePrivateKey);
               const unpacked = gunzipSync(packed, { maxOutputLength: DERIVED_MAX * 64 });
               packed.fill(0);
-              log = renderLog(unpacked.toString('utf8'), program.templates['skill-check'].logView, DERIVED_TEXT_MAX);
+              const text = unpacked.toString('utf8');
               unpacked.fill(0);
-              const reply = await ask(w.read, { question, log }, 300);
-              const finding = reply.relevant === 'yes' ? cleanText(reply.finding, w.read.findingMaxChars) : '';
-              if (finding && findings.length < FINDINGS_PER_PERSON && !findings.includes(finding)) findings.push(finding);
+              // A digest is set aside and read once per person, below. A work log is read now, through the enclave's own view.
+              if (isDigest(text)) { digests.push(readDigest(text, program.digestView)); continue; }
+              log = renderLog(text, program.templates['skill-check'].logView, DERIVED_TEXT_MAX);
+              keep(await ask(w.read, { question, log }, 1500));
             } catch { skip('unreadable_or_failed'); } finally { log = ''; }
           }
-          if (findings.length) found.push({ did: o.did as string, publicKey: c.publicKey, findings });
+          let sessions: DigestSession[] = [];
+          if (digests.length) {
+            const merged = mergeDigests(digests);
+            sessions = merged.sessions;
+            try { keep(await ask(w.read, { question, log: renderDigest(merged, DERIVED_TEXT_MAX) }, 1500)); } catch { skip('unreadable_or_failed'); }
+          }
+          if (findings.length) found.push({ did: o.did as string, publicKey: c.publicKey, findings, sessions });
         }
 
         let draft: WeeklySkill | null = null;
@@ -225,25 +244,30 @@ export function insightsWeekly(deps: WeeklyDeps) {
         else {
           // One line per finding, in an order that says nothing about whose it is.
           const findings = found.flatMap(f => f.findings).sort().map(f => `- ${f}`).join('\n');
-          const reply = await ask(w.combine, { question, findings }, 600);
+          const reply = await ask(w.combine, { question, findings }, 4000);
           const title = cleanText(reply.title, w.combine.titleMaxChars), when = cleanText(reply.when, w.combine.whenMaxChars);
           const steps = (Array.isArray(reply.steps) ? reply.steps : []).slice(0, w.combine.maxSteps).map(s => cleanText(s, w.combine.stepMaxChars));
+          // The parts a skill cannot do without must all pass the text rules. Of the rest, an item that fails is left out.
+          const some = (value: unknown, max: number) => (Array.isArray(value) ? value : []).slice(0, max).map(x => cleanText(x, w.combine.itemMaxChars)).filter(Boolean);
+          const pitfalls = some(reply.pitfalls, w.combine.maxPitfalls), checks = some(reply.checks, w.combine.maxChecks), examples = some(reply.examples, w.combine.maxExamples);
           if (!title || !when || !steps.length || steps.some(s => !s)) { r.status = 'nothing'; r.reason = 'no skill was warranted, or its words broke the rules'; }
           else {
             // A second reading that can only stop the draft.
-            const verdict = await ask(w.check, { text: [title, when, ...steps].join('\n') }, 100).catch(() => ({ specific: 'unknown' }));
+            const verdict = await ask(w.check, { text: [title, when, ...steps, ...pitfalls, ...checks, ...examples].join('\n') }, 100).catch(() => ({ specific: 'unknown' }));
             if (verdict.specific !== 'no') { r.status = 'withheld'; r.reason = 'the check did not clear the draft'; }
-            else { draft = { title, when, steps }; r.status = 'waiting'; r.reason = null; r.publishAfter = new Date(now() + w.vetoHours * 3600_000).toISOString(); }
+            else { draft = { title, when, steps, pitfalls, checks, examples }; r.status = 'waiting'; r.reason = null; r.publishAfter = new Date(now() + w.vetoHours * 3600_000).toISOString(); }
           }
         }
-        r.draft = draft;
+        // Counted by arithmetic over the contributors' own sessions; a category shows only if at least MIN_PEOPLE of them had it.
+        const friction = draft ? tallyFriction(found.map(f => f.sessions)) : [];
+        r.draft = draft; r.friction = friction;
         r.contributors = found.map(f => ({ did: f.did, publicKey: f.publicKey }));
         save();
         // Each contributor gets the draft and their own findings, sealed to them. Nobody else can read either before the wait is over.
         const previews = found.map(f => {
           const body = { v: 1, kind: 'router-insights-weekly-preview', week: r.week, run: r.run, question, enclave,
             program: { name: program.name, version: program.version, sha256: program.sha256 }, sent_to: `Anthropic API (${program.model})`,
-            your_findings: f.findings, draft, status: r.status, reason: r.reason, contributors: found.length, publish_after: r.publishAfter, nonce: randomBytes(16).toString('hex') };
+            your_findings: f.findings, your_sessions: f.sessions.length, draft, friction, status: r.status, reason: r.reason, contributors: found.length, publish_after: r.publishAfter, nonce: randomBytes(16).toString('hex') };
           const sealed = sealPart(Buffer.from(canonical({ body, signature: signer.signMessageSync(canonical(body)), signer: signer.address })),
             { ownerDid: f.did, entryId: r.run }, 'preview', { owner: f.publicKey });
           return { did: f.did, meta: sealed.meta, ciphertext: sealed.ciphertext.toString('base64') };
@@ -269,7 +293,7 @@ export function insightsWeekly(deps: WeeklyDeps) {
       try { by = v ? verifyMessage(vetoMessage(v), String(input.veto?.signature)).toLowerCase() : ''; } catch { /* below */ }
       if (!v || by !== didAddress(c.did) || v.v !== 1 || v.domain !== 'teleport-router/insights-weekly-veto' || v.run !== r.run
         || v.enclave?.appId !== deps.appId || v.enclave?.releaseKey !== releaseKey) throw new Error('That is not a valid signed cancellation of this draft.');
-      r.status = 'vetoed'; r.reason = 'cancelled by a contributor'; r.draft = null; r.publishAfter = null;
+      r.status = 'vetoed'; r.reason = 'cancelled by a contributor'; r.draft = null; r.friction = []; r.publishAfter = null;
       save();
       return publicView(r);
     },

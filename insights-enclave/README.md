@@ -12,9 +12,13 @@ folder holds what makes that checkable by someone other than the operator. The p
 - **Weekly pipeline** (`server/src/insights-weekly.ts`). A person who allows it in their consent agrees to the
   whole of it once. Each week the program is shown the week's public posts and may sign a plan: one question
   about how agents work, and the posts that bear on it. No trace is opened before the plan's invitation time
-  (48 hours) has passed, so people who have not consented can be asked first. It then reads the planned
-  traces of people whose consent allows it, keeps at most a general sentence from each, and, with three or
-  more people, drafts one skill. The draft is sealed to the people it draws on for 72 hours. Any one of them
+  (48 hours) has passed, so people who have not consented can be asked first. It then opens what is behind
+  the planned posts for people whose consent allows it. For a nightly insights note that is the person's
+  /insights digest: their own agent's review of recent sessions (how each went, friction categories, a few
+  lines on what went wrong, a summary, the goal, three numbers) and three sections of its report. The
+  enclave takes only those named fields, counts friction categories across people by arithmetic, keeps at
+  most two general sentences per person, and, with three or more people, drafts one skill. The published
+  result carries the skill and the friction categories that at least three contributors had. The draft is sealed to the people it draws on for 72 hours. Any one of them
   can cancel it. If nobody does, it is published.
 
 ## What limits the program
@@ -28,6 +32,8 @@ These are rules in code and configuration. None of them depends on a model behav
 | Words the program writes (question, findings, skill) must be short and in a small character set, with no addresses, long numbers or long tokens. Text that fails is dropped. | `cleanText` |
 | A drafted skill is published only after its wait, and never if a contributor cancelled it. A second reading can stop a draft and cannot approve one. | `run`, `veto`, `tick` in `insights-weekly.ts` |
 | A week is never read twice, across restarts. | the state file on the CVM's disk |
+| From a person's /insights digest the program takes only the fields it names; first prompts, folders, dates and session ids never reach the model even if a client uploads them. | `readDigest` in the enclave; the capture client also leaves them out |
+| A friction category is published only if at least three contributors had it, as a share rounded to 5 percent. | `tallyFriction` |
 | The model never sees what tools returned (web pages, search results, files, mail, other people's notes): only that a call returned, how much, and whether it failed. | `renderLog` in the enclave; the capture client also leaves it out of the extraction copy |
 | In a skill check, nothing the model writes is kept except three fixed choices. | `parseAnswer` |
 | The program has no route to the internet and no model key. | the `sealed` network in `docker-compose.insights-enclave.yml` |

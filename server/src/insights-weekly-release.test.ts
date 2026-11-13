@@ -391,11 +391,11 @@ describe('The weekly insights pipeline, Router side', () => {
     expect(scout.post_ids).toEqual(['post-1', 'post-2']);
     expect(cleanText(scout.question, s.scout.questionMaxChars)).toBe(scout.question);
     const read = (log: string) => JSON.parse(insightsModelStub(s.read.user.replace('{question}', scout.question).replace('{log}', log)));
-    expect(read('[+0h00m00s] PERSON: tidy the notes')).toEqual({ relevant: 'no', finding: '' });
+    expect(read('[+0h00m00s] PERSON: tidy the notes')).toEqual({ relevant: 'no', cases: [] });
     const finding = read('[+0h00m00s] AGENT CALLED Bash: {"command":"run --timeout 60"}');
     expect(finding.relevant).toBe('yes');
-    expect(cleanText(finding.finding, s.read.findingMaxChars)).toBe(finding.finding);
-    const skill = JSON.parse(insightsModelStub(s.combine.user.replace('{question}', scout.question).replace('{findings}', `- ${finding.finding}`)));
+    expect(cleanText(finding.cases[0], s.read.findingMaxChars)).toBe(finding.cases[0]);
+    const skill = JSON.parse(insightsModelStub(s.combine.user.replace('{question}', scout.question).replace('{findings}', `- ${finding.cases[0]}`)));
     expect(cleanText(skill.title, s.combine.titleMaxChars)).toBe(skill.title);
     expect(cleanText(skill.when, s.combine.whenMaxChars)).toBe(skill.when);
     expect(skill.steps).toHaveLength(2);
