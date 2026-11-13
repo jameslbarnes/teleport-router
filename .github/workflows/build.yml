@@ -77,6 +77,18 @@ jobs:
           node subhost/embed.mjs --check
           node --test subhost/subhost.test.mjs
 
+      - name: Test the insights enclave's gate, upgrade check and bundle
+        run: |
+          node insights-enclave/embed.mjs --check
+          node --test insights-enclave/gate.test.mjs insights-enclave/check-upgrade.test.mjs
+          (cd server && node scripts/bundle-insights-enclave.mjs "$RUNNER_TEMP/insights-enclave")
+
+      - name: Test the insights upgrade timelock tool
+        working-directory: insights-upgrades
+        run: |
+          npm ci
+          npm test
+
       - name: Build server
         working-directory: server
         run: npm run build

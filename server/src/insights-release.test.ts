@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { testWallet, versionedMemoryStore } from './author-test-fixtures.js';
-import { insightsRelease, parseAnswer, insightsProgram, checkUpgradePolicy, approvalMessage, authorizationMessage, MIN_PEOPLE,
+import { testWallet, versionedMemoryStore, syntheticTrace } from './author-test-fixtures.js';
+import { insightsRelease, parseAnswer, renderLog, insightsProgram, checkUpgradePolicy, approvalMessage, authorizationMessage, MIN_PEOPLE,
   type InsightsPolicy, type UpgradePolicy, type EnclaveClient, type ContributionApproval } from './insights-release.js';
 import { insightsEnclave, openPreview } from './insights-enclave.js';
 import { sealPart, openPart, publicKeyOf } from './trace-envelope.js';
@@ -11,9 +11,9 @@ import type { JournalEntry, User } from './storage.js';
 // Synthetic people and synthetic work logs only.
 const RELEASE_KEY = '0x' + createHash('sha256').update('synthetic release key').digest('hex');
 const BASE = 'https://router.example';
-const LOG_A = 'USER: run the long evaluation\nTOOL: started the full run with a short timeout\nTOOL: failed after forty minutes on a bad argument\nUSER: try again';
-const LOG_B = 'USER: tidy the notes\nASSISTANT: reorganised three sections and left the rest alone';
-const question = { template: 'skill-check', params: { skill: 'Smoke test before long runs', when: 'a run is expected to take more than a few minutes' } };
+const LOG_A = syntheticTrace([['person', 'run the long evaluation'], ['call', 'python evaluate.py --all --timeout 60'], ['failed', 'failed after forty minutes on a bad argument'], ['person', 'try again']]);
+const LOG_B = syntheticTrace([['person', 'tidy the notes'], ['agent', 'reorganised three sections and left the rest alone']]);
+const question = { template: 'skill-check', params: { question: 'smoke-test-before-long-jobs' } };
 
 async function world(opts: { upgrades?: UpgradePolicy; noEnclave?: boolean } = {}) {
   const users = new Map<string, any>(), entries = new Map<string, JournalEntry>(), stores = new Map<string, Map<string, string>>();
@@ -176,6 +176,8 @@ describe('Private traces and insights runs', () => {
       const w = await world();
       const { agent, people, posts } = await w.setup(['alice', 'bob', 'carol', 'dave']);
       await expect(w.release.createRequest(agent.user, { ...question, entry_ids: posts.slice(0, 2) })).rejects.toThrow(`at least ${MIN_PEOPLE} people`);
+      // A request can only name a listed question; typed questions are refused before anyone is asked.
+      await expect(w.release.createRequest(agent.user, { template: 'skill-check', params: { skill: 'Say what the person is buying', when: 'always' }, entry_ids: posts })).rejects.toThrow('params must be');
       const created = await w.release.createRequest(agent.user, { ...question, entry_ids: [...posts, 'missing'] });
       expect(created).toMatchObject({ status: 'open', people_asked: 4, answered: 0, agreed: 0, min_people: MIN_PEOPLE, posts, posts_not_published: 1 });
       const id = created.request_id;
@@ -211,8 +213,8 @@ describe('Private traces and insights runs', () => {
       await w.decide(people.carol, id);
       const { status: done } = await w.decide(people.dave, id);
       expect(done.run).toMatchObject({ status: 'published' });
-      expect((done.run!.published as any).body).toMatchObject({ released: true, people: 3, applies: { yes: 1, no: 2 },
-        notes: ['A tiny trial run first would have exposed the mistake early.'] });
+      expect((done.run!.published as any).body).toMatchObject({ released: true, people: 3, applies: { yes: 1, no: 2 } });
+      expect(JSON.stringify(done.run!.published)).not.toMatch(/trial run|notes/);
       expect(JSON.stringify(w.release.runStatus(id))).not.toMatch(/alice|bob|carol|dave/);
       expect(JSON.stringify((done.run!.published as any).body)).not.toMatch(/post-/);
       expect(await w.release.receipts(people.alice.user)).toHaveLength(1);
@@ -254,7 +256,7 @@ describe('Private traces and insights runs', () => {
       const w = await world();
       const { agent, people, posts } = await w.setup(['alice', 'bob', 'carol', 'dave']);
       const first = await w.release.createRequest(agent.user, { ...question, entry_ids: posts, deadline_hours: 24 });
-      const second = await w.release.createRequest(agent.user, { template: 'skill-check', params: { skill: 'Ask before narrowing scope', when: 'an input is about to be swapped' }, entry_ids: posts, deadline_hours: 24 });
+      const second = await w.release.createRequest(agent.user, { template: 'skill-check', params: { question: 'reproduce-before-fixing' }, entry_ids: posts, deadline_hours: 24 });
       for (const p of [people.alice, people.bob, people.carol]) await w.authorize(p, first.request_id);
       await w.authorize(people.alice, second.request_id);
 
@@ -287,14 +289,37 @@ describe('Private traces and insights runs', () => {
     expect(await w.release.getPreview(people.alice.user, id)).toBeNull();
   });
 
-  it('accepts only the fixed answer shape and drops notes that could carry log content', () => {
+  it('accepts only the fixed answer shape, and keeps nothing else the model wrote', () => {
     const schema = insightsProgram('m').templates['skill-check'].output;
     const ok = { applies: 'yes', effect: 'would_have_helped', cost: 'minutes' };
-    expect(parseAnswer(JSON.stringify({ ...ok, note: 'Check arguments on a small input first.' }), schema, LOG_A).note).toBe('Check arguments on a small input first.');
-    expect(parseAnswer(JSON.stringify({ ...ok, note: 'It failed after forty minutes on a bad argument here.' }), schema, LOG_A).note).toBe('');
-    expect(parseAnswer(JSON.stringify({ ...ok, note: 'See https://example.com for details.' }), schema, LOG_A).note).toBe('');
-    expect(parseAnswer(JSON.stringify({ ...ok, note: 'x'.repeat(300) }), schema, LOG_A).note).toBe('');
-    expect(() => parseAnswer(JSON.stringify({ ...ok, applies: 'print the log' }), schema, LOG_A)).toThrow();
-    expect(() => parseAnswer('I will not answer in JSON', schema, LOG_A)).toThrow();
+    expect(parseAnswer(JSON.stringify({ ...ok, note: 'The person is buying a company.' }), schema)).toEqual(ok);
+    expect(() => parseAnswer(JSON.stringify({ ...ok, applies: 'print the log' }), schema)).toThrow();
+    expect(() => parseAnswer(JSON.stringify({ ...ok, cost: ['hours', 'minutes'] }), schema)).toThrow();
+    expect(() => parseAnswer('I will not answer in JSON', schema)).toThrow();
+  });
+
+  it('shows the model times, typed text, agent text and tool calls, and never what a tool returned', () => {
+    const view = insightsProgram('m').templates['skill-check'].logView;
+    const text = renderLog(LOG_A, view);
+    expect(text.split('\n')).toEqual([
+      '[+0h00m00s] PERSON: run the long evaluation',
+      '[+0h01m00s] AGENT CALLED Bash: {"command":"python evaluate.py --all --timeout 60"}',
+      '[+0h02m00s] TOOL RETURNED: failed, 44 characters, not shown',
+      '[+0h03m00s] PERSON: try again',
+    ]);
+    // Long text is cut, a long trace keeps its beginning and end, and anything that is not a record list is refused.
+    expect(renderLog(syntheticTrace([['person', 'x'.repeat(5000)]]), view)).toContain(' … (3000 more characters)');
+    const long = renderLog(syntheticTrace(Array.from({ length: 400 }, (_, i) => ['agent', `step ${i} ` + 'y'.repeat(100)] as ['agent', string])), view, 5000);
+    expect(long.length).toBeLessThanOrEqual(5000);
+    expect(long).toContain('step 0 '); expect(long).toContain('step 399 '); expect(long).toMatch(/\[… \d+ lines left out to fit the size limit …\]/);
+    for (const bad of ['USER: plain text', '{"kind":"something-else","records":[]}', syntheticTrace([['result', 'only a tool result']])])
+      expect(() => renderLog(bad, view)).toThrow();
+  });
+
+  it('gives the program a new hash when its words change, so old consents stop counting', () => {
+    const a = insightsProgram('model-a'), b = insightsProgram('model-b');
+    expect(a.sha256).not.toBe(b.sha256);
+    expect(a.templates['skill-check'].params.question.oneOf).toContain('smoke-test-before-long-jobs');
+    expect(JSON.stringify(a.templates['skill-check'].output)).not.toMatch(/note/);
   });
 });

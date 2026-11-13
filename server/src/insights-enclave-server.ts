@@ -8,19 +8,28 @@
  *
  * The release key comes from the CVM's dstack key service (INSIGHTS_KEY_SOURCE=dstack). Outside a CVM, for
  * local tests only, INSIGHTS_TEST_RELEASE_KEY is used and /info carries no quote.
+ *
+ * In production this process has no route to the internet and no model key. Its container sits on an
+ * internal network, and its only way out is the gate beside it (insights-enclave/gate.mjs, written into the
+ * measured compose file), which forwards one kind of request to one address: a message to the model named
+ * in the program. So INSIGHTS_MODEL_URL points at the gate. This file uses only Node's own HTTP client, so
+ * the enclave's image carries no model SDK.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import Anthropic from '@anthropic-ai/sdk';
 import { insightsEnclave } from './insights-enclave.js';
-import { checkUpgradePolicy, type UpgradePolicy } from './insights-release.js';
+import { checkUpgradePolicy, type UpgradePolicy } from './insights-program.js';
 
 const env = process.env;
 const PORT = Number(env.PORT || 3100);
 const LINK_SECRET = env.INSIGHTS_LINK_SECRET || '';
 if (LINK_SECRET.length < 32) throw new Error('INSIGHTS_LINK_SECRET (at least 32 characters) is required');
-if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required: the program names the Anthropic API as its model');
-const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+// Where model requests go. In production: the gate, which holds the model key and adds it. For local tests
+// without a gate, the Anthropic API itself with ANTHROPIC_API_KEY.
+const MODEL_URL = (env.INSIGHTS_MODEL_URL || '').replace(/\/+$/, '');
+if (env.NODE_ENV === 'production' && !/^http:\/\/[a-z0-9-]+:\d+$/.test(MODEL_URL)) throw new Error('The production enclave requires INSIGHTS_MODEL_URL: the gate inside its own CVM, for example http://gate:8089');
+if (env.NODE_ENV === 'production' && env.ANTHROPIC_API_KEY) throw new Error('The production enclave must not hold the model key; the gate does');
+if (!MODEL_URL && !env.ANTHROPIC_API_KEY) throw new Error('Set INSIGHTS_MODEL_URL (the gate), or ANTHROPIC_API_KEY for a local test without one');
 
 let releasePrivateKey: string, appId: string;
 let quote: ((reportData: Buffer) => Promise<unknown>) | undefined;
@@ -53,10 +62,14 @@ const enclave = insightsEnclave({
   complete: async ({ model, system, user, maxTokens }) => {
     // Current models think before answering by default, and the thinking counts against max_tokens,
     // so leave room beyond the answer and read the text block, which need not come first.
-    const reply = await anthropic.messages.create({ model, max_tokens: maxTokens + 4000, system, messages: [{ role: 'user', content: user }] });
-    if ((reply.stop_reason as string) === 'refusal') throw new Error('The model declined this trace.');
-    const block = reply.content.find(b => b.type === 'text');
-    return block?.type === 'text' ? block.text : '';
+    const res = await fetch(`${MODEL_URL || 'https://api.anthropic.com'}/v1/messages`, { method: 'POST', signal: AbortSignal.timeout(180_000),
+      headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...(MODEL_URL ? {} : { 'x-api-key': env.ANTHROPIC_API_KEY as string }) },
+      body: JSON.stringify({ model, max_tokens: maxTokens + 4000, system, messages: [{ role: 'user', content: user }] }) });
+    if (!res.ok) throw new Error(`The model request failed (HTTP ${res.status}).`);
+    const reply = await res.json() as { stop_reason?: string; content?: { type: string; text?: string }[] };
+    if (reply.stop_reason === 'refusal') throw new Error('The model declined this trace.');
+    const block = (reply.content || []).find(b => b.type === 'text');
+    return typeof block?.text === 'string' ? block.text : '';
   },
 });
 

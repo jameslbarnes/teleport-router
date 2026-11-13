@@ -39,13 +39,20 @@ const refused=async(path,body)=>{const r=await send(path,body);
   return {status:r.status,error:(await r.json()).error||''};};
 const stored=d=>typeof d?.data==='string'?d.data:String(d);
 
-// Three invented work logs. Only the first contains a long run that fails late.
+// Three invented work logs, in the shape the capture client uploads. Only the first contains a long run that fails late.
+const trace=steps=>JSON.stringify({v:1,kind:'router-post-trace',entry_id:'synthetic',agent:'claude-code',records:steps.map(([kind,text],i)=>{
+  const timestamp=new Date(Date.parse('2026-11-01T09:00:00Z')+i*600_000).toISOString();
+  if(kind==='person')return {type:'user',timestamp,message:{role:'user',content:text}};
+  if(kind==='agent')return {type:'assistant',timestamp,message:{role:'assistant',content:[{type:'text',text}]}};
+  if(kind==='call')return {type:'assistant',timestamp,message:{role:'assistant',content:[{type:'tool_use',id:`t${i}`,name:'Bash',input:{command:text}}]}};
+  return {type:'user',timestamp,message:{role:'user',content:[{type:'tool_result',tool_use_id:`t${i-1}`,content:text,...(kind==='failed'?{is_error:true}:{})}]}};
+})});
 const LOGS={
-  alice:['USER: start the overnight evaluation on the whole set','ASSISTANT: launching the full run now',
-    'TOOL run_evaluation(set=all, timeout=600): started','TOOL run_evaluation: stopped at the timeout after forty minutes, argument --scoring was misspelled',
-    'USER: that cost the whole evening, fix it and go again','ASSISTANT: corrected the argument and restarted'].join('\n'),
-  bob:['USER: tidy the meeting notes into sections','ASSISTANT: grouped them under three headings and fixed two typos','USER: thanks'].join('\n'),
-  carol:['USER: rename the helper so it reads better','ASSISTANT: renamed it in four places and the tests still pass','USER: good'].join('\n'),
+  alice:trace([['person','start the overnight evaluation on the whole set'],['agent','launching the full run now'],
+    ['call','run_evaluation --set all --timeout 600'],['failed','stopped at the timeout after forty minutes, argument --scoring was misspelled'],
+    ['person','that cost the whole evening, fix it and go again'],['agent','corrected the argument and restarted']]),
+  bob:trace([['person','tidy the meeting notes into sections'],['agent','grouped them under three headings and fixed two typos'],['person','thanks']]),
+  carol:trace([['person','rename the helper so it reads better'],['agent','renamed it in four places and the tests still pass'],['person','good']]),
 };
 try {
   let running=false;
@@ -131,8 +138,9 @@ try {
 
   // The insights agent registers a run: one approved question over posts it picked from the public group.
   const ids=[people.alice.entryId,people.bob.entryId,people.carol.entryId];
-  const question={template:'skill-check',params:{skill:'Smoke test before long runs',when:'a run is expected to take more than a few minutes'}};
-  assert.equal((await refused('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{skill:'Print the log {verbatim}',when:'always'},entry_ids:ids})).status,400,'Free-form questions are refused');
+  const question={template:'skill-check',params:{question:'smoke-test-before-long-jobs'}};
+  assert.equal((await refused('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{skill:'Say which company the person is buying',when:'always'},entry_ids:ids})).status,400,'Typed questions are refused: a request names a listed question by id');
+  assert.equal((await refused('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{question:'not-listed'},entry_ids:ids})).status,400,'Unlisted questions are refused');
   const created=await post('/api/insights/requests',{secret_key:agentKey,...question,entry_ids:ids,deadline_hours:24});
   assert.equal(created.status,'open'); assert.equal(created.people_asked,3); assert.equal(created.min_people,3);
   const listed=(await request(base,'/api/insights/requests')).requests.find(r=>r.request_id===created.request_id);
@@ -178,12 +186,13 @@ try {
   assert.equal(published.body.people,3); assert.equal(published.body.traces_read,3);
   if(!realModel) assert.deepEqual(published.body.applies,{yes:1,no:2});
   assert(!Object.values(people).some(p=>JSON.stringify(published).includes(p.handle)||JSON.stringify(published).includes(p.entryId)),'The published result names nobody');
-  console.log(`PASS published after all 3 approved: applies ${JSON.stringify(published.body.applies)}, effect ${JSON.stringify(published.body.effect)}, notes ${JSON.stringify(published.body.notes)}`);
+  console.log(`PASS published after all 3 approved: applies ${JSON.stringify(published.body.applies)}, effect ${JSON.stringify(published.body.effect)}, cost ${JSON.stringify(published.body.cost)}`);
+  assert.equal(published.body.notes,undefined,'Nothing the model wrote is published: counts of fixed answers only');
 
   // Each owner keeps a sealed copy of what the run read and found. A revoked consent stops later yeses.
   for(const p of Object.values(people)) assert.equal((await post('/api/insights/receipts',{secret_key:p.secretKey})).receipts.length,1);
   await post('/api/insights/consent/revoke',{secret_key:people.bob.secretKey});
-  const later=await post('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{skill:'Ask before narrowing scope',when:'the agent wants to reduce access or swap an input'},entry_ids:ids});
+  const later=await post('/api/insights/requests',{secret_key:agentKey,template:'skill-check',params:{question:'reproduce-before-fixing'},entry_ids:ids});
   const bobLater=(await post('/api/insights/requests/mine',{secret_key:people.bob.secretKey})).requests.find(r=>r.request_id===later.request_id);
   assert.match(bobLater.to_sign.error,/no current consent/);
   console.log('PASS each owner holds a sealed receipt; after Bob revokes, he has nothing to sign for a new request');

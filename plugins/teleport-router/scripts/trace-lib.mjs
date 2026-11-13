@@ -303,6 +303,29 @@ export function cleanRecords(records, { extraSecrets = [] } = {}) {
 
 // ── Building the record ─────────────────────────────────────────────────────────────────
 
+const textSize = value => typeof value === 'string' ? value.length
+  : Array.isArray(value) ? value.reduce((n, v) => n + textSize(v), 0)
+  : value && typeof value === 'object' ? textSize(value.text ?? value.content ?? '') : 0;
+
+/**
+ * For the extraction copy: what tools returned is left out, wherever it is nested, and only its size and
+ * whether the call failed are kept. Tool results are where text from outside the session arrives (web
+ * pages, search results, files, mail, other people's notes), so this copy carries none of it off the
+ * machine. The enclave leaves tool results out of what it shows the model in any case; this keeps them
+ * from being sent at all. The owner's full record is not affected.
+ */
+export function withoutToolResults(value) {
+  if (Array.isArray(value)) return value.map(withoutToolResults);
+  if (!value || typeof value !== 'object') return value;
+  if (value.type === 'tool_result') {
+    return { type: 'tool_result', ...(value.tool_use_id ? { tool_use_id: value.tool_use_id } : {}), ...(value.is_error === true ? { is_error: true } : {}),
+      content: '', left_out_characters: textSize(value.content) };
+  }
+  const out = {};
+  for (const [key, child] of Object.entries(value)) out[key] = withoutToolResults(child);
+  return out;
+}
+
 const clip = (s, limit) => s.length <= limit ? s
   : `${s.slice(0, Math.floor(limit * 0.6))}\n[… ${s.length - limit} characters left out to fit the size limit …]\n${s.slice(-Math.floor(limit * 0.4))}`;
 
@@ -310,7 +333,7 @@ const clip = (s, limit) => s.length <= limit ? s
  * The plaintext of one post's trace: gzipped JSON. Long strings are shortened, longest first,
  * only when the record would not fit `maxBytes`; what was shortened is written in the record.
  */
-export function buildTrace({ post, lines, source = {}, extraSecrets = [], maxBytes = 5_000_000 }) {
+export function buildTrace({ post, lines, source = {}, extraSecrets = [], maxBytes = 5_000_000, leaveOutToolResults = false }) {
   const header = { v: 1, kind: 'router-post-trace', entry_id: post.entryId, agent: post.agent || 'claude-code', session_id: post.sessionId,
     posted_at: post.postedAt, previous_entry_id: post.previousEntryId, ...source,
     slice: { first_line: post.firstLine, last_line: post.lastLine } };
@@ -321,9 +344,9 @@ export function buildTrace({ post, lines, source = {}, extraSecrets = [], maxByt
   const parsed = [];
   for (let i = post.firstLine; i <= post.lastLine; i++) { const r = parse(lines[i]); if (r) parsed.push(r); }
   const cleaned = cleanRecords(parsed, { extraSecrets });
-  let records = cleaned.records, shortenedTo = null, droppedOldest = 0;
+  let records = leaveOutToolResults ? withoutToolResults(cleaned.records) : cleaned.records, shortenedTo = null, droppedOldest = 0;
   const pack = () => gzipSync(Buffer.from(JSON.stringify({ ...header,
-    cleaning: { rules: 1, ...cleaned.stats, strings_shortened_to: shortenedTo, oldest_records_left_out: droppedOldest }, records })));
+    cleaning: { rules: 1, ...cleaned.stats, ...(leaveOutToolResults ? { tool_results: 'left out; size only' } : {}), strings_shortened_to: shortenedTo, oldest_records_left_out: droppedOldest }, records })));
   let plaintext = pack();
   for (const limit of [200_000, 50_000, 10_000, 2_000]) {
     if (plaintext.length <= maxBytes) break;

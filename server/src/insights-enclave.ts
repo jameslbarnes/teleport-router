@@ -11,8 +11,14 @@
  * The owner's agent signs that authorization under the owner's standing rules; it is what checks
  * scope (which posts, which groups) before signing.
  *
+ * The model never reads a trace as uploaded. The enclave builds its own view of each one (renderLog):
+ * what the person typed, what the agent wrote and which tools it called, with times. What tools returned
+ * is left out, because that is where text from outside the session arrives, and such text could be written
+ * to steer the model. A run asks one of the questions listed in the program, named by id, and the model's
+ * reply is kept only as three fixed choices.
+ *
  * Each contributor sees only their own contribution, never anyone else's: their preview, sealed to
- * them, holds their answers and notes and a commitment to them salted with a secret only that preview
+ * them, holds their answers and a commitment to them salted with a secret only that preview
  * carries. Each contributor then signs approval, or a veto, of their own contribution by that
  * commitment. Once everyone has decided, the result is built from the approved contributions only and
  * published, signed by the release key, if at least MIN_PEOPLE approved; otherwise nothing comes out.
@@ -28,13 +34,13 @@ import { randomBytes } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { computeAddress, verifyMessage, Wallet } from 'ethers';
 import { canonical } from './author-records.js';
-import { approvalMessage, authorizationMessage, AUTHORIZATION_MAX_MS, checkUpgradePolicy, consentMessage, insightsProgram, MIN_PEOPLE, parseAnswer, questionSha256,
-  type InsightsPolicy, type ContributionApproval, type RunAuthorization, type UpgradePolicy } from './insights-release.js';
+import { approvalMessage, authorizationMessage, AUTHORIZATION_MAX_MS, checkQuestion, checkUpgradePolicy, consentMessage, insightsProgram, MIN_PEOPLE, parseAnswer, renderLog,
+  DERIVED_MAX, DERIVED_TEXT_MAX, type InsightsPolicy, type ContributionApproval, type RunAuthorization, type UpgradePolicy } from './insights-program.js';
 import { checkPartMeta, compressPublicKey, openPart, publicKeyOf, sealPart, sha256Hex, type PartMeta } from './trace-envelope.js';
 
-export { authorizationMessage, approvalMessage, questionSha256, type RunAuthorization, type ContributionApproval } from './insights-release.js';
+export { authorizationMessage, approvalMessage, questionSha256, type RunAuthorization, type ContributionApproval } from './insights-program.js';
 
-const DERIVED_MAX = 400 * 1024, DERIVED_TEXT_MAX = 600_000, MAX_OWNERS = 50, MAX_ENTRIES = 50;
+const MAX_OWNERS = 50, MAX_ENTRIES = 50;
 const RUNS_KEPT = 500, READ_MARKERS_KEPT = 200_000;
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 const didAddress = (did: unknown) => typeof did === 'string' ? /^did:pkh:eip155:1:(0x[\da-fA-F]{40})$/.exec(did)?.[1]?.toLowerCase() : undefined;
@@ -58,7 +64,7 @@ interface OwnerInput {
   traces?: { entryId?: unknown; meta?: unknown; ciphertext?: unknown }[];
 }
 type Answer = { applies: string; effect: string; cost: string };
-type Item = { entryId: string; traceSha256: string; answer: Answer; note: string };
+type Item = { entryId: string; traceSha256: string; answer: Answer };
 interface Contribution { did: string; publicKey: string; items: Item[]; commitment: string }
 type RunStatus = 'running' | 'awaiting_decisions' | 'published' | 'withheld';
 interface EnclaveRun {
@@ -141,7 +147,7 @@ export function insightsEnclave(deps: EnclaveDeps) {
       program: { name: program.name, version: program.version, sha256: program.sha256 }, released: true,
       people: approved.length, people_where_it_applies: approved.filter(c => c.items.some(i => i.answer.applies === 'yes')).length,
       traces_read: items.length, applies: count('applies'), effect: count('effect'), cost: count('cost'),
-      notes: [...new Set(items.map(i => i.note).filter(Boolean))].sort(), enclave, published_at: new Date(now()).toISOString() };
+      enclave, published_at: new Date(now()).toISOString() };
     r.published = { body, signature: signer.signMessageSync(canonical(body)), signer: signer.address };
     r.status = 'published';
   }
@@ -162,18 +168,12 @@ export function insightsEnclave(deps: EnclaveDeps) {
     async run(input: { run?: unknown; template?: unknown; params?: unknown; owners?: unknown }) {
       if (!validId(input.run)) throw new Error('run must be an id');
       if (runs.has(input.run)) throw new Error('This run has already happened.');
-      const template = typeof input.template === 'string' ? program.templates[input.template as keyof typeof program.templates] : undefined;
-      if (!template || typeof input.template !== 'string') throw new Error('Unknown template');
-      const params: Record<string, string> = {};
-      for (const [name, rule] of Object.entries(template.params)) {
-        const value = (input.params as any)?.[name];
-        if (typeof value !== 'string' || !value.trim() || value.length > rule.maxChars || !/^[A-Za-z0-9 ,.;:'()\/-]+$/.test(value)) throw new Error(`Bad ${name}`);
-        params[name] = value.trim();
-      }
+      const q = checkQuestion(program, input.template, input.params);
+      const template = q.template, params = q.params;
       const owners = Array.isArray(input.owners) ? input.owners as OwnerInput[] : [];
       if (!owners.length || owners.length > MAX_OWNERS) throw new Error(`owners must list 1 to ${MAX_OWNERS} people`);
       if (busy) throw new Error('Another run is in progress. Try again later.');
-      const question = { template: input.template, params, sha256: questionSha256(program.sha256, input.template, params) };
+      const question = { template: q.name, params, sha256: q.sha256 };
       // Reserve the run before any await, so a duplicate request cannot run it twice.
       const r: EnclaveRun = { run: input.run, at: new Date(now()).toISOString(), questionSha256: question.sha256, template: question.template, params,
         contributors: [], decisions: new Map(), status: 'running', published: null };
@@ -206,14 +206,17 @@ export function insightsEnclave(deps: EnclaveDeps) {
               const marker = `${question.sha256}:${traceSha256}`;
               if (readOnce.has(marker)) { skip('already_read_for_this_question'); continue; }
               const packed = openPart(meta, ciphertext, { ownerDid: o.did as string, entryId: t.entryId }, 'derived', 'release', deps.releasePrivateKey);
-              log = gunzipSync(packed, { maxOutputLength: DERIVED_TEXT_MAX * 4 }).toString('utf8').slice(0, DERIVED_TEXT_MAX);
+              const unpacked = gunzipSync(packed, { maxOutputLength: DERIVED_MAX * 64 });
               packed.fill(0);
-              const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 400,
-                user: template.user.replace('{skill}', params.skill).replace('{when}', params.when).replace('{log}', () => log) });
-              const parsed = parseAnswer(reply, template.output, log);
+              // The model is shown the enclave's own view of the trace, never the trace as uploaded.
+              log = renderLog(unpacked.toString('utf8'), template.logView, DERIVED_TEXT_MAX);
+              unpacked.fill(0);
+              const reply = await deps.complete({ model: program.model, system: template.system, maxTokens: 200,
+                user: template.user.replace('{rule}', q.rule).replace('{when}', q.when).replace('{log}', () => log) });
+              const answer = parseAnswer(reply, template.output);
               // Consumed only once it produced an answer: a failed attempt can be retried.
               markRead(marker);
-              items.push({ entryId: t.entryId, traceSha256, answer: parsed.answer, note: parsed.note });
+              items.push({ entryId: t.entryId, traceSha256, answer });
             } catch { skip('unreadable_or_failed'); } finally { log = ''; }
           }
           if (items.length) r.contributors.push({ did: o.did as string, publicKey: checked.publicKey, items, commitment: '' });

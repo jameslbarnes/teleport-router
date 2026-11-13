@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "bundle:insights-enclave": "node scripts/bundle-insights-enclave.mjs",
     "start": "node dist/index.js",
     "start:http": "node dist/http.js",
     "start:shape-matrix-bridge": "node dist/shape-matrix-bridge.js",
@@ -49,6 +50,7 @@
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.10.0",
     "@types/sanitize-html": "^2.16.1",
+    "esbuild": "0.27.1",
     "tsx": "^4.7.0",
     "typescript": "^5.3.0",
     "vitest": "^4.0.16"

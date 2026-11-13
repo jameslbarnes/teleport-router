@@ -20,3 +20,17 @@ export function legacyRecord(key: Uint8Array, owner: string, kind: RecordKind, v
   const mac=createHmac('sha256',key).update(`router-record-v1\0${owner}\0${kind}\0${canonical(value)}`).digest('hex');
   return canonical({version:1,value,mac});
 }
+
+/** A synthetic trace in the shape the capture client uploads: what the person typed, what the agent wrote,
+ * tool calls and what they returned. `steps` items are [kind, text]; kinds: person, agent, call (text is the
+ * command), result, failed. Times are one minute apart. */
+export function syntheticTrace(steps: [kind: 'person' | 'agent' | 'call' | 'result' | 'failed', text: string][]): string {
+  const start = Date.parse('2026-11-01T09:00:00Z');
+  return JSON.stringify({ v: 1, kind: 'router-post-trace', entry_id: 'synthetic', agent: 'claude-code', records: steps.map(([kind, text], i) => {
+    const timestamp = new Date(start + i * 60_000).toISOString();
+    if (kind === 'person') return { type: 'user', timestamp, message: { role: 'user', content: text } };
+    if (kind === 'agent') return { type: 'assistant', timestamp, message: { role: 'assistant', content: [{ type: 'text', text }] } };
+    if (kind === 'call') return { type: 'assistant', timestamp, message: { role: 'assistant', content: [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input: { command: text } }] } };
+    return { type: 'user', timestamp, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${i - 1}`, content: text, ...(kind === 'failed' ? { is_error: true } : {}) }] } };
+  }) });
+}

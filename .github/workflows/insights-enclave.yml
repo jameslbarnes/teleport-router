@@ -1,18 +1,20 @@
 name: Deploy the insights enclave
 
 # The insights enclave is its own Phala app, separate from Router's CVM, so Router's deploys never reach its
-# release key. This runs only by hand, with an image that master's build already pushed. The first run creates
-# the app (save its id as the INSIGHTS_ENCLAVE_CVM_ID secret); later runs update it. Its secrets never leave
-# GitHub's encrypted settings and Phala's encrypted environment.
+# release key. This runs only by hand, on the commit it is started from. It builds the enclave's own small
+# image (insights-enclave/Dockerfile), builds it a second time from nothing to check that the same commit
+# gives the same image, and deploys the measured compose file. The first run creates the app (save its id as
+# the INSIGHTS_ENCLAVE_CVM_ID secret); later runs update it. Its secrets never leave GitHub's encrypted
+# settings and Phala's encrypted environment.
+#
+# Before running it for an update, run `node insights-enclave/check-upgrade.mjs --from <deployed commit>
+# --to <this commit>` and post its report with the proposal.
+#
+# Not yet here: the app contract and timelock (insights-upgrades/). Until the app is created through the
+# on-chain key service with the timelock as its owner, the deploy below uses Phala's own key service and the
+# operator can update the app at will, which is what the consent says.
 on:
   workflow_dispatch:
-    inputs:
-      image_digest:
-        description: 'teleport-router image digest from a master build (sha256:...)'
-        required: true
-      git_sha:
-        description: 'The commit that image was built from'
-        required: true
 
 permissions:
   contents: read
@@ -31,14 +33,63 @@ jobs:
       - name: Install the Phala CLI
         run: npm install -g phala@1.2.6
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check the gate in the compose file is the gate in the repository
+        run: |
+          node insights-enclave/embed.mjs --check
+          node --test insights-enclave/gate.test.mjs
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Timestamps are fixed and no build record is attached, so the digest depends only on the commit.
+      - name: Build and push the enclave image
+        id: image
+        uses: docker/build-push-action@v5
+        env:
+          SOURCE_DATE_EPOCH: 0
+        with:
+          context: .
+          file: insights-enclave/Dockerfile
+          provenance: false
+          sbom: false
+          outputs: type=image,name=docker.io/generalsemantics/teleport-router-insights-enclave:${{ github.sha }},push=true,rewrite-timestamp=true
+
+      - name: Build it again from nothing
+        id: again
+        uses: docker/build-push-action@v5
+        env:
+          SOURCE_DATE_EPOCH: 0
+        with:
+          context: .
+          file: insights-enclave/Dockerfile
+          provenance: false
+          sbom: false
+          no-cache: true
+          outputs: type=image,name=docker.io/generalsemantics/teleport-router-insights-enclave:${{ github.sha }}-check,push=true,rewrite-timestamp=true
+
+      - name: The same commit must give the same image
+        env:
+          FIRST: ${{ steps.image.outputs.digest }}
+          SECOND: ${{ steps.again.outputs.digest }}
+        run: |
+          echo "first:  $FIRST"; echo "second: $SECOND"
+          [ -n "$FIRST" ] && [ "$FIRST" = "$SECOND" ] || { echo "The two builds differ, so nobody could check this image against its source. Not deploying."; exit 1; }
+
       - name: Fill in the compose file
         env:
-          IMAGE_DIGEST: ${{ inputs.image_digest }}
-          GIT_SHA: ${{ inputs.git_sha }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          GIT_SHA: ${{ github.sha }}
         run: |
           digest="${IMAGE_DIGEST#sha256:}"
-          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "image_digest must be sha256:<64 hex>"; exit 1; }
-          [[ "$GIT_SHA" =~ ^[0-9a-f]{7,40}$ ]] || { echo "git_sha must be a commit hash"; exit 1; }
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "the build gave no image digest"; exit 1; }
           sed -e "s/__IMAGE_DIGEST__/$digest/g" -e "s/__GIT_SHA__/$GIT_SHA/g" docker-compose.insights-enclave.yml > /tmp/insights-enclave.yml
           ! grep -qE '__IMAGE_DIGEST__|__GIT_SHA__' /tmp/insights-enclave.yml
           sha256sum /tmp/insights-enclave.yml

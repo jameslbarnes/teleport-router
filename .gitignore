@@ -32,3 +32,6 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# The insights enclave's bundle (server/scripts/bundle-insights-enclave.mjs)
+server/dist-insights-enclave*/
