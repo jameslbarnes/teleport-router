@@ -220,8 +220,8 @@ try {
   const soloPage = await soloContext.newPage();
   soloPage.on('pageerror', error => errors.push(error.message));
   const soloLoads = []; soloPage.on('request', r => soloLoads.push(new URL(r.url()).pathname));
-  await soloPage.goto(base + '/join'); // the plain address sends a new person to the guided setup
-  await soloPage.waitForURL('**/group-setup');
+  // /join is the guided setup. Arriving from another page keeps the way back for the end.
+  await soloPage.goto(base + '/join?next=' + encodeURIComponent('/?view=channel&id=open-club'));
   await soloPage.locator('#create-account').waitFor();
   assert.equal(await soloPage.locator('#step-discord').isVisible(), false);
   assert.equal(await soloPage.locator('#create-submit').textContent(), 'Create account');
@@ -264,8 +264,24 @@ try {
   await soloPage.locator('#connect').waitFor();
   await soloPage.locator('#connect-next').click();
   await soloPage.locator('#ready').waitFor();
+  assert.equal(await soloPage.locator('#read-group').getAttribute('href'), '/?view=channel&id=open-club');
+  assert.equal(await soloPage.locator('#read-group').textContent(), 'Continue where you were');
   assert.match(await soloPage.locator('#ready-state').textContent(), /Your recovery file is saved/);
   assert.equal(await soloPage.locator('#step-discord').isVisible(), false);
+  // Someone already signed in who is sent to /join?next= goes straight on; an unsafe path is ignored.
+  await soloPage.goto(base + '/join?next=' + encodeURIComponent('/posting-rules'));
+  await soloPage.waitForURL('**/posting-rules');
+  await soloPage.goto(base + '/join?next=' + encodeURIComponent('//evil.example'));
+  await soloPage.locator('#storage-unlock').waitFor();
+  assert.equal(new URL(soloPage.url()).origin, base);
+  // An old invitation link, with the token under an older name, opens the same guided setup.
+  const oldLink = await newContext();
+  const oldPage = await oldLink.newPage();
+  oldPage.on('pageerror', error => errors.push(error.message));
+  await oldPage.goto(base + '/join?code=' + encodeURIComponent(token));
+  await oldPage.locator('#group-name').filter({ hasText: 'Reading club' }).waitFor();
+  assert.equal(await oldPage.locator('#create-account').isVisible(), true);
+  await oldLink.close();
   // Coming back signed in goes on from the storage step, not to a dead end.
   await soloPage.goto(base + '/group-setup');
   await soloPage.locator('#storage-unlock').waitFor();

@@ -417,11 +417,8 @@
     <script>
         const baseUrl = window.location.origin;
         const urlParams = new URLSearchParams(window.location.search);
-        // A new person at the plain /join address creates their account in the guided setup, which also gives
-        // them a recovery file. Invitations, the command-line setup and ?next= links are handled on this page.
-        try {
-            if (location.pathname === '/join' && !location.search && !location.hash && !localStorage.getItem('router_key')) location.replace('/group-setup');
-        } catch {}
+        // This page is served only at /setup/cli, for the command-line setup. Everyone else sets up at /join,
+        // which is the guided setup page.
         const nextParam = urlParams.get('next');
         let channelInviteToken = urlParams.get('channelinvite')
             || urlParams.get('invite')
