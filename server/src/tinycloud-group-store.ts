@@ -36,6 +36,19 @@ export function inspectGrant(wire: string): GrantSummary {
   };
 }
 
+/**
+ * When the Router's session under a grant should end: at the grant's own expiry, rounded down to
+ * the whole second. The library otherwise asks for exactly the grant's expiry, milliseconds
+ * included, while the grant itself is held to the second, so the storage node refuses it as
+ * "child delegation expiry exceeds parent expiry".
+ */
+export function sessionExpiryFor(grantExpiry: Date | string | undefined): Date | undefined {
+  if (grantExpiry === undefined) return undefined;
+  const ms = new Date(grantExpiry).getTime();
+  if (!Number.isFinite(ms)) return undefined;
+  return new Date(Math.floor(ms / 1000) * 1000);
+}
+
 export function tinyCloudGroups(config: TinyCloudRouterConfig) {
   let signingIn: Promise<TinyCloudNode> | null = null;
   const signedIn = () => (signingIn ??= (async () => {
@@ -55,7 +68,8 @@ export function tinyCloudGroups(config: TinyCloudRouterConfig) {
       const delegation = deserializeDelegation(wire);
       if (delegation.host && new URL(delegation.host).origin !== new URL(config.host).origin)
         throw new Error('The TinyCloud grant uses a different host.');
-      access = await node.useDelegation({...delegation,host:config.host});
+      const expiry = sessionExpiryFor(delegation.expiry);
+      access = await node.useDelegation({...delegation, ...(expiry ? { expiry } : {}), host: config.host});
     } catch (err) {
       if (isRevokedGrant((err as Error)?.message)) throw new GroupStoreRevokedError();
       throw err;
