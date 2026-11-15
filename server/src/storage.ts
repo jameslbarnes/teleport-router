@@ -31,6 +31,8 @@ export interface JournalEntry {
   topicHints?: string[]; // For AI-only entries: topics covered (e.g., ["auth", "TEE"])
   repo?: string;      // Repository the work happened in, as "owner/name" (see note-labels.ts). Shown with the note.
   tags?: string[];    // Topic tags, lowercase slugs. Shown with the note.
+  /** Present when the note is a skill: know-how for other agents (see skill-notes.ts). Not a posting tool. */
+  skill?: import('./skill-notes.js').SkillNote;
 
   // Unified addressing system
   to?: string[];             // Destinations: @handles, #channels, emails, webhook URLs. Empty = public.
@@ -165,6 +167,12 @@ export interface User {
   discordGrants?: import('./discord-groups.js').DiscordGroupGrant[];
   /** Private personal instructions. Never expose in public user/profile responses. */
   postingRules?: PostingRules;
+  /** Private groups whose skills this person turned on for their agents. Being a member is not enough. */
+  skillGroups?: string[];
+  /** IDs of this person's own published skill notes. */
+  skillNotes?: string[];
+  /** Skill notes this person does not want listed for their agents: "author/name", or "@author" for all of one person's. */
+  mutedSkills?: string[];
   /** The owner's signed permission for insights runs to read their traces. Checked on every run. */
   insightsConsent?: import('./insights-release.js').InsightsConsentRecord;
 }
@@ -200,6 +208,8 @@ export interface Channel {
   createdAt: number;
   skills: Skill[];               // channel-scoped skills
   subscribers: ChannelSubscriber[];
+  /** The skill notes shared in this group, by note ID, with members' reads and reports of each. Holds no text of the notes. */
+  skillNotes?: Record<string, import('./skill-notes.js').SkillUse>;
   /** Optional binding for the private Discord note commands. */
   discord?: import('./discord-groups.js').DiscordGroupBinding;
   /** The Discord server invitation an admin saved for this group. Shown only to members and invited people. */
@@ -950,6 +960,7 @@ export class FirestoreStorage implements Storage {
 
     if (newEntry.repo) docData.repo = newEntry.repo;
     if (newEntry.tags && newEntry.tags.length > 0) docData.tags = newEntry.tags;
+    if (newEntry.skill) docData.skill = newEntry.skill;
 
     // Unified addressing fields
     if (newEntry.to && newEntry.to.length > 0) {

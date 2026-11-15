@@ -47,6 +47,19 @@ describe('Each author owns their published records',()=>{
     expect(await f.base.getEntry('waiting-id')).toBeNull();
   });
 
+  it('keeps a skill note’s fields through encryption and a fresh load, and out of the older database',async()=>{
+    const f=await fixture();
+    await f.layer.link(f.users[0],binding('alice'));
+    const skill={name:'tracing-latency',whenToUse:'A live pipeline got slower.',evidence:'26 cases over 7 days',origin:'own-sessions' as const,supersedes:'earlier-note'};
+    const saved=await f.layer.storage.addEntry({...post('alice','STEP ONE: time each stage.'),skill});
+    expect(saved.skill).toEqual(skill);
+    expect(await f.base.getEntry(saved.id)).toBeNull();
+    expect([...f.data.get('space:alice')!.values()].join('')).not.toContain('tracing-latency');
+    const fresh=authorStorage(f.base,f.resolve,codec);
+    expect((await fresh.storage.getEntry(saved.id))?.skill).toEqual(skill);
+    expect((await fresh.storage.getChannelEntries('lab',10)).find(e=>e.id===saved.id)?.skill).toEqual(skill);
+  });
+
   it('revokes one of three authors across every read surface, leaving the other two and the owner copy intact',async()=>{
     const f=await fixture();
     const records=[];
