@@ -16,7 +16,7 @@
 
 import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
   AbiCoder,
@@ -26,11 +26,17 @@ import {
   Wallet,
   ZeroAddress,
   ZeroHash,
+  concat,
+  formatEther,
   getAddress,
   getCreateAddress,
   id as keccakText,
   isHexString,
   keccak256,
+  parseEther,
+  toBeHex,
+  verifyTypedData,
+  zeroPadValue,
 } from "ethers";
 
 const require = createRequire(import.meta.url);
@@ -43,6 +49,17 @@ export const timelockInterface = new Interface(TIMELOCK_ABI);
 export const MIN_DELAY_HOURS = 48;
 export const DEPLOYER_KEY_ENV = "INSIGHTS_DEPLOYER_KEY";
 export const CANCEL_KEY_ENV = "INSIGHTS_CANCEL_KEY";
+export const MEMBER_KEY_ENV = "INSIGHTS_MEMBER_KEY";
+// The ERC-4337 entry point the veto contract answers to unless told otherwise:
+// v0.9, the default in the OpenZeppelin release this package pins. Its code
+// was found at this address on Base on 2026-11-14.
+export const ENTRY_POINT_V09 = "0x433709009B8330FDa32311DF1C2AFA402eD8D009";
+// The most one paid veto may cost the veto contract unless told otherwise.
+export const DEFAULT_MAX_VETO_COST_ETH = "0.0002";
+// keccak256 of the code at ENTRY_POINT_V09 on Base, read on 2026-11-14 (the
+// same code is in test-fixtures/). deploy-timelock refuses if the code at
+// that address on the chosen chain is anything else.
+export const ENTRY_POINT_V09_CODE_HASH = "0x826b7ec542db9f3345234a25c2a6330a61f99483dedb6e6709928cc97e4e4d5d";
 
 export const ROLES = {
   DEFAULT_ADMIN_ROLE: ZeroHash,
@@ -189,6 +206,17 @@ function parseWholeNumber(value, flag) {
   return BigInt(value);
 }
 
+function parseEthAmount(value, flag) {
+  let wei;
+  try {
+    wei = parseEther(value);
+  } catch {
+    throw new UsageError(`${flag} must be an amount of ETH, such as 0.002`);
+  }
+  if (wei <= 0n) throw new UsageError(`${flag} must be more than zero`);
+  return wei;
+}
+
 function requireFlag(values, name) {
   if (values[name] === undefined) throw new UsageError(`--${name} is required`);
   return values[name];
@@ -229,6 +257,9 @@ const KNOWN_CALLS = new Interface([
   "function revokeRole(bytes32 role, address account)",
   "function renounceRole(bytes32 role, address callerConfirmation)",
   "function updateDelay(uint256 newDelay)",
+  "function addMember(address member)",
+  "function removeMember(address member)",
+  "function withdraw(address to, uint256 amount)",
 ]);
 
 /** Plain-words reading of a call the timelock would make. Never throws. */
@@ -258,16 +289,21 @@ async function connect(values) {
   // Ask the endpoint directly first: ethers retries forever when it cannot
   // detect the network.
   let actual;
-  try {
-    const response = await fetch(rpc, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
-      signal: AbortSignal.timeout(15000),
-    });
-    actual = BigInt((await response.json()).result);
-  } catch {
-    throw new RefusedError("could not read the chain id from the RPC endpoint given by --rpc");
+  // Public endpoints drop a request now and then, so this is tried a few
+  // times. Nothing has been sent at this point.
+  for (let attempt = 1; actual === undefined; attempt += 1) {
+    try {
+      const response = await fetch(rpc, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+        signal: AbortSignal.timeout(15000),
+      });
+      actual = BigInt((await response.json()).result);
+    } catch {
+      if (attempt >= 4) throw new RefusedError("could not read the chain id from the RPC endpoint given by --rpc");
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
   }
   if (actual !== expected) {
     throw new RefusedError(`the RPC endpoint is chain ${actual}, but --chain-id says ${expected}; refusing`);
@@ -313,7 +349,21 @@ function resolveSender(values, envName, provider) {
 
 async function send(signer, tx, label, confirmations) {
   log(`sending: ${label}`);
-  const response = await signer.sendTransaction(tx);
+  // Public endpoints sit behind several nodes, and one of them may not have
+  // seen the previous transaction yet, so a gas estimate can fail for a
+  // contract that was deployed a moment ago. Only that case is retried: when
+  // the estimate fails, nothing has been sent.
+  let response;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      response = await signer.sendTransaction(tx);
+      break;
+    } catch (error) {
+      if (error?.action !== "estimateGas" || attempt >= 6) throw error;
+      log(`  the endpoint could not estimate this yet (attempt ${attempt} of 6); waiting`);
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+    }
+  }
   const receipt = await response.wait(confirmations);
   if (!receipt || receipt.status !== 1) throw new Error(`transaction failed: ${label} (${response.hash})`);
   log(`  mined in block ${receipt.blockNumber}: ${response.hash}`);
@@ -352,10 +402,21 @@ export async function deployTimelock(values) {
   }
   const minDelay = hours * 3600n;
   const proposer = parseAddress(requireFlag(values, "proposer"), "--proposer");
-  const cancellers = requireFlag(values, "cancellers")
-    .split(",")
-    .map((entry) => parseAddress(entry.trim(), "--cancellers"));
+  const withVeto = Boolean(values["member-veto"]);
+  const addressList = (flag) =>
+    (values[flag] ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => parseAddress(entry, `--${flag}`));
+  if (!withVeto && (values.members !== undefined || values.enroller !== undefined)) {
+    throw new UsageError("--members and --enroller only apply with --member-veto");
+  }
+  const cancellers = addressList("cancellers");
+  if (!withVeto && cancellers.length === 0) throw new UsageError("--cancellers is required (or use --member-veto)");
   if (new Set(cancellers).size !== cancellers.length) throw new UsageError("--cancellers lists an address twice");
+  const members = addressList("members");
+  if (new Set(members).size !== members.length) throw new UsageError("--members lists an address twice");
   if (values.executor && values["open-execution"]) {
     throw new UsageError("give --executor or --open-execution, not both");
   }
@@ -366,6 +427,14 @@ export async function deployTimelock(values) {
     : values.executor
       ? parseAddress(values.executor, "--executor")
       : proposer;
+  // Who may add a member to the veto contract at once. Removing one always
+  // goes through the timelock.
+  const enroller = !withVeto ? null : values.enroller ? parseAddress(values.enroller, "--enroller") : proposer;
+  if (!withVeto && (values["entry-point"] !== undefined || values["max-veto-cost-eth"] !== undefined)) {
+    throw new UsageError("--entry-point and --max-veto-cost-eth only apply with --member-veto");
+  }
+  const entryPointAddress = !withVeto ? null : parseAddress(values["entry-point"] ?? ENTRY_POINT_V09, "--entry-point");
+  const maxVetoCost = !withVeto ? null : parseEthAmount(values["max-veto-cost-eth"] ?? DEFAULT_MAX_VETO_COST_ETH, "--max-veto-cost-eth");
   for (const canceller of cancellers) {
     if (canceller === proposer || canceller === executor) {
       throw new UsageError(`canceller ${canceller} is also the proposer or executor; a cancel-only key must hold nothing else`);
@@ -381,8 +450,42 @@ export async function deployTimelock(values) {
       throw new UsageError("the deployer is listed as a canceller; use a separate cancel-only key");
     }
 
+    let entryPointCodeKnown = null;
+    if (withVeto) {
+      const code = await provider.getCode(entryPointAddress);
+      if (code === "0x") throw new RefusedError(`no contract at --entry-point ${entryPointAddress} on this chain`);
+      // Everything the veto contract pays for rests on the entry point being
+      // the real one, so its code is compared with the known code.
+      entryPointCodeKnown = keccak256(code) === ENTRY_POINT_V09_CODE_HASH;
+      if (!entryPointCodeKnown && !values["unknown-entry-point"]) {
+        throw new RefusedError(
+          `the code at --entry-point ${entryPointAddress} is not the ERC-4337 entry point v0.9 code this tool knows; ` +
+            "refusing (pass --unknown-entry-point only after checking that contract yourself)",
+        );
+      }
+    }
+
     let nonce = await provider.getTransactionCount(deployer, "pending");
     const predicted = getCreateAddress({ from: deployer, nonce });
+    // The veto contract is deployed straight after the timelock, so its
+    // address is known before either exists.
+    const predictedVeto = withVeto ? getCreateAddress({ from: deployer, nonce: nonce + 1 }) : null;
+    const allCancellers = withVeto ? [predictedVeto, ...cancellers] : cancellers;
+    const vetoSteps = withVeto
+      ? [
+          {
+            tx: {
+              data:
+                memberVetoBuild().bytecode +
+                vetoInterface.encodeDeploy([predicted, enroller, entryPointAddress, maxVetoCost, members]).slice(2),
+            },
+            meaning:
+              `deploy MemberVeto for timelock ${predicted} with enroller=${enroller}, ` +
+              `entry point ${entryPointAddress}, at most ${formatEther(maxVetoCost)} ETH per paid veto, ` +
+              `members=[${members.join(", ")}]`,
+          },
+        ]
+      : [];
 
     const deployTx = {
       data: timelockArtifact.bytecode + timelockInterface.encodeDeploy([minDelay, [proposer], [executor], deployer]).slice(2),
@@ -395,9 +498,12 @@ export async function deployTimelock(values) {
           `proposers=[${proposer}], executors=[${executor === ZeroAddress ? "anyone (zero address)" : executor}], ` +
           `admin=${deployer} (temporary)`,
       },
-      ...cancellers.map((canceller) => ({
+      ...vetoSteps,
+      ...allCancellers.map((canceller) => ({
         tx: { to: predicted, data: timelockInterface.encodeFunctionData("grantRole", [ROLES.CANCELLER_ROLE, canceller]) },
-        meaning: `grantRole(CANCELLER_ROLE, ${canceller}) on the timelock`,
+        meaning:
+          `grantRole(CANCELLER_ROLE, ${canceller}) on the timelock` +
+          (canceller === predictedVeto ? " (the member veto contract)" : ""),
       })),
       {
         tx: {
@@ -415,6 +521,7 @@ export async function deployTimelock(values) {
         chainId,
         deployer,
         predictedTimelock: predicted,
+        predictedMemberVeto: predictedVeto ?? undefined,
         note: "The timelock address is predicted from the deployer's current nonce. Nothing was sent.",
         transactions: steps.map((step, index) => describeTx(index + 1, step.tx, step.meaning)),
       };
@@ -432,6 +539,9 @@ export async function deployTimelock(values) {
           throw new Error(`timelock deployed at ${receipt.contractAddress}, expected ${predicted}; stopping`);
         }
       }
+      if (withVeto && index === 1 && receipt.contractAddress !== predictedVeto) {
+        throw new Error(`member veto deployed at ${receipt.contractAddress}, expected ${predictedVeto}; stopping`);
+      }
     }
 
     const verification = await verifyTimelockSetup(provider, {
@@ -439,9 +549,32 @@ export async function deployTimelock(values) {
       minDelay,
       proposer,
       executor,
-      cancellers,
+      cancellers: allCancellers,
       deployer,
     });
+    if (withVeto) {
+      verification.push(...(await verifyVetoSetup(provider, {
+          veto: predictedVeto,
+          timelock: predicted,
+          enroller,
+          entryPoint: entryPointAddress,
+          maxVetoCost,
+          members,
+        })));
+    }
+    verification.push(
+      ...(await verifyRoleHistory(provider, {
+        timelock: predicted,
+        fromBlock: deployBlock,
+        expected: {
+          DEFAULT_ADMIN_ROLE: [predicted],
+          PROPOSER_ROLE: [proposer],
+          EXECUTOR_ROLE: [executor],
+          // OpenZeppelin gives every proposer the canceller role too.
+          CANCELLER_ROLE: [proposer, ...allCancellers],
+        },
+      })),
+    );
     const summary = {
       command: "deploy-timelock",
       dryRun: false,
@@ -454,6 +587,12 @@ export async function deployTimelock(values) {
       proposer,
       executor: executor === ZeroAddress ? "anyone (open execution)" : executor,
       cancellers,
+      memberVeto: predictedVeto ?? undefined,
+      enroller: enroller ?? undefined,
+      entryPoint: entryPointAddress ?? undefined,
+      entryPointCodeIsKnownV09: entryPointCodeKnown ?? undefined,
+      maxVetoCostWei: maxVetoCost ?? undefined,
+      members: withVeto ? members : undefined,
       deployer,
       transactions: sent,
       verification,
@@ -468,6 +607,54 @@ export async function deployTimelock(values) {
   } finally {
     provider.destroy();
   }
+}
+
+/**
+ * Rebuilds every role holder from the timelock's own grant and revoke events
+ * since it was deployed and checks that the result is exactly the expected
+ * set, so a holder nobody named cannot go unnoticed.
+ */
+export async function verifyRoleHistory(provider, { timelock, fromBlock, expected }) {
+  let logs;
+  try {
+    // An explicit end block: some endpoints refuse an open-ended range.
+    logs = await provider.getLogs({ address: timelock, fromBlock, toBlock: await provider.getBlockNumber() });
+  } catch (error) {
+    // Everything has been sent by now, so report this as a check that could
+    // not be made, with the rest of the summary, instead of stopping.
+    return [
+      {
+        what: `the timelock's role history could be read from the endpoint (it answered: ${error.shortMessage ?? error.message}); run status with --from-block ${fromBlock} to check it`,
+        ok: false,
+      },
+    ];
+  }
+  logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index);
+  const holders = Object.fromEntries(Object.keys(ROLES).map((name) => [name, new Set()]));
+  let unknownRoles = 0;
+  for (const entry of logs) {
+    let parsed = null;
+    try {
+      parsed = timelockInterface.parseLog(entry);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || (parsed.name !== "RoleGranted" && parsed.name !== "RoleRevoked")) continue;
+    const roleName = ROLE_NAMES[parsed.args.role];
+    if (!roleName) unknownRoles += 1;
+    else if (parsed.name === "RoleGranted") holders[roleName].add(parsed.args.account);
+    else holders[roleName].delete(parsed.args.account);
+  }
+  const checks = [{ what: "the timelock's events mention no role this tool does not know", ok: unknownRoles === 0 }];
+  for (const [name, accounts] of Object.entries(expected)) {
+    const want = [...new Set(accounts)].sort();
+    const got = [...holders[name]].sort();
+    checks.push({
+      what: `by the full event history, ${name} is held by exactly: ${want.join(", ")}`,
+      ok: want.length === got.length && want.every((account, index) => account === got[index]),
+    });
+  }
+  return checks;
 }
 
 /** Reads the chain and checks every role the setup should and should not have left behind. */
@@ -543,8 +730,24 @@ async function appProblems(provider, { app, timelock, appVersion }) {
   return problems;
 }
 
-export async function proposeComposeHash(values) {
-  const op = readOperationFlags(values);
+/**
+ * Problems with an operation's target, read from the chain. Compose-hash
+ * operations check the app contract; cancel-key operations check the roles.
+ */
+async function targetProblems(provider, timelock, op) {
+  if (op.kind === "canceller") return cancellerProblems(timelock, op);
+  if (op.kind === "member") return memberProblems(provider, op);
+  return appProblems(provider, op);
+}
+
+export const proposeComposeHash = (values) => proposeOperation(values, readOperationFlags(values), "propose-compose-hash");
+export const proposeCanceller = (values) => proposeOperation(values, readCancellerFlags(values), "propose-canceller");
+export const executeOperation = (values) => runOperation(values, readOperationFlags(values), "execute");
+export const executeCanceller = (values) => runOperation(values, readCancellerFlags(values), "execute-canceller");
+export const proposeRemoveMember = (values) => proposeOperation(values, readMemberRemovalFlags(values), "propose-remove-member");
+export const executeRemoveMember = (values) => runOperation(values, readMemberRemovalFlags(values), "execute-remove-member");
+
+async function proposeOperation(values, op, command) {
   const { provider, chainId } = await connect(values);
   try {
     const dryRun = Boolean(values["dry-run"]);
@@ -553,7 +756,7 @@ export async function proposeComposeHash(values) {
     const isOzBuild = await requireTimelockCode(provider, op.timelock);
     const timelock = timelockAt(op.timelock, provider);
 
-    const problems = await appProblems(provider, op);
+    const problems = await targetProblems(provider, timelock, op);
     if (!isOzBuild) problems.push(`the code at ${op.timelock} is not the OpenZeppelin TimelockController ${OZ_VERSION} build this tool ships`);
     if (!(await timelock.call("hasRole", [ROLES.PROPOSER_ROLE, sender]))) {
       problems.push(`${sender} does not have PROPOSER_ROLE on the timelock`);
@@ -585,11 +788,15 @@ export async function proposeComposeHash(values) {
     };
     const meaning = `scheduleBatch on timelock ${op.timelock}, delay ${delay}s: ` + op.calls.map((c) => c.meaning).join("; then ");
     const base = {
-      command: "propose-compose-hash",
+      command,
       chainId,
       timelock: op.timelock,
       app: op.app,
       appVersion: op.appVersion,
+      canceller: op.canceller,
+      change: op.change,
+      veto: op.veto,
+      member: op.member,
       operationId: op.id,
       salt: op.salt,
       delaySeconds: delay,
@@ -615,8 +822,7 @@ export async function proposeComposeHash(values) {
   }
 }
 
-export async function executeOperation(values) {
-  const op = readOperationFlags(values);
+async function runOperation(values, op, command) {
   const { provider, chainId } = await connect(values);
   try {
     const dryRun = Boolean(values["dry-run"]);
@@ -625,9 +831,11 @@ export async function executeOperation(values) {
     await requireTimelockCode(provider, op.timelock);
     const timelock = timelockAt(op.timelock, provider);
 
-    const problems = await appProblems(provider, op);
     const state = OPERATION_STATES[Number(await timelock.call("getOperationState", [op.id]))];
     const readyAt = await timelock.call("getTimestamp", [op.id]);
+    // A cancel-key or member change that is already scheduled is judged by
+    // its own state below; the app checks apply only to compose-hash changes.
+    const problems = op.kind ? [] : await appProblems(provider, op);
     if (state === "Unset") problems.push(`operation ${op.id} is not scheduled (never proposed, or cancelled)`);
     if (state === "Done") problems.push(`operation ${op.id} was already executed`);
     if (state === "Waiting") problems.push(`operation ${op.id} is still waiting; earliest execution is ${isoTime(readyAt)}`);
@@ -647,7 +855,18 @@ export async function executeOperation(values) {
       ]),
     };
     const meaning = `executeBatch on timelock ${op.timelock}: ` + op.calls.map((c) => c.meaning).join("; then ");
-    const base = { command: "execute", chainId, timelock: op.timelock, app: op.app, operationId: op.id, state };
+    const base = {
+      command,
+      chainId,
+      timelock: op.timelock,
+      app: op.app,
+      canceller: op.canceller,
+      change: op.change,
+      veto: op.veto,
+      member: op.member,
+      operationId: op.id,
+      state,
+    };
 
     if (dryRun) {
       return { ...base, dryRun: true, sender, problems, transactions: [describeTx(1, tx, meaning)] };
@@ -661,6 +880,282 @@ export async function executeOperation(values) {
   } finally {
     provider.destroy();
   }
+}
+
+// ---------------------------------------------------------------------------
+// propose-canceller / execute-canceller
+//
+// Giving or taking away a cancel key is a grantRole or revokeRole call on the
+// timelock, and only the timelock may make it. So it is scheduled like any
+// other change and waits the full delay.
+// ---------------------------------------------------------------------------
+
+function readCancellerFlags(values) {
+  const timelock = parseAddress(requireFlag(values, "timelock"), "--timelock");
+  if (Boolean(values.add) === Boolean(values["remove-canceller"])) {
+    throw new UsageError("give exactly one of --add 0x… or --remove-canceller 0x…");
+  }
+  const adding = Boolean(values.add);
+  const canceller = adding
+    ? parseAddress(values.add, "--add")
+    : parseAddress(values["remove-canceller"], "--remove-canceller");
+  if (canceller === timelock) throw new UsageError("the timelock itself cannot be a canceller");
+  const round = parseWholeNumber(values.round ?? "0", "--round");
+  const name = adding ? "grantRole" : "revokeRole";
+  const calls = [
+    {
+      target: timelock,
+      value: 0n,
+      data: timelockInterface.encodeFunctionData(name, [ROLES.CANCELLER_ROLE, canceller]),
+      meaning: `${name}(CANCELLER_ROLE, ${canceller}) on the timelock`,
+    },
+  ];
+  const salt = keccak256(
+    abi.encode(["string", "address", "bool", "uint256"], ["insights-upgrades/canceller/v1", canceller, adding, round]),
+  );
+  const predecessor = ZeroHash;
+  return {
+    kind: "canceller",
+    timelock,
+    canceller,
+    change: adding ? "add" : "remove",
+    calls,
+    salt,
+    predecessor,
+    id: operationId(calls, predecessor, salt),
+  };
+}
+
+async function cancellerProblems(timelock, op) {
+  const problems = [];
+  const has = (role) => timelock.call("hasRole", [ROLES[role], op.canceller]);
+  const holds = await has("CANCELLER_ROLE");
+  if (op.change === "add") {
+    if (holds) problems.push(`${op.canceller} already has CANCELLER_ROLE`);
+    for (const other of ["PROPOSER_ROLE", "EXECUTOR_ROLE", "DEFAULT_ADMIN_ROLE"]) {
+      if (await has(other)) problems.push(`${op.canceller} has ${other}; a cancel-only key must hold nothing else`);
+    }
+  } else if (!holds) {
+    problems.push(`${op.canceller} does not have CANCELLER_ROLE, so there is nothing to remove`);
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------------------
+// create-app
+//
+// Creates the dstack app contract through the key service's factory with the
+// timelock as its owner from the first block, so no key ever owns the app.
+//
+// Signatures copied from Dstack-TEE/dstack DstackKms.sol and DstackApp.sol
+// (see README.md). On 2026-11-14 the function selectors below were found in
+// the bytecode of Phala's key service on Base and of its app template, and
+// the factory call was simulated there with a timelock address as owner.
+// Nothing has been sent there.
+// ---------------------------------------------------------------------------
+
+const KMS_ABI = [
+  "function deployAndRegisterApp(address initialOwner, bool disableUpgrades, bool requireTcbUpToDate, bool allowAnyDevice, bytes32 initialDeviceId, bytes32 initialComposeHash) returns (address appId)",
+  "function registeredApps(address app) view returns (bool)",
+  "event AppDeployedViaFactory(address indexed appId, address indexed deployer)",
+];
+const APP_READ_ABI = [
+  "function owner() view returns (address)",
+  "function supportsInterface(bytes4) view returns (bool)",
+  "function allowedComposeHashes(bytes32) view returns (bool)",
+  "function allowAnyDevice() view returns (bool)",
+  "function allowedDeviceIds(bytes32) view returns (bool)",
+  "function requireTcbUpToDate() view returns (bool)",
+];
+const kmsInterface = new Interface(KMS_ABI);
+const appReadInterface = new Interface(APP_READ_ABI);
+const UPGRADE_CHOICES = ["allowed", "disabled"];
+
+async function readContract(provider, iface, to, name, args = []) {
+  const result = await provider.call({ to, data: iface.encodeFunctionData(name, args) });
+  return iface.decodeFunctionResult(name, result)[0];
+}
+
+export async function createApp(values) {
+  const kms = parseAddress(requireFlag(values, "kms"), "--kms");
+  const timelockAddress = parseAddress(requireFlag(values, "timelock"), "--timelock");
+  const composeHash = parseBytes32(requireFlag(values, "compose-hash"), "--compose-hash");
+  const upgrades = requireFlag(values, "contract-upgrades");
+  if (!UPGRADE_CHOICES.includes(upgrades)) {
+    throw new UsageError(`--contract-upgrades must be one of: ${UPGRADE_CHOICES.join(", ")}`);
+  }
+  if (Boolean(values["allow-any-device"]) === Boolean(values["device-id"])) {
+    throw new UsageError("give exactly one of --allow-any-device or --device-id 0x…");
+  }
+  const allowAnyDevice = Boolean(values["allow-any-device"]);
+  const deviceId = allowAnyDevice ? ZeroHash : parseBytes32(values["device-id"], "--device-id");
+  const requireTcbUpToDate = !values["allow-outdated-tcb"];
+  const disableUpgrades = upgrades === "disabled";
+
+  const { provider, chainId } = await connect(values);
+  try {
+    const dryRun = Boolean(values["dry-run"]);
+    const confirmations = Number(parseWholeNumber(values.confirmations ?? "1", "--confirmations"));
+    const { signer, address: sender } = resolveSender(values, DEPLOYER_KEY_ENV, provider);
+
+    const problems = [];
+    if ((await provider.getCode(kms)) === "0x") problems.push(`no contract at --kms ${kms} on this chain`);
+    const isOzBuild = await requireTimelockCode(provider, timelockAddress);
+    const timelock = timelockAt(timelockAddress, provider);
+    if (!isOzBuild) {
+      problems.push(
+        `the code at ${timelockAddress} is not the OpenZeppelin TimelockController ${OZ_VERSION} build this tool ships`,
+      );
+    } else {
+      const delay = await timelock.call("getMinDelay");
+      if (delay < BigInt(MIN_DELAY_HOURS) * 3600n) {
+        problems.push(`the timelock's delay is ${delay}s, under the ${MIN_DELAY_HOURS}-hour minimum`);
+      }
+      if (!(await timelock.call("hasRole", [ROLES.DEFAULT_ADMIN_ROLE, timelockAddress]))) {
+        problems.push("the timelock is not its own admin");
+      }
+      if (await timelock.call("hasRole", [ROLES.DEFAULT_ADMIN_ROLE, sender])) {
+        problems.push(
+          `${sender} still has DEFAULT_ADMIN_ROLE on the timelock; its setup was not finished, deploy a new one`,
+        );
+      }
+    }
+
+    const tx = {
+      to: kms,
+      data: kmsInterface.encodeFunctionData("deployAndRegisterApp", [
+        timelockAddress,
+        disableUpgrades,
+        requireTcbUpToDate,
+        allowAnyDevice,
+        deviceId,
+        composeHash,
+      ]),
+    };
+    const meaning =
+      `deployAndRegisterApp on key service ${kms}: owner=${timelockAddress} (the timelock), ` +
+      `contract upgrades ${upgrades}, requireTcbUpToDate=${requireTcbUpToDate}, ` +
+      (allowAnyDevice ? "any device allowed" : `only device ${deviceId}`) +
+      `, first approved compose hash ${composeHash}`;
+
+    // Ask the chain what the call would do. This also gives the app's address
+    // before anything is sent.
+    let predictedApp = null;
+    if (problems.length === 0) {
+      try {
+        const result = await provider.call({ ...tx, from: sender });
+        [predictedApp] = kmsInterface.decodeFunctionResult("deployAndRegisterApp", result);
+      } catch (error) {
+        problems.push(`the key service rejects the call in simulation: ${error.shortMessage ?? error.message}`);
+      }
+    }
+
+    const base = {
+      command: "create-app",
+      chainId,
+      kms,
+      timelock: timelockAddress,
+      composeHash,
+      contractUpgrades: upgrades,
+      requireTcbUpToDate,
+      allowAnyDevice,
+      deviceId: allowAnyDevice ? null : deviceId,
+    };
+    if (dryRun) {
+      return {
+        ...base,
+        dryRun: true,
+        sender,
+        predictedApp,
+        note: "The app address comes from simulating the call; it changes if anyone else creates an app first. Nothing was sent.",
+        problems,
+        transactions: [describeTx(1, tx, meaning)],
+      };
+    }
+    if (problems.length > 0) throw new RefusedError("refusing to create the app:\n  - " + problems.join("\n  - "));
+
+    const receipt = await send(signer, tx, meaning, confirmations);
+    let app = null;
+    for (const entry of receipt.logs) {
+      if (getAddress(entry.address) !== kms) continue;
+      let parsed = null;
+      try {
+        parsed = kmsInterface.parseLog(entry);
+      } catch {
+        parsed = null;
+      }
+      if (parsed?.name === "AppDeployedViaFactory") app = parsed.args.appId;
+    }
+    if (!app) {
+      throw new Error(`the transaction was mined (${receipt.hash}) but the key service logged no AppDeployedViaFactory event`);
+    }
+
+    const verification = await verifyAppSetup(provider, {
+      kms,
+      app,
+      timelock: timelockAddress,
+      composeHash,
+      allowAnyDevice,
+      deviceId,
+      requireTcbUpToDate,
+      sender,
+    });
+    const summary = {
+      ...base,
+      dryRun: false,
+      app,
+      appVersion: verification.appVersion,
+      transaction: receipt.hash,
+      block: receipt.blockNumber,
+      verification: verification.checks,
+      verified: verification.checks.every((check) => check.ok),
+    };
+    if (!summary.verified) {
+      const error = new Error("on-chain verification FAILED; do not deploy the enclave under this app");
+      error.summary = summary;
+      throw error;
+    }
+    return summary;
+  } finally {
+    provider.destroy();
+  }
+}
+
+/** Reads the chain and checks what the factory call should have left behind. */
+export async function verifyAppSetup(
+  provider,
+  { kms, app, timelock, composeHash, allowAnyDevice, deviceId, requireTcbUpToDate, sender },
+) {
+  const checks = [];
+  const check = (what, ok) => checks.push({ what, ok: Boolean(ok) });
+  const read = async (name, args = []) => {
+    try {
+      return await readContract(provider, appReadInterface, app, name, args);
+    } catch {
+      return undefined;
+    }
+  };
+  check(`there is a contract at app ${app}`, (await provider.getCode(app)) !== "0x");
+  const owner = await read("owner");
+  check(`the app's owner is the timelock ${timelock}`, owner === timelock);
+  check(`the sender ${sender} is not the app's owner`, owner !== undefined && owner !== sender);
+  let appVersion = null;
+  for (const [name, version] of Object.entries(APP_VERSIONS)) {
+    if ((await read("supportsInterface", [version.managementInterfaceId])) === true) appVersion = name;
+  }
+  check("the app reports a management interface this tool knows (basic or epoch)", appVersion !== null);
+  check(`compose hash ${composeHash} is approved`, (await read("allowedComposeHashes", [composeHash])) === true);
+  check(`allowAnyDevice is ${allowAnyDevice}`, (await read("allowAnyDevice")) === allowAnyDevice);
+  if (!allowAnyDevice) check(`device ${deviceId} is allowed`, (await read("allowedDeviceIds", [deviceId])) === true);
+  check(`requireTcbUpToDate is ${requireTcbUpToDate}`, (await read("requireTcbUpToDate")) === requireTcbUpToDate);
+  let registered;
+  try {
+    registered = await readContract(provider, kmsInterface, kms, "registeredApps", [app]);
+  } catch {
+    registered = undefined;
+  }
+  check(`the key service ${kms} lists the app as registered`, registered === true);
+  return { checks, appVersion };
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +1197,524 @@ export async function cancelOperation(values) {
   } finally {
     provider.destroy();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Member veto: cancel by signature, with no wallet for the member
+//
+// contracts/MemberVeto.sol holds the canceller role on the timelock. A member
+// signs a veto with a key that holds no money (sign-veto); anyone hands it to
+// the contract and pays the fee (relay-veto). Adding a member is immediate
+// (add-member, by the enroller); removing one goes through the timelock
+// (propose-remove-member, execute-remove-member).
+// ---------------------------------------------------------------------------
+
+const VETO_ABI = [
+  "constructor(address timelock_, address enroller_, address entryPoint_, uint256 maxCostPerVeto_, address[] members)",
+  "function timelock() view returns (address)",
+  "function enroller() view returns (address)",
+  "function entryPoint() view returns (address)",
+  "function maxCostPerVeto() view returns (uint256)",
+  "function isMember(address) view returns (bool)",
+  "function budget(address) view returns (uint256)",
+  "function totalBudget() view returns (uint256)",
+  "function memberCount() view returns (uint256)",
+  "function pot() view returns (uint256)",
+  "function vetoAsMember(bytes32 operationId, address member)",
+  "function fund(address member) payable",
+  "event Funded(address indexed member, address indexed by, uint256 amount)",
+  "function withdraw(address to, uint256 amount)",
+  "function addMember(address member)",
+  "function removeMember(address member)",
+  "function veto(bytes32 operationId, bytes signature)",
+];
+const vetoInterface = new Interface(VETO_ABI);
+const VETO_TYPES = {
+  Veto: [{ name: "operationId", type: "bytes32" }],
+};
+// Must match the EIP712 name and version in MemberVeto.sol's constructor.
+const vetoDomain = (chainId, veto) => ({
+  name: "Router insights member veto",
+  version: "1",
+  chainId,
+  verifyingContract: veto,
+});
+
+/** The committed build of MemberVeto.sol (see build-contract.mjs). */
+function memberVetoBuild() {
+  let text;
+  try {
+    text = readFileSync(new URL("./MemberVeto.build.json", import.meta.url), "utf8");
+  } catch {
+    throw new RefusedError("MemberVeto.build.json is missing; run `node build-contract.mjs` first");
+  }
+  return JSON.parse(text);
+}
+
+const readVeto = (provider, veto, name, args = []) => readContract(provider, vetoInterface, veto, name, args);
+
+async function requireVetoCode(provider, veto) {
+  if ((await provider.getCode(veto)) === "0x") throw new RefusedError(`no contract at --veto ${veto} on this chain`);
+}
+
+/** Reads the chain and checks what deploying the veto contract should have left behind. */
+export async function verifyVetoSetup(provider, { veto, timelock, enroller, entryPoint, maxVetoCost, members }) {
+  const checks = [];
+  const check = (what, ok) => checks.push({ what, ok: Boolean(ok) });
+  const read = async (name, args = []) => {
+    try {
+      return await readVeto(provider, veto, name, args);
+    } catch {
+      return undefined;
+    }
+  };
+  check(`there is a contract at member veto ${veto}`, (await provider.getCode(veto)) !== "0x");
+  check(`the member veto cancels on timelock ${timelock}`, (await read("timelock")) === timelock);
+  check(`the member veto's enroller is ${enroller}`, (await read("enroller")) === enroller);
+  check(`the member veto answers to entry point ${entryPoint}`, (await read("entryPoint")) === entryPoint);
+  check(`a paid veto may cost at most ${maxVetoCost} wei`, (await read("maxCostPerVeto")) === maxVetoCost);
+  check(`the member veto has ${members.length} member(s)`, (await read("memberCount")) === BigInt(members.length));
+  for (const member of members) check(`${member} is a member`, (await read("isMember", [member])) === true);
+  return checks;
+}
+
+export async function signVeto(values) {
+  const veto = parseAddress(requireFlag(values, "veto"), "--veto");
+  const id = parseBytes32(requireFlag(values, "id"), "--id");
+  const { provider, chainId } = await connect(values);
+  try {
+    const signer = signerFromEnv(MEMBER_KEY_ENV, provider);
+    if (!signer) throw new UsageError(`set ${MEMBER_KEY_ENV} to the member's signing key (environment variable only)`);
+    await requireVetoCode(provider, veto);
+    const timelockAddress = await readVeto(provider, veto, "timelock");
+    const readyAt = await timelockAt(timelockAddress, provider).call("getTimestamp", [id]);
+    const problems = [];
+    if (readyAt <= 1n) problems.push(`operation ${id} is not waiting on timelock ${timelockAddress}; there is nothing to veto`);
+    if (!(await readVeto(provider, veto, "isMember", [signer.address]))) {
+      problems.push(`${signer.address} is not a member on ${veto}`);
+    }
+    if (problems.length > 0) throw new RefusedError("refusing to sign:\n  - " + problems.join("\n  - "));
+    const signature = await signer.signTypedData(vetoDomain(chainId, veto), VETO_TYPES, { operationId: id });
+    return {
+      command: "sign-veto",
+      chainId,
+      veto,
+      timelock: timelockAddress,
+      operationId: id,
+      dueAt: { unixSeconds: readyAt, iso: isoTime(readyAt) },
+      member: signer.address,
+      signature,
+      note:
+        "Nothing was sent, so nothing is cancelled yet. Someone has to hand this to the contract with relay-veto " +
+        "before the operation is due. It costs the member nothing, and it also cancels this same operation if it is scheduled again.",
+    };
+  } finally {
+    provider.destroy();
+  }
+}
+
+export async function relayVeto(values) {
+  const veto = parseAddress(requireFlag(values, "veto"), "--veto");
+  const id = parseBytes32(requireFlag(values, "id"), "--id");
+  const signature = requireFlag(values, "signature");
+  if (!isHexString(signature, 65)) throw new UsageError("--signature must be a 65-byte 0x value");
+  const { provider, chainId } = await connect(values);
+  try {
+    const dryRun = Boolean(values["dry-run"]);
+    const confirmations = Number(parseWholeNumber(values.confirmations ?? "1", "--confirmations"));
+    const { signer, address: sender } = resolveSender(values, DEPLOYER_KEY_ENV, provider);
+    await requireVetoCode(provider, veto);
+    const timelockAddress = await readVeto(provider, veto, "timelock");
+    const timelock = timelockAt(timelockAddress, provider);
+
+    const problems = [];
+    let member = null;
+    try {
+      member = verifyTypedData(vetoDomain(chainId, veto), VETO_TYPES, { operationId: id }, signature);
+    } catch {
+      problems.push("the signature is not a valid signature");
+    }
+    if (member && !(await readVeto(provider, veto, "isMember", [member]))) {
+      problems.push(`the signature is by ${member}, who is not a member on ${veto} (or it was made for a different operation, chain or contract)`);
+    }
+    if ((await timelock.call("getTimestamp", [id])) <= 1n) {
+      problems.push(`operation ${id} is not waiting; there is nothing to veto`);
+    }
+    if (!(await timelock.call("hasRole", [ROLES.CANCELLER_ROLE, veto]))) {
+      problems.push(`${veto} does not have CANCELLER_ROLE on the timelock ${timelockAddress}`);
+    }
+
+    const tx = { to: veto, data: vetoInterface.encodeFunctionData("veto", [id, signature]) };
+    const meaning = `veto(${id}) on member veto ${veto}, signed by ${member ?? "unknown"}: cancels the operation on timelock ${timelockAddress}`;
+    const base = { command: "relay-veto", chainId, veto, timelock: timelockAddress, operationId: id, member };
+    if (dryRun) return { ...base, dryRun: true, sender, problems, transactions: [describeTx(1, tx, meaning)] };
+    if (problems.length > 0) throw new RefusedError("refusing to relay:\n  - " + problems.join("\n  - "));
+
+    const receipt = await send(signer, tx, meaning, confirmations);
+    // Judged from this transaction's own events: the operation may be
+    // scheduled again a moment later, and that is a separate fact.
+    const cancelled = receipt.logs.some((entry) => {
+      if (getAddress(entry.address) !== timelockAddress) return false;
+      try {
+        const parsed = timelockInterface.parseLog(entry);
+        return parsed?.name === "Cancelled" && parsed.args.id === id;
+      } catch {
+        return false;
+      }
+    });
+    if (!cancelled) {
+      throw new Error(`the transaction was mined (${receipt.hash}) but the timelock logged no cancellation of ${id}`);
+    }
+    return { ...base, dryRun: false, relayedBy: sender, state: "Cancelled", transaction: receipt.hash, block: receipt.blockNumber };
+  } finally {
+    provider.destroy();
+  }
+}
+
+export async function addMember(values) {
+  const veto = parseAddress(requireFlag(values, "veto"), "--veto");
+  const member = parseAddress(requireFlag(values, "member"), "--member");
+  const { provider, chainId } = await connect(values);
+  try {
+    const dryRun = Boolean(values["dry-run"]);
+    const confirmations = Number(parseWholeNumber(values.confirmations ?? "1", "--confirmations"));
+    const { signer, address: sender } = resolveSender(values, DEPLOYER_KEY_ENV, provider);
+    await requireVetoCode(provider, veto);
+    const problems = [];
+    const enroller = await readVeto(provider, veto, "enroller");
+    if (enroller !== sender) problems.push(`${sender} is not the enroller (${enroller}); only the enroller can add a member at once`);
+    if (await readVeto(provider, veto, "isMember", [member])) problems.push(`${member} is already a member`);
+    const tx = { to: veto, data: vetoInterface.encodeFunctionData("addMember", [member]) };
+    const meaning = `addMember(${member}) on member veto ${veto}: this address can veto from now on`;
+    const base = { command: "add-member", chainId, veto, member };
+    if (dryRun) return { ...base, dryRun: true, sender, problems, transactions: [describeTx(1, tx, meaning)] };
+    if (problems.length > 0) throw new RefusedError("refusing to add the member:\n  - " + problems.join("\n  - "));
+    const receipt = await send(signer, tx, meaning, confirmations);
+    if (!(await readVeto(provider, veto, "isMember", [member]))) {
+      throw new Error("the transaction was mined but the address is not a member");
+    }
+    return { ...base, dryRun: false, transaction: receipt.hash, block: receipt.blockNumber };
+  } finally {
+    provider.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// send-veto / fund-veto: the veto contract pays for the veto itself
+//
+// The veto contract is an ERC-4337 account whose only permitted action is to
+// cancel. send-veto builds a user operation, signs it with the member's key,
+// and hands it to a bundler (a public relay); the entry point takes the fee
+// from the veto contract's deposit. The member holds no money at any point.
+// ---------------------------------------------------------------------------
+
+const USER_OP_TUPLE =
+  "(address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature)";
+const ENTRY_POINT_ABI = [
+  "function getNonce(address sender, uint192 key) view returns (uint256)",
+  `function getUserOpHash(${USER_OP_TUPLE} userOp) view returns (bytes32)`,
+  "function balanceOf(address account) view returns (uint256)",
+  "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)",
+];
+const entryPointInterface = new Interface(ENTRY_POINT_ABI);
+const pack128 = (high, low) => concat([zeroPadValue(toBeHex(high), 16), zeroPadValue(toBeHex(low), 16)]);
+const hex = (value) => toBeHex(value);
+// Extra gas on top of a bundler's estimate. The estimate is made with a
+// placeholder signature, so it does not see the storage write that a real
+// member's signature leads to.
+const VERIFICATION_GAS_MARGIN = 60000n;
+
+async function bundlerCall(url, method, params, timeoutMs = 30000) {
+  let body;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    body = await response.json();
+  } catch {
+    throw new RefusedError(`could not reach the bundler for ${method}`);
+  }
+  if (body.error) throw new RefusedError(`the bundler refused ${method}: ${body.error.message ?? JSON.stringify(body.error)}`);
+  return body.result;
+}
+
+/** The same operation in the two shapes that exist: for a bundler's JSON-RPC, and packed for the entry point. */
+function userOperationShapes(op) {
+  return {
+    json: {
+      sender: op.sender,
+      nonce: hex(op.nonce),
+      callData: op.callData,
+      callGasLimit: hex(op.callGasLimit),
+      verificationGasLimit: hex(op.verificationGasLimit),
+      preVerificationGas: hex(op.preVerificationGas),
+      maxFeePerGas: hex(op.maxFeePerGas),
+      maxPriorityFeePerGas: hex(op.maxPriorityFeePerGas),
+      signature: op.signature,
+    },
+    packed: {
+      sender: op.sender,
+      nonce: op.nonce,
+      initCode: "0x",
+      callData: op.callData,
+      accountGasLimits: pack128(op.verificationGasLimit, op.callGasLimit),
+      preVerificationGas: op.preVerificationGas,
+      gasFees: pack128(op.maxPriorityFeePerGas, op.maxFeePerGas),
+      paymasterAndData: "0x",
+      signature: op.signature,
+    },
+  };
+}
+
+export async function sendVeto(values) {
+  const veto = parseAddress(requireFlag(values, "veto"), "--veto");
+  const id = parseBytes32(requireFlag(values, "id"), "--id");
+  const gasFlags = ["verification-gas", "call-gas", "pre-verification-gas", "max-fee-wei", "priority-fee-wei"];
+  const given = gasFlags.filter((flag) => values[flag] !== undefined);
+  if (given.length !== 0 && given.length !== gasFlags.length) {
+    throw new UsageError(`give all of ${gasFlags.map((flag) => "--" + flag).join(", ")} or none of them`);
+  }
+  const manualGas = given.length === gasFlags.length;
+  const dryRun = Boolean(values["dry-run"]);
+  if (!values.bundler && !(dryRun && manualGas)) {
+    throw new UsageError("--bundler URL is required (a dry run with every gas flag given needs none)");
+  }
+  const { provider, chainId } = await connect(values);
+  try {
+    const signer = signerFromEnv(MEMBER_KEY_ENV, provider);
+    if (!signer) throw new UsageError(`set ${MEMBER_KEY_ENV} to the member's signing key (environment variable only)`);
+    const member = signer.address;
+    await requireVetoCode(provider, veto);
+    const timelockAddress = await readVeto(provider, veto, "timelock");
+    const entryPoint = await readVeto(provider, veto, "entryPoint");
+    const maxCostAllowed = await readVeto(provider, veto, "maxCostPerVeto");
+    const readEntryPoint = (name, args) => readContract(provider, entryPointInterface, entryPoint, name, args);
+
+    const problems = [];
+    const readyAt = await timelockAt(timelockAddress, provider).call("getTimestamp", [id]);
+    if (readyAt <= 1n) problems.push(`operation ${id} is not waiting on timelock ${timelockAddress}; there is nothing to veto`);
+    const isMember = await readVeto(provider, veto, "isMember", [member]);
+    if (!isMember) problems.push(`${member} is not a member on ${veto}`);
+    const budget = await readVeto(provider, veto, "budget", [member]);
+
+    const op = {
+      sender: veto,
+      // Each member has their own nonce sequence, so two members vetoing at
+      // the same moment do not collide.
+      nonce: await readEntryPoint("getNonce", [veto, BigInt(member)]),
+      callData: vetoInterface.encodeFunctionData("vetoAsMember", [id, member]),
+      signature: "0x",
+    };
+    if (manualGas) {
+      op.verificationGasLimit = parseWholeNumber(values["verification-gas"], "--verification-gas");
+      op.callGasLimit = parseWholeNumber(values["call-gas"], "--call-gas");
+      op.preVerificationGas = parseWholeNumber(values["pre-verification-gas"], "--pre-verification-gas");
+      op.maxFeePerGas = parseWholeNumber(values["max-fee-wei"], "--max-fee-wei");
+      op.maxPriorityFeePerGas = parseWholeNumber(values["priority-fee-wei"], "--priority-fee-wei");
+    } else {
+      if (problems.length > 0) throw new RefusedError("refusing to send the veto:\n  - " + problems.join("\n  - "));
+      // Fees: the bundler's own quote when it has one, otherwise from the chain.
+      try {
+        const quote = await bundlerCall(values.bundler, "pimlico_getUserOperationGasPrice", []);
+        op.maxFeePerGas = BigInt(quote.fast.maxFeePerGas);
+        op.maxPriorityFeePerGas = BigInt(quote.fast.maxPriorityFeePerGas);
+      } catch {
+        const block = await provider.getBlock("latest");
+        const tip = (await provider.getFeeData()).maxPriorityFeePerGas ?? 0n;
+        op.maxPriorityFeePerGas = tip > 1000000n ? tip : 1000000n;
+        op.maxFeePerGas = (block.baseFeePerGas ?? 0n) * 2n + op.maxPriorityFeePerGas;
+      }
+      // A placeholder of the right length, so the bundler can size the operation.
+      const placeholder = { ...op, verificationGasLimit: 0n, callGasLimit: 0n, preVerificationGas: 0n, signature: "0x" + "ff".repeat(65) };
+      const estimate = await bundlerCall(values.bundler, "eth_estimateUserOperationGas", [userOperationShapes(placeholder).json, entryPoint]);
+      op.verificationGasLimit = BigInt(estimate.verificationGasLimit) + VERIFICATION_GAS_MARGIN;
+      op.callGasLimit = (BigInt(estimate.callGasLimit) * 12n) / 10n;
+      op.preVerificationGas = BigInt(estimate.preVerificationGas);
+    }
+    const maxCost = (op.verificationGasLimit + op.callGasLimit + op.preVerificationGas) * op.maxFeePerGas;
+    if (maxCost > maxCostAllowed) {
+      problems.push(`this veto could cost up to ${formatEther(maxCost)} ETH, over the contract's limit of ${formatEther(maxCostAllowed)} ETH per veto; fees are high right now, so use sign-veto and a relayer`);
+    }
+    if (isMember && budget < maxCost) {
+      problems.push(`this member's budget is ${formatEther(budget)} ETH, under the ${formatEther(maxCost)} ETH this veto is charged; it needs fund-veto for this member, or use sign-veto and a relayer`);
+    }
+
+    const userOpHash = await readEntryPoint("getUserOpHash", [userOperationShapes(op).packed]);
+    // Entry points from v0.8 on give an EIP-712 hash that is signed as it is.
+    op.signature = signer.signingKey.sign(userOpHash).serialized;
+    const shapes = userOperationShapes(op);
+    const base = {
+      command: "send-veto",
+      chainId,
+      veto,
+      timelock: timelockAddress,
+      entryPoint,
+      operationId: id,
+      dueAt: { unixSeconds: readyAt, iso: isoTime(readyAt) },
+      member,
+      userOpHash,
+      maxCostWei: maxCost,
+      memberBudgetWei: budget,
+    };
+    if (dryRun) {
+      return {
+        ...base,
+        dryRun: true,
+        problems,
+        note: "Signed but not sent, so nothing is cancelled.",
+        userOperation: shapes.json,
+        packedUserOperation: shapes.packed,
+      };
+    }
+    if (problems.length > 0) throw new RefusedError("refusing to send the veto:\n  - " + problems.join("\n  - "));
+
+    log("sending the veto to the bundler");
+    const accepted = await bundlerCall(values.bundler, "eth_sendUserOperation", [shapes.json, entryPoint]);
+    if (typeof accepted !== "string" || accepted.toLowerCase() !== userOpHash.toLowerCase()) {
+      throw new Error(`the bundler answered with ${accepted}, not the hash of the operation that was sent (${userOpHash})`);
+    }
+    // The bundler is asked only where the operation landed. Whether it
+    // cancelled anything is read from the chain itself.
+    const timelock = timelockAt(timelockAddress, provider);
+    const deadline = Date.now() + 90000;
+    let transaction = null;
+    while (!transaction && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const reported = await bundlerCall(values.bundler, "eth_getUserOperationReceipt", [userOpHash], 8000).catch(() => null);
+      transaction = reported?.receipt?.transactionHash ?? null;
+    }
+    const chainReceipt = transaction ? await provider.getTransactionReceipt(transaction) : null;
+    const logs = chainReceipt?.logs ?? [];
+    const parsedFrom = (iface, address) =>
+      logs
+        .filter((entry) => getAddress(entry.address) === address)
+        .map((entry) => {
+          try {
+            return iface.parseLog(entry);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    // The transaction the bundler names must be the one that ran THIS
+    // operation (the entry point's own event, by hash, sender and nonce) and
+    // must contain the timelock's cancellation. An older transaction that
+    // cancelled the same id would pass the second test but not the first.
+    const ran = parsedFrom(entryPointInterface, entryPoint).some(
+      (event) =>
+        event.name === "UserOperationEvent" &&
+        event.args.userOpHash === userOpHash &&
+        event.args.sender === veto &&
+        event.args.nonce === op.nonce &&
+        event.args.success === true,
+    );
+    const cancelledHere = ran && parsedFrom(timelockInterface, timelockAddress).some(
+      (event) => event.name === "Cancelled" && event.args.id === id,
+    );
+    const stillWaiting = (await timelock.call("getTimestamp", [id])) > 1n;
+    if (cancelledHere) {
+      return {
+        ...base,
+        dryRun: false,
+        state: "Cancelled",
+        transaction,
+        block: chainReceipt.blockNumber,
+        waitingAgainNow: stillWaiting,
+        note: stillWaiting
+          ? "This veto cancelled the operation, and it has ALREADY BEEN SCHEDULED AGAIN: it needs another veto."
+          : "This veto cancelled the operation. If it is scheduled again, it needs a veto again.",
+      };
+    }
+    const error = new Error(
+      transaction
+        ? `the veto landed in ${transaction} but that transaction did not cancel the operation; the operation is ${stillWaiting ? "STILL WAITING" : "not waiting any more (something else cancelled or executed it)"}`
+        : `the bundler accepted the veto but named no transaction within 90 seconds; the operation is ${stillWaiting ? "STILL WAITING, so veto again or use sign-veto and a relayer" : "not waiting any more"}`,
+    );
+    error.summary = { ...base, dryRun: false, transaction, stillWaiting };
+    throw error;
+  } finally {
+    provider.destroy();
+  }
+}
+
+export async function fundVeto(values) {
+  const veto = parseAddress(requireFlag(values, "veto"), "--veto");
+  const member = parseAddress(requireFlag(values, "member"), "--member");
+  const amount = parseEthAmount(requireFlag(values, "eth"), "--eth");
+  const { provider, chainId } = await connect(values);
+  try {
+    const dryRun = Boolean(values["dry-run"]);
+    const confirmations = Number(parseWholeNumber(values.confirmations ?? "1", "--confirmations"));
+    const { signer, address: sender } = resolveSender(values, DEPLOYER_KEY_ENV, provider);
+    await requireVetoCode(provider, veto);
+    const problems = [];
+    if (!(await readVeto(provider, veto, "isMember", [member]))) problems.push(`${member} is not a member on ${veto}`);
+    const before = await readVeto(provider, veto, "budget", [member]);
+    const tx = { to: veto, value: amount, data: vetoInterface.encodeFunctionData("fund", [member]) };
+    const meaning =
+      `fund(${member}) on member veto ${veto} with ${formatEther(amount)} ETH: ` +
+      "added to this member's budget for paid vetoes; nobody else can spend it, and it leaves the budget only if the member is removed through the timelock";
+    const base = { command: "fund-veto", chainId, veto, member, amountWei: amount, budgetBeforeWei: before };
+    if (dryRun) return { ...base, dryRun: true, sender, problems, transactions: [describeTx(1, tx, meaning)] };
+    if (problems.length > 0) throw new RefusedError("refusing to fund:\n  - " + problems.join("\n  - "));
+    const receipt = await send(signer, tx, meaning, confirmations);
+    // Judged from this transaction's own event: the member may spend from
+    // the budget in the same moment, which is a separate fact.
+    const fundedHere = receipt.logs.some((entry) => {
+      if (getAddress(entry.address) !== veto) return false;
+      try {
+        const parsed = vetoInterface.parseLog(entry);
+        return parsed?.name === "Funded" && parsed.args.member === member && parsed.args.amount === amount;
+      } catch {
+        return false;
+      }
+    });
+    if (!fundedHere) throw new Error(`the transaction was mined (${receipt.hash}) but the contract logged no funding of ${member}`);
+    return {
+      ...base,
+      dryRun: false,
+      budgetNowWei: await readVeto(provider, veto, "budget", [member]),
+      potWei: await readVeto(provider, veto, "pot"),
+      transaction: receipt.hash,
+      block: receipt.blockNumber,
+    };
+  } finally {
+    provider.destroy();
+  }
+}
+
+function readMemberRemovalFlags(values) {
+  const timelock = parseAddress(requireFlag(values, "timelock"), "--timelock");
+  const veto = parseAddress(requireFlag(values, "veto"), "--veto");
+  const member = parseAddress(requireFlag(values, "member"), "--member");
+  const round = parseWholeNumber(values.round ?? "0", "--round");
+  const calls = [
+    {
+      target: veto,
+      value: 0n,
+      data: vetoInterface.encodeFunctionData("removeMember", [member]),
+      meaning: `removeMember(${member}) on member veto ${veto}`,
+    },
+  ];
+  const salt = keccak256(
+    abi.encode(["string", "address", "address", "uint256"], ["insights-upgrades/remove-member/v1", veto, member, round]),
+  );
+  const predecessor = ZeroHash;
+  return { kind: "member", timelock, veto, member, calls, salt, predecessor, id: operationId(calls, predecessor, salt) };
+}
+
+async function memberProblems(provider, op) {
+  if ((await provider.getCode(op.veto)) === "0x") return [`no contract at --veto ${op.veto} on this chain`];
+  const problems = [];
+  const owner = await readVeto(provider, op.veto, "timelock");
+  if (owner !== op.timelock) problems.push(`the member veto answers to timelock ${owner}, not ${op.timelock}`);
+  if (!(await readVeto(provider, op.veto, "isMember", [op.member]))) {
+    problems.push(`${op.member} is not a member, so there is nothing to remove`);
+  }
+  return problems;
 }
 
 // ---------------------------------------------------------------------------
@@ -920,8 +1933,18 @@ export function newCancelKey(values) {
 
 const COMMANDS = {
   "deploy-timelock": deployTimelock,
+  "create-app": createApp,
   "propose-compose-hash": proposeComposeHash,
   execute: executeOperation,
+  "propose-canceller": proposeCanceller,
+  "execute-canceller": executeCanceller,
+  "sign-veto": signVeto,
+  "relay-veto": relayVeto,
+  "send-veto": sendVeto,
+  "fund-veto": fundVeto,
+  "add-member": addMember,
+  "propose-remove-member": proposeRemoveMember,
+  "execute-remove-member": executeRemoveMember,
   cancel: cancelOperation,
   status,
   "new-cancel-key": newCancelKey,
@@ -949,6 +1972,29 @@ const OPTIONS = {
   "from-block": { type: "string" },
   "block-chunk": { type: "string" },
   out: { type: "string" },
+  kms: { type: "string" },
+  "contract-upgrades": { type: "string" },
+  "allow-any-device": { type: "boolean" },
+  "device-id": { type: "string" },
+  "allow-outdated-tcb": { type: "boolean" },
+  add: { type: "string" },
+  "remove-canceller": { type: "string" },
+  "member-veto": { type: "boolean" },
+  members: { type: "string" },
+  enroller: { type: "string" },
+  veto: { type: "string" },
+  member: { type: "string" },
+  signature: { type: "string" },
+  "entry-point": { type: "string" },
+  "unknown-entry-point": { type: "boolean" },
+  "max-veto-cost-eth": { type: "string" },
+  bundler: { type: "string" },
+  eth: { type: "string" },
+  "verification-gas": { type: "string" },
+  "call-gas": { type: "string" },
+  "pre-verification-gas": { type: "string" },
+  "max-fee-wei": { type: "string" },
+  "priority-fee-wei": { type: "string" },
   help: { type: "boolean" },
 };
 
@@ -957,13 +2003,28 @@ const USAGE = `Usage: node upgrades.mjs <command> [flags]
 Commands that reach a chain need --rpc URL and --chain-id N (no default).
 Commands that send a transaction accept --dry-run (print, send nothing).
 Signing keys come only from the environment: ${DEPLOYER_KEY_ENV} (deploy,
-propose, execute) and ${CANCEL_KEY_ENV} (cancel).
+create, propose, execute, relay-veto, add-member, fund-veto), ${CANCEL_KEY_ENV} (cancel)
+and ${MEMBER_KEY_ENV} (send-veto, sign-veto; this key needs no money).
 
-  deploy-timelock       --delay-hours N --proposer 0x… --cancellers 0x…,0x…
+  deploy-timelock       --delay-hours N --proposer 0x…
+                        (--member-veto [--members 0x…,0x…] [--enroller 0x…]
+                           [--entry-point 0x…] [--max-veto-cost-eth N] | --cancellers 0x…,0x…)
                         [--executor 0x… | --open-execution]
+  create-app            --kms 0x… --timelock 0x… --compose-hash 0x…
+                        --contract-upgrades allowed|disabled
+                        (--allow-any-device | --device-id 0x…) [--allow-outdated-tcb]
   propose-compose-hash  --timelock 0x… --app 0x… --app-version basic|epoch
                         --compose-hash 0x… [--remove 0x…] [--epoch N] [--round N]
   execute               (same flags as propose-compose-hash)
+  propose-canceller     --timelock 0x… (--add 0x… | --remove-canceller 0x…) [--round N]
+  execute-canceller     (same flags as propose-canceller)
+  send-veto             --veto 0x… --id 0x… --bundler URL   (the veto contract pays)
+  fund-veto             --veto 0x… --member 0x… --eth N   (adds to that member's budget)
+  sign-veto             --veto 0x… --id 0x…          (signs only; sends nothing)
+  relay-veto            --veto 0x… --id 0x… --signature 0x…
+  add-member            --veto 0x… --member 0x…      (at once, by the enroller)
+  propose-remove-member --timelock 0x… --veto 0x… --member 0x… [--round N]
+  execute-remove-member (same flags as propose-remove-member)
   cancel                --timelock 0x… --id 0x…
   status                --timelock 0x… [--id 0x…] [--app 0x…]
                         [--from-block N] [--block-chunk N]
