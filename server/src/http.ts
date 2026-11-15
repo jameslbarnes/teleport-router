@@ -42,6 +42,8 @@ import { insightsRelease, checkUpgradePolicy, type UpgradePolicy, type EnclaveCl
 import { insightsEnclave } from './insights-enclave.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
+import { normalizeSkillNote, currentSkills, isSkillNote, skillKey, renderSkillIndex, renderSkillBody, renderSkillHint, recordSkillUse, isMuted, oneLine,
+  type SkillNote, type SkillUse, type SkillIndexItem } from './skill-notes.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -297,6 +299,18 @@ export const SYSTEM_SKILLS: Skill[] = [
           items: { type: 'string' },
           description: 'Optional. Up to eight short lowercase topic tags, for example ["latency", "speech-recognition"], plus any tags the person’s rules ask for. Shown with the note to everyone who can read it.',
         },
+        skill: {
+          type: 'object',
+          description: 'Only when this note is a skill: know-how another agent can follow, with the steps written as markdown in `entry`. Members of a private group it is addressed to, who have turned that group’s skills on, see its name and when_to_use line at the start of their sessions. Everything else about the note, including audience, waiting and the privacy rules, is unchanged.',
+          properties: {
+            name: { type: 'string', description: 'Stable lowercase name with hyphens, for example "tracing-live-pipeline-latency". Reuse the name to publish a newer version.' },
+            when_to_use: { type: 'string', description: 'One line naming the situation in which an agent should open this skill, not its topic. For example: "A live pipeline got slower and you do not know which stage."' },
+            supersedes: { type: 'string', description: 'Optional. ID of the person’s earlier note for this skill, kept as history.' },
+            evidence: { type: 'string', description: 'Optional. One line on what it was drawn from, for example "26 cases over 7 days".' },
+            origin: { type: 'string', enum: ['own-sessions', 'pooled'], description: 'Optional. Whose sessions it was drawn from.' },
+          },
+          required: ['name', 'when_to_use'],
+        },
         search_keywords: {
           type: 'array',
           items: { type: 'string' },
@@ -440,6 +454,29 @@ export const SYSTEM_SKILLS: Skill[] = [
         },
       },
       required: ['entry_ids'],
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_use_skill',
+    name: 'router_use_skill',
+    description: 'Open a skill that this person or a member of one of their private groups shared: know-how for a kind of task, written by a named author. Read the matching skill before starting such a task, and report afterwards whether it helped. These are not the posting tools that router_skills manages.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['read', 'list', 'report', 'mute', 'unmute', 'enable_group', 'disable_group'],
+          description: 'read (default): the skill’s full text. list: every skill shared with this person. report: say whether a skill you used helped. mute or unmute: stop or resume listing a skill, or everything by one author. enable_group or disable_group: turn a private group’s skills on or off for this person’s agents. Mute and the group actions change what the person’s agents are told, so use them only when the person asks.',
+        },
+        group: { type: 'string', description: 'For enable_group and disable_group: the group, for example "book-club".' },
+        entry_id: { type: 'string', description: 'For report: the note ID given when the skill was read, so the report counts for the version you used.' },
+        name: { type: 'string', description: 'The skill’s name as listed, for example "tracing-live-pipeline-latency" or "alice/tracing-live-pipeline-latency".' },
+        author: { type: 'string', description: 'Optional. The author’s handle, when two people use the same name, or to mute everything by one author.' },
+        outcome: { type: 'string', enum: ['helped', 'did_not_help'], description: 'For report.' },
+      },
     },
     createdAt: 0,
   },
@@ -997,7 +1034,7 @@ export const SYSTEM_SKILLS: Skill[] = [
 ];
 
 /** Reported to MCP clients. Kept in step with the plugin manifests by tool-surface.test.ts. */
-export const ROUTER_MCP_VERSION = '0.3.0';
+export const ROUTER_MCP_VERSION = '0.4.0';
 
 // What each built-in tool does to the world, for clients that show or gate tools by effect.
 // read: changes nothing. write: changes Router state and can be undone. destructive: removes something.
@@ -1010,6 +1047,7 @@ export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> =
   router_search: ['Search the notebook', 'read'],
   router_search_matrix: ['Search Matrix rooms', 'read'],
   router_get_entry: ['Read a note', 'read'],
+  router_use_skill: ['Read, rate, mute or turn on shared skills', 'write'],
   router_delete_entry: ['Delete a note', 'destructive'],
   router_label_entry: ['Label a note', 'write'],
   router_settings: ['Read or change settings', 'write'],
@@ -1518,6 +1556,8 @@ if (storage instanceof StagedStorage) {
   });
 
   storage.onPublish(async (entry) => {
+    // Not awaited: delivering the note must never wait for, or fail with, the skill record.
+    void rememberSkillNoteWithRetries(entry);
     // Deliver addressed entries (unified addressing)
     if (entry.to && entry.to.length > 0) {
       const deliveryConfig: DeliveryConfig = {
@@ -1903,9 +1943,209 @@ async function postingAudience(user: User | null, intent: unknown, to: unknown) 
   return destinations;
 }
 
-function createMCPServer(secretKey: string) {
+/** A private group: only members can read it, and only invited people can join. */
+function isInviteOnlyGroup(channel: Channel): boolean {
+  return (channel.joinRule || (channel.visibility === 'private' ? 'invite' : 'open')) === 'invite';
+}
+
+type SkillEntry = JournalEntry & { skill: SkillNote; handle: string };
+interface VisibleSkills {
+  /** The current version of each skill, for the list. */
+  items: SkillIndexItem[];
+  /** Every skill note the person may read, older versions included, by note ID. */
+  notes: Map<string, { entry: SkillEntry; group?: string; use?: SkillUse }>;
+  mutes: string[];
+  /** Private groups that have skills the person has not turned on. */
+  waiting: string[];
+}
+
+/** Above this many remembered notes, a group or a person keeps only the current version of each skill. */
+const SKILL_NOTES_BEFORE_TIDYING = 200;
+/** How long a starting session waits for the skills list before going on without it. */
+const SKILL_LOOKUP_MS = Number(process.env.SKILL_LOOKUP_MS || 2500);
+/** How long one update to a group's or person's skill record may take before the next one stops waiting for it. */
+const SKILL_RECORD_MS = 10_000;
+
+/** Resolves to null when the task fails or takes longer than `ms`. The task itself is not cancelled. */
+function within<T>(ms: number, task: Promise<T>): Promise<T | null> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), ms);
+    task.then(value => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
+  });
+}
+
+// One server process handles every request, so taking turns per record keeps two updates
+// to the same group or person from overwriting each other. A turn that never finishes is
+// given up on after SKILL_RECORD_MS, so it cannot hold up the ones behind it.
+const skillRecordTurns = new Map<string, Promise<unknown>>();
+function inTurn<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const bounded = () => new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The skill record took too long to update.')), SKILL_RECORD_MS);
+    task().then(value => { clearTimeout(timer); resolve(value); }, err => { clearTimeout(timer); reject(err); });
+  });
+  const run = (skillRecordTurns.get(key) || Promise.resolve()).then(bounded, bounded);
+  const tail: Promise<unknown> = run.catch(() => {}).finally(() => { if (skillRecordTurns.get(key) === tail) skillRecordTurns.delete(key); });
+  skillRecordTurns.set(key, tail);
+  return run;
+}
+
+/** Reads notes by ID, twenty at a time, and keeps the published skill notes among them. */
+async function readSkillNotes(ids: string[]): Promise<SkillEntry[]> {
+  const found: SkillEntry[] = [];
+  for (let i = 0; i < ids.length; i += 20) {
+    const batch = await Promise.all(ids.slice(i, i + 20).map(id => storage.getEntry(id).catch(() => null)));
+    for (const entry of batch) if (entry && !storage.isPending(entry.id) && isSkillNote(entry)) found.push(entry);
+  }
+  return found;
+}
+
+/** The IDs worth keeping once a record has grown: the current version of each skill. Older versions and deleted notes go. */
+async function currentSkillNoteIds(ids: string[]): Promise<Set<string>> {
+  return new Set(currentSkills(await readSkillNotes(ids)).map(entry => entry.id));
+}
+
+/**
+ * When a skill note publishes, its ID is remembered on each group it was shared in and on its
+ * author. Only the ID is kept there: the name and the text stay in the note, wherever that lives.
+ * Finding skills this way does not depend on how many notes were posted since.
+ *
+ * Safe to repeat. Returns false when any part could not be recorded, so the caller can try again.
+ */
+async function rememberSkillNote(entry: JournalEntry): Promise<boolean> {
+  if (!isSkillNote(entry)) return true;
+  let complete = true;
+  for (const destination of entry.to || []) {
+    if (!destination.startsWith('#')) continue;
+    const groupId = destination.slice(1);
+    try {
+      await inTurn(`group:${groupId}`, async () => {
+        const group = await storage.getChannel(groupId);
+        // An author who left or was removed while the note waited does not add to the group's skills.
+        if (!group || group.skillNotes?.[entry.id] || !group.subscribers.some(s => s.handle === entry.handle)) return;
+        let skillNotes = { ...(group.skillNotes || {}), [entry.id]: { uses: 0, helped: 0, notHelped: 0, lastAt: 0 } };
+        if (Object.keys(skillNotes).length > SKILL_NOTES_BEFORE_TIDYING) {
+          const keep = await currentSkillNoteIds(Object.keys(skillNotes));
+          keep.add(entry.id);
+          skillNotes = Object.fromEntries(Object.entries(skillNotes).filter(([id]) => keep.has(id)));
+        }
+        await storage.updateChannel(groupId, { skillNotes });
+      });
+    } catch (err) {
+      complete = false;
+      console.error(`[Skills] could not record a skill note on #${groupId}:`, (err as Error).message);
+    }
+  }
+  try {
+    await inTurn(`user:${entry.handle}`, async () => {
+      const author = await storage.getUser(entry.handle);
+      if (!author || author.skillNotes?.includes(entry.id)) return;
+      let skillNotes = [...(author.skillNotes || []), entry.id];
+      if (skillNotes.length > SKILL_NOTES_BEFORE_TIDYING) {
+        const keep = await currentSkillNoteIds(skillNotes);
+        keep.add(entry.id);
+        skillNotes = skillNotes.filter(id => keep.has(id));
+      }
+      await storage.updateUser(entry.handle, { skillNotes });
+    });
+  } catch (err) {
+    complete = false;
+    console.error('[Skills] could not record a skill note on its author:', (err as Error).message);
+  }
+  return complete;
+}
+
+/** Tries a few times, then leaves it to the repair below. Never throws, and nothing waits on it. */
+async function rememberSkillNoteWithRetries(entry: JournalEntry): Promise<void> {
+  for (const waitMs of [0, 2000, 15000]) {
+    if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+    try { if (await rememberSkillNote(entry)) return; } catch { /* try again */ }
+  }
+  console.error(`[Skills] gave up recording skill note ${entry.id}; its author listing their skills repairs it.`);
+}
+
+/**
+ * Repairs what a failed recording left out: looks through the person's recent notes for
+ * published skills and remembers any that are missing. Run when the person's agent lists skills.
+ */
+async function repairOwnSkillNotes(user: User): Promise<void> {
+  const known = new Set(user.skillNotes || []);
+  const recent = (await storage.getEntriesByHandle(user.handle, 200)).filter(e => !storage.isPending(e.id) && isSkillNote(e));
+  for (const entry of recent) {
+    const groups = (entry.to || []).filter(d => d.startsWith('#')).map(d => d.slice(1));
+    const missingFromGroup = (await Promise.all(groups.map(id => storage.getChannel(id).catch(() => null))))
+      .some(group => group && !group.skillNotes?.[entry.id] && group.subscribers.some(s => s.handle === user.handle));
+    if (!known.has(entry.id) || missingFromGroup) await rememberSkillNote(entry);
+  }
+}
+
+/**
+ * The skill notes one person's agent may see: published skills shared in private groups the
+ * person belongs to and has turned skills on for, and the person's own.
+ *
+ * Open groups are left out on purpose, because anyone can join one and these lines are read by
+ * the agent as it starts work. A skill in an open group, or a public one, is still an ordinary
+ * note that search and router_get_entry can read.
+ */
+async function visibleSkillsFor(user: User | null): Promise<VisibleSkills> {
+  const found: VisibleSkills = { items: [], notes: new Map(), mutes: user?.mutedSkills || [], waiting: [] };
+  if (!user?.handle) return found;
+  const handle = user.handle;
+  const turnedOn = new Set(user.skillGroups || []);
+
+  for (const group of (await storage.getSubscribedChannels(handle)).filter(isInviteOnlyGroup)) {
+    const ids = Object.keys(group.skillNotes || {});
+    if (ids.length === 0) continue;
+    if (!turnedOn.has(group.id)) { found.waiting.push(group.id); continue; }
+    try {
+      // The note must itself be addressed to this group; the ID on the group record is only a pointer.
+      const notes = (await readSkillNotes(ids)).filter(e => e.to?.includes(`#${group.id}`));
+      // Re-read membership after storage access, which can await a remote store.
+      const current = await storage.getChannel(group.id);
+      if (!current || !isInviteOnlyGroup(current) || !current.subscribers.some(s => s.handle === handle)) continue;
+      for (const entry of notes) {
+        if (!found.notes.has(entry.id)) found.notes.set(entry.id, { entry, group: group.id, use: current.skillNotes?.[entry.id] });
+      }
+    } catch (err) {
+      // One group that cannot be read must not hide the others.
+      console.error(`[Skills] could not read skills of #${group.id}:`, (err as Error).message);
+    }
+  }
+  try {
+    for (const entry of await readSkillNotes(user.skillNotes || [])) {
+      if (entry.handle === handle && !found.notes.has(entry.id)) found.notes.set(entry.id, { entry });
+    }
+  } catch (err) {
+    console.error('[Skills] could not read a person’s own skills:', (err as Error).message);
+  }
+  for (const entry of currentSkills([...found.notes.values()].map(n => n.entry))) {
+    const note = found.notes.get(entry.id)!;
+    found.items.push({
+      entryId: entry.id, name: entry.skill.name, author: entry.handle, whenToUse: entry.skill.whenToUse,
+      group: note.group, own: entry.handle === handle, timestamp: entry.timestamp, use: note.use,
+    });
+  }
+  return found;
+}
+
+async function createMCPServer(secretKey: string) {
   const pseudonym = derivePseudonym(secretKey);
   const keyHash = hashSecretKey(secretKey);
+
+  // Read afresh every time: membership, muting and the skills themselves can change during a session.
+  const visibleSkills = async (): Promise<VisibleSkills> => visibleSkillsFor(await storage.getUserByKeyHash(keyHash));
+  // The list shown at session start and in the tool list: lookups that overlap share one read, and none is kept afterwards.
+  let listLookup: Promise<VisibleSkills> | null = null;
+  const skillsForList = (): Promise<VisibleSkills> => {
+    if (!listLookup) {
+      const lookup = visibleSkills().finally(() => { if (listLookup === lookup) listLookup = null; });
+      listLookup = lookup;
+    }
+    return listLookup;
+  };
+  // Server instructions reach the agent at the start of a session even when it loads tool descriptions lazily.
+  // A slow or failed lookup must not hold up the connection: the session then starts without the list.
+  const atStart = await within(SKILL_LOOKUP_MS, skillsForList());
+  const skillInstructions = atStart ? renderSkillIndex(atStart.items, atStart.mutes) || undefined : undefined;
 
   // Lazy lookup of handle - only computed when tools are listed/called
   async function getHandle(): Promise<string | null> {
@@ -1919,10 +2159,16 @@ function createMCPServer(secretKey: string) {
 
   const server = new Server(
     { name: 'teleport-router', version: ROUTER_MCP_VERSION },
-    { capabilities: { tools: { listChanged: true } } }
+    { capabilities: { tools: { listChanged: true } }, ...(skillInstructions ? { instructions: skillInstructions } : {}) }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const visibleNow = await within(SKILL_LOOKUP_MS, skillsForList());
+    const skillIndexText = visibleNow
+      ? [renderSkillIndex(visibleNow.items, visibleNow.mutes), renderSkillHint(visibleNow.waiting)].filter(Boolean).join('\n\n')
+        || 'No skills are shared with this person yet.'
+      : 'The list of shared skills could not be read just now. Use action "list" to try again.';
+
     // Build dynamic tool description with recent daily summaries
     let dynamicDescription = TOOL_DESCRIPTION;
 
@@ -2035,6 +2281,8 @@ function createMCPServer(secretKey: string) {
           description = dynamicDescription;
         } else if (skill.name === 'router_search' && !override?.description) {
           description = SEARCH_TOOL_DESCRIPTION;
+        } else if (skill.name === 'router_use_skill' && !override?.description) {
+          description = `${skill.description}\n\n${skillIndexText}`;
         } else if (skill.name === 'router_settings' && !override?.description) {
           description = `Read or change the person's Router settings. Current: defaultAiOnly=${aiOnlyDefault}. Confirm with the person before any change.`;
         } else if (skill.name === 'router_skills' && !override?.description) {
@@ -2381,6 +2629,9 @@ function createMCPServer(secretKey: string) {
       const topicHints = (args as { topic_hints?: string[] })?.topic_hints;
       const repo = normalizeRepo((args as { repo?: unknown })?.repo);
       const tags = normalizeTags((args as { tags?: unknown })?.tags);
+      let skillNote: SkillNote | undefined;
+      try { skillNote = normalizeSkillNote((args as { skill?: unknown })?.skill); }
+      catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
       const rawSearchKeywords = (args as { search_keywords?: string[] })?.search_keywords;
       // Addressing parameters
       let toAddresses = (args as { to?: string[] })?.to;
@@ -2423,6 +2674,18 @@ function createMCPServer(secretKey: string) {
       catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
       const userStagingDelay = currentUser?.stagingDelayMs ?? STAGING_DELAY_MS;
 
+      if (skillNote) {
+        if (!currentHandle) {
+          return { content: [{ type: 'text' as const, text: `A skill is shared under a handle. The person can choose one at ${BASE_URL}/join.` }], isError: true };
+        }
+        if (skillNote.supersedes) {
+          const previous = await storage.getEntry(skillNote.supersedes);
+          if (!previous || previous.handle !== currentHandle || previous.skill?.name !== skillNote.name) {
+            return { content: [{ type: 'text' as const, text: `skill.supersedes must be this person's earlier note for the skill "${skillNote.name}".` }], isError: true };
+          }
+        }
+      }
+
       // Determine aiOnly: explicit ai_only > legacy human_visible > legacy visibility > user default
       let aiOnly: boolean;
       if (aiOnlyOverride !== undefined) {
@@ -2455,6 +2718,7 @@ function createMCPServer(secretKey: string) {
         topicHints: topicHints && topicHints.length > 0 ? topicHints : undefined,
         repo,
         tags,
+        skill: skillNote,
         // Addressing fields
         to: toAddresses && toAddresses.length > 0 ? toAddresses : undefined,
         inReplyTo: inReplyTo || undefined,
@@ -2654,6 +2918,138 @@ function createMCPServer(secretKey: string) {
     }
 
     // Handle get entry details tool
+    if (name === 'router_use_skill') {
+      const a = (args || {}) as { action?: string; name?: string; author?: string; outcome?: string; group?: string; entry_id?: string };
+      const action = a.action || 'read';
+      const say = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError: true } : {}) });
+      if (!['read', 'list', 'report', 'mute', 'unmute', 'enable_group', 'disable_group'].includes(action)) {
+        return say('action must be read, list, report, mute, unmute, enable_group or disable_group.', true);
+      }
+      const currentUser = await storage.getUserByKeyHash(keyHash);
+      if (!currentUser?.handle) return say(`Skills are shared in groups, which need a handle. The person can choose one at ${BASE_URL}/join.`, true);
+      const handle = currentUser.handle;
+
+      if (action === 'enable_group' || action === 'disable_group') {
+        const groupId = (a.group || '').trim().toLowerCase().replace(/^#/, '');
+        const group = isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+        if (action === 'enable_group') {
+          if (!group || !group.subscribers.some(s => s.handle === handle)) return say('The person must be a current member of that group.', true);
+          if (!isInviteOnlyGroup(group)) return say(`#${groupId} is an open group, which anyone can join. Skills are listed only from private groups. A skill posted there is still a note that router_search can find.`, true);
+        }
+        await inTurn(`user:${handle}`, async () => {
+          const fresh = await storage.getUser(handle);
+          const groups = new Set(fresh?.skillGroups || []);
+          if (action === 'enable_group') groups.add(groupId); else groups.delete(groupId);
+          await storage.updateUser(handle, { skillGroups: [...groups] });
+        });
+        if (action === 'disable_group') return say(`Skills from #${groupId} are no longer listed for this person's agents.`);
+        const now = await visibleSkills();
+        const lines = renderSkillIndex(now.items.filter(item => item.group === groupId), now.mutes, Number.MAX_SAFE_INTEGER);
+        return say(`Skills from #${groupId} are now turned on for this person's agents. Other sessions see them from their next start.\n\n${lines || 'Nobody has shared a skill there yet.'}`);
+      }
+
+      // "alice/tracing-latency" names the author and the skill at once.
+      let wantedName = (a.name || '').trim().toLowerCase();
+      let wantedAuthor = (a.author || '').trim().toLowerCase().replace(/^@/, '');
+      if (wantedName.includes('/')) {
+        const [first, ...rest] = wantedName.split('/');
+        wantedAuthor = wantedAuthor || first.replace(/^@/, '');
+        wantedName = rest.join('/');
+      }
+
+      if (action === 'list') {
+        try { await within(SKILL_RECORD_MS, repairOwnSkillNotes(currentUser)); } catch { /* listing still works without the repair */ }
+      }
+      const visible = await visibleSkills();
+
+      if (action === 'list') {
+        const hint = renderSkillHint(visible.waiting);
+        if (visible.items.length === 0) {
+          return say(hint || 'No skills are shared with this person yet. A skill is a note written with the `skill` argument of router_write_entry and addressed to a private group.');
+        }
+        const muted = visible.items.filter(item => isMuted(item, visible.mutes));
+        const listed = renderSkillIndex(visible.items, visible.mutes, visible.items.length) || 'Every shared skill is muted.';
+        return say([listed, muted.length ? `Muted for this person: ${muted.map(m => `${m.author}/${m.name}`).join(', ')}` : '', hint].filter(Boolean).join('\n\n'));
+      }
+
+      if (action === 'mute' || action === 'unmute') {
+        if (!wantedName && !wantedAuthor) return say('Give the name of a skill, or an author to cover everything by that person.', true);
+        let muteKey = wantedName ? (wantedAuthor ? skillKey(wantedAuthor, wantedName) : '') : `@${wantedAuthor}`;
+        if (!muteKey) {
+          const named = visible.items.filter(item => item.name === wantedName);
+          if (named.length !== 1) return say(named.length === 0 ? `No shared skill is named "${wantedName}".` : `More than one person shares a skill named "${wantedName}". Give the author too.`, true);
+          muteKey = skillKey(named[0].author, named[0].name);
+        }
+        if (!/^@?[a-z][a-z0-9_]{2,14}(\/[a-z0-9-]{3,64})?$/.test(muteKey)) return say('That is not a skill name or an author.', true);
+        const tooMany = await inTurn(`user:${handle}`, async () => {
+          const fresh = await storage.getUser(handle);
+          const mutes = new Set(fresh?.mutedSkills || []);
+          if (action === 'mute') mutes.add(muteKey); else mutes.delete(muteKey);
+          if (mutes.size > 200) return true;
+          await storage.updateUser(handle, { mutedSkills: [...mutes] });
+          return false;
+        });
+        if (tooMany) return say('Too many muted skills. Unmute some first.', true);
+        return say(action === 'mute'
+          ? `Muted ${muteKey}. It is no longer listed for this person's agents from their next session; it can still be read by name.`
+          : `Unmuted ${muteKey}.`);
+      }
+
+      // A report may name the exact note that was read, so it counts for that version even after a newer one is posted.
+      const reportedId = action === 'report' ? (a.entry_id || '').trim() : '';
+      let entryId = '';
+      if (reportedId) {
+        if (!visible.notes.has(reportedId)) return say('That note is not a skill shared with this person.', true);
+        entryId = reportedId;
+      } else {
+        if (!wantedName) return say('Give the name of the skill, as listed.', true);
+        const matches = visible.items.filter(item => item.name === wantedName && (!wantedAuthor || item.author.toLowerCase() === wantedAuthor));
+        if (matches.length === 0) {
+          const hint = renderSkillHint(visible.waiting);
+          return say(`No skill named "${wantedName}"${wantedAuthor ? ` by @${wantedAuthor}` : ''} is shared with this person. Use action "list" to see what is.${hint ? `\n\n${hint}` : ''}`, true);
+        }
+        if (matches.length > 1) return say(`More than one person shares a skill named "${wantedName}": ${matches.map(m => `@${m.author}`).join(', ')}. Give the author too.`, true);
+        entryId = matches[0].entryId;
+      }
+      const { entry, group: sharedIn } = visible.notes.get(entryId)!;
+      const own = entry.handle === handle;
+
+      // Counts are kept on the private group, per note, and only for other members' use: an author rating their own skill says little.
+      // 'left' means the person was found to be no longer a member while this request ran.
+      const count = async (what: 'read' | 'helped' | 'did_not_help'): Promise<SkillUse | 'left' | null> => {
+        if (!sharedIn || own) return null;
+        return inTurn(`group:${sharedIn}`, async () => {
+          const group = await storage.getChannel(sharedIn);
+          if (!group || !isInviteOnlyGroup(group) || !group.subscribers.some(s => s.handle === handle)) return 'left' as const;
+          const skillNotes = recordSkillUse(group.skillNotes, entry.id, what);
+          await storage.updateChannel(sharedIn, { skillNotes });
+          return skillNotes[entry.id];
+        });
+      };
+      const noLonger = () => say(`No skill named "${entry.skill.name}" is shared with this person.`, true);
+
+      if (action === 'report') {
+        if (a.outcome !== 'helped' && a.outcome !== 'did_not_help') return say('outcome must be "helped" or "did_not_help".', true);
+        const counted = await count(a.outcome);
+        if (counted === 'left') return noLonger();
+        return say(counted
+          ? `Recorded for #${sharedIn}: ${skillKey(entry.handle, entry.skill.name)} ${a.outcome === 'helped' ? 'helped' : 'did not help'} (${counted.helped} of ${counted.helped + counted.notHelped} reports say it helped). If it was wrong or out of date, tell @${entry.handle} in a reply to note ${entry.id} when the person's posting rules allow.`
+          : 'Nothing was recorded: reports count only for another member’s skill shared in a private group.');
+      }
+
+      let use = visible.notes.get(entryId)!.use;
+      let counted: SkillUse | 'left' | null = null;
+      try { counted = await count('read'); } catch { /* a count that could not be saved does not stop the read */ }
+      if (counted === 'left') return noLonger();
+      if (counted) use = counted;
+      // A count that failed proves nothing about membership, so check it directly before handing over the text.
+      if (sharedIn && !own && !counted) {
+        const group = await storage.getChannel(sharedIn);
+        if (!group || !isInviteOnlyGroup(group) || !group.subscribers.some(s => s.handle === handle)) return noLonger();
+      }
+      return say(renderSkillBody(entry, { group: sharedIn, own, use }));
+    }
+
     if (name === 'router_get_entry') {
       const entryId = (args as { entry_id?: string })?.entry_id;
 
@@ -2683,7 +3079,7 @@ function createMCPServer(secretKey: string) {
         }
 
         const date = new Date(entry.timestamp).toISOString().split('T')[0];
-        const type = entry.isReflection ? 'reflection' : 'note';
+        const type = entry.skill ? `skill ("${entry.skill.name}": ${oneLine(entry.skill.whenToUse)})` : entry.isReflection ? 'reflection' : 'note';
         const author = entry.handle ? `@${entry.handle}` : entry.pseudonym;
 
         return {
@@ -8816,7 +9212,7 @@ const server = createServer(async (req, res) => {
 
         transport = session.transport;
       } else {
-        const mcpServer = createMCPServer(secretKey);
+        const mcpServer = await createMCPServer(secretKey);
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => `http_${hashSecretKey(secretKey)}_${randomUUID()}`,
           onsessioninitialized: (sid) => {
@@ -8855,7 +9251,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Create MCP server and transport - let transport handle headers
-      const mcpServer = createMCPServer(secretKey);
+      const mcpServer = await createMCPServer(secretKey);
       res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx proxy buffering for SSE
       const transport = new SSEServerTransport('/mcp/messages', res as any);
 

@@ -26,6 +26,7 @@ teleport-router/
 │   │   ├── identity.ts        # Router keys, handles, legacy pseudonyms
 │   │   ├── author-store.ts, author-records.ts, tinycloud-identity.ts  # Authors' own encrypted storage
 │   │   ├── posting-rules.ts, sharing-notice.ts, sharing-receipt.ts    # Posting rules and sharing notices
+│   │   ├── skill-notes.ts     # Skills: notes that hold know-how, and the list agents see at session start
 │   │   ├── group-onboarding.ts, group-store.ts                        # Group setup and invitations
 │   │   ├── discord-groups.ts  # Discord pairing and permissions
 │   │   └── delivery.ts, notifications.ts                              # Addressed notes and email
