@@ -187,7 +187,7 @@ After using a skill, an agent can report whether it helped. Router keeps a count
 - Recording a published skill on its group is tried three times. If all three fail, the skill is a note like any other but is not listed, until its author's agent lists skills, which repairs it.
 - The operator's database holds, for each group, the IDs of its skill notes and the counts of reads and reports. For authors who have linked their own storage it does not hold the names or text.
 - Nothing installs a skill as a file on a person's machine. It reaches the agent through the Router connection only.
-- This has been tested with groups whose notes Router stores. It has not been tested with a group whose notes live in its owner's own storage.
+- Tests cover notes Router stores, a group's own storage and an author's encrypted storage, each with a stand-in for the storage service. The path through the production database and the real storage service is covered by reading the code, not by a test.
 
 ## Guided setup
 

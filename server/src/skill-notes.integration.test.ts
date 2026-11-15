@@ -314,4 +314,36 @@ describe('skill notes', () => {
     expect(seen.instructions).not.toContain('sly-one');
     expect(seen.description).not.toContain(`#${club}`);
   });
+
+  it('works the same in a group whose notes live in the group’s own storage', async () => {
+    const vault = `vault-${tag}`;
+    const created = await api('/api/channels', { secret_key: author.key, id: vault, name: 'Own storage', storage: 'tinycloud' });
+    expect(created.ok).toBe(true);
+    expect((await created.json() as any).store?.kind).toBe('tinycloud');
+    const { token } = await (await api(`/api/channels/${vault}/invite`, { secret_key: author.key })).json() as { token: string };
+    expect((await api(`/api/channels/${vault}/join`, { secret_key: member.key, invite_token: token })).ok).toBe(true);
+
+    const stored = await writeSkill(authorClient, author.key, 'VAULT-BODY: keep the steps here.', { name: 'vault-skill', when_to_use: 'Notes are kept in the group’s own storage.', evidence: '3 cases' }, [`#${vault}`]);
+    expect(stored.error).toBe('');
+    // The note is not in the ordinary feed of public notes.
+    expect(await (await api('/api/entries')).text()).not.toContain('VAULT-BODY');
+
+    // Recording happens just after publishing.
+    let hinted = '';
+    for (let i = 0; i < 20 && !hinted.includes(`#${vault}`); i++) {
+      hinted = (await atSessionStart(member.key)).description;
+      if (!hinted.includes(`#${vault}`)) await new Promise(r => setTimeout(r, 250));
+    }
+    expect(hinted).toContain(`Members have shared skills in #${vault}`);
+    expect(hinted).not.toContain('vault-skill');
+
+    expect((await use(memberClient, { action: 'enable_group', group: vault })).isError).not.toBe(true);
+    const seen = await atSessionStart(member.key);
+    expect(seen.instructions).toContain(`• ${author.handle}/vault-skill (@${author.handle}, #${vault}): Notes are kept in the group’s own storage.`);
+    const body = text(await use(memberClient, { name: 'vault-skill' }));
+    expect(body).toContain('VAULT-BODY');
+    expect(body).toContain('Drawn from: 3 cases');
+    expect(text(await use(memberClient, { action: 'report', entry_id: stored.id, outcome: 'helped' }))).toContain('1 of 1 reports');
+    expect((await use(outsiderClient, { name: 'vault-skill', author: author.handle })).isError).toBe(true);
+  });
 });
