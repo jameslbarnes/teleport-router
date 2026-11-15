@@ -33,6 +33,7 @@ import { startLinkJob, type LinkJob } from './author-link-job.js';
 import { discordGroups, DiscordGroupError } from './discord-groups.js';
 import { discordAudience } from './discord-audience.js';
 import { discordHistory } from './discord-history.js';
+import { discordSender } from './discord-send.js';
 import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRulesView, renderPostingRules, resolvePostingAudience, PostingRulesError, POSTING_RULES_COACH, RULES_INSTALL_GUIDANCE } from './posting-rules.js';
 import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteText, discordInvite, joinDiscordNote, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
@@ -1188,7 +1189,14 @@ const authorJobs = new Map<string, LinkJob>();
 const STATIC_DIR = join(process.cwd(), '..');
 const discordGroupService = authorLayer ? discordGroups(storage, publishedStorage,
   handle => authorLayer.status(handle), {baseUrl: BASE_URL.replace(/\/$/, ''), audience: discordAudience(process.env.DISCORD_BOT_TOKEN),
-    history: discordHistory(process.env.DISCORD_BOT_TOKEN)}) : null;
+    history: discordHistory(process.env.DISCORD_BOT_TOKEN), send: discordSender(process.env.DISCORD_BOT_TOKEN)}) : null;
+/** Posts new group notes to groups' Discord feed channels. Never throws; a failed pass is tried again. */
+const runDiscordFeeds = () => { discordGroupService?.feed().then(results => {
+  for (const r of results) if (r.posted || r.paused) console.log(`[Discord feed] #${r.groupId}: posted ${r.posted}${r.paused ? `; paused: ${r.paused}` : ''}`);
+}).catch(err => console.error('[Discord feed] pass failed:', err instanceof Error ? err.message : err)); };
+// A note published the usual way triggers a pass at once (see onPublish). This slower pass catches the
+// rest: notes saved from Discord, and notes that waited while a channel's audience was not in order.
+if (discordGroupService) setInterval(runDiscordFeeds, 180_000).unref();
 
 /**
  * True only when the viewer wrote the entry. Each side must be present: a viewer
@@ -1558,6 +1566,7 @@ if (storage instanceof StagedStorage) {
   storage.onPublish(async (entry) => {
     // Not awaited: delivering the note must never wait for, or fail with, the skill record.
     void rememberSkillNoteWithRetries(entry);
+    if (entry.to?.some(to => to.startsWith('#'))) runDiscordFeeds();
     // Deliver addressed entries (unified addressing)
     if (entry.to && entry.to.length > 0) {
       const deliveryConfig: DeliveryConfig = {

@@ -1,7 +1,7 @@
 import {describe, it, expect} from 'vitest';
 import {MemoryStorage, type JournalEntry} from './storage.js';
 import {authorStorage, recordCodec} from './author-store.js';
-import {discordGroups, groupPostingMode, rankNotes, GRANT_IDLE_MS, GRANT_MAX_MS} from './discord-groups.js';
+import {discordGroups, feedMessage, groupPostingMode, rankNotes, FEED_PER_RUN, GRANT_IDLE_MS, GRANT_MAX_MS} from './discord-groups.js';
 import {derivePseudonym, hashSecretKey} from './identity.js';
 import type {GroupStore} from './group-store.js';
 import {testWallet,versionedMemoryStore} from './author-test-fixtures.js';
@@ -15,6 +15,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const audienceState = {botId:'100000000000000090',viewerIds:['100000000000000003','100000000000000090'], open:false, unavailable:false,
     beforeRead:async()=>{}};
   const chatState = {messages:[] as any[], reads:[] as string[], unavailable:false};
+  const sendState = {sent:[] as {channelId:string;content:string}[], failing:false};
   const layer = authorStorage(base, async b => {
     const check = () => {if (revoked.has(b.space)) throw new Error('revoked');};
     const records = data.get(b.space)!;
@@ -33,7 +34,8 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const service = discordGroups(layer.storage, layer.storage, layer.status, {baseUrl:'https://router.example',now:()=>clock,
     audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {botId:audienceState.botId,open:audienceState.open,viewerIds:[...audienceState.viewerIds]};},
     history:async(_guild,channelId)=>{chatState.reads.push(channelId);if(chatState.unavailable)throw Error('unavailable');
-      return {channelName:'general',messages:chatState.messages.filter(m=>m.channelId===channelId)};}});
+      return {channelName:'general',messages:chatState.messages.filter(m=>m.channelId===channelId)};},
+    send:async(channelId,content)=>{if(sendState.failing)throw Error('Discord message not sent');sendState.sent.push({channelId,content});return String(200000000000000000n+BigInt(sendState.sent.length));}});
   const context = {guildId:'100000000000000001', channelId:'100000000000000002', discordUserId:'100000000000000003'};
   const call = (who: keyof typeof keys, path: string, body: Record<string,unknown>) => service.serve('/api/discord/'+path, `Bearer ${keys[who]}`, body) as Promise<any>;
   await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',
@@ -44,7 +46,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   }
   const operate = (grant: string, body: Record<string,unknown> = {}) => call('router_bot','operate',{grant,...context,...body});
   const save = (grant: string, content='Selected synthetic note', interactionId='100000000000000010') => operate(grant,{action:'save',content,interactionId});
-  return {base,layer,data,revoked,keys,context,call,link,operate,save,audienceState,chatState,chat:service.chat,advance:(ms=60001)=>{clock+=ms;}};
+  return {base,layer,data,revoked,keys,context,call,link,operate,save,audienceState,chatState,sendState,chat:service.chat,feed:service.feed,advance:(ms=60001)=>{clock+=ms;}};
 }
 
 describe('Shared conversational group access',()=>{
@@ -489,5 +491,121 @@ describe('Discord permission lifetime and recall order',()=>{
     expect(rankNotes(notes,'café').map(n=>n.content)).toEqual(['Ünïcode café plans']);
     expect(rankNotes(notes,'the and')).toHaveLength(2); // only common words: fall back to matching them
     expect(rankNotes(notes,'zebra')).toEqual([]);
+  });
+});
+
+describe('A group feed channel',()=>{
+  const FEED='100000000000000040';
+  async function feedFixture() {
+    const f=await fixture('guild'), {grant}=await f.link();
+    let n=0;
+    const note=async(content:string)=>{f.advance(1000);return (await f.save(grant,content,String(100000000000000500n+BigInt(n++)))).entry;};
+    const on=(channelId:string|null=FEED,who:'alice'|'bob'='alice')=>f.call(who,'feed/configure',{groupId:'test-group',channelId});
+    return {...f,grant,note,on};
+  }
+  it('is switched on only by a group admin, for a channel that only linked members can see',async()=>{
+    const f=await feedFixture();
+    await expect(f.on(FEED,'bob')).rejects.toMatchObject({status:403});
+    await expect(f.call('alice','feed/configure',{groupId:'test-group',channelId:'not-a-channel'})).rejects.toMatchObject({status:400});
+    f.audienceState.viewerIds.push('100000000000000099');
+    await expect(f.on()).rejects.toMatchObject({status:409,message:expect.stringContaining('has not linked')});
+    f.audienceState.viewerIds.pop();f.audienceState.open=true;
+    await expect(f.on()).rejects.toMatchObject({status:409,message:expect.stringContaining('everyone who joins')});
+    f.audienceState.open=false;f.audienceState.unavailable=true;
+    await expect(f.on()).rejects.toMatchObject({status:409,message:expect.stringContaining('cannot check')});
+    f.audienceState.unavailable=false;
+    expect((await f.base.getChannel('test-group'))!.discord!.feed).toBeUndefined();
+    expect(await f.on()).toMatchObject({groupId:'test-group',channelId:FEED});
+    expect((await f.base.getChannel('test-group'))!.discord!.feed).toMatchObject({channelId:FEED,posted:[]});
+    // A group whose Discord connection covers one channel can only use that channel.
+    const narrow=await fixture('channel');await narrow.link();
+    await expect(narrow.call('alice','feed/configure',{groupId:'test-group',channelId:FEED})).rejects.toMatchObject({status:400});
+    expect(await narrow.call('alice','feed/configure',{groupId:'test-group',channelId:narrow.context.channelId})).toMatchObject({channelId:narrow.context.channelId});
+  });
+  it('posts each new group note once, oldest first, and nothing written before it was switched on',async()=>{
+    const f=await feedFixture();
+    await f.note('Written before the feed existed');
+    expect(await f.feed()).toEqual([]);
+    f.advance(1000);await f.on();
+    const first=await f.note('First note after the feed was switched on'), second=await f.note('Second note');
+    await f.layer.storage.addEntry({id:'public-note',pseudonym:'x',handle:'alice',content:'A public note',client:'code',timestamp:(first as any).timestamp+1} as JournalEntry);
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:2}]);
+    expect(f.sendState.sent.map(m=>m.channelId)).toEqual([FEED,FEED]);
+    expect(f.sendState.sent[0].content).toContain('**@alice**');
+    expect(f.sendState.sent[0].content).toContain(`[open](<https://router.example/e/${first.id}>)`);
+    expect(f.sendState.sent[0].content).toContain('First note after the feed was switched on');
+    expect(f.sendState.sent[1].content).toContain('Second note');
+    expect(f.sendState.sent.some(m=>/before the feed existed|A public note/.test(m.content))).toBe(false);
+    expect((await f.base.getChannel('test-group'))!.discord!.feed!.posted).toEqual([second.id,first.id]);
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:0}]);
+    expect(f.sendState.sent).toHaveLength(2);
+    // Switching the same channel on again keeps its place; shared replies and links are untouched.
+    await f.on();expect(await f.feed()).toEqual([{groupId:'test-group',posted:0}]);
+    expect((await f.operate(f.grant,{action:'search',query:'Second'})).entries).toHaveLength(1);
+  });
+  it('waits while anyone unlinked can see the channel, then posts what waited',async()=>{
+    const f=await feedFixture();await f.on();
+    await f.note('Held back');
+    f.audienceState.viewerIds.push('100000000000000099');
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:0,paused:expect.stringContaining('has not linked')}]);
+    f.audienceState.viewerIds.pop();f.audienceState.open=true;
+    expect((await f.feed())[0].paused).toContain('everyone who joins');
+    f.audienceState.open=false;f.audienceState.unavailable=true;
+    expect((await f.feed())[0].paused).toContain('cannot check');
+    expect(f.sendState.sent).toHaveLength(0);
+    f.audienceState.unavailable=false;
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:1}]);
+    expect(f.sendState.sent[0].content).toContain('Held back');
+  });
+  it('checks the audience again before every note, so a change partway stops the rest',async()=>{
+    const f=await feedFixture();await f.on();
+    await f.note('One');await f.note('Two');await f.note('Three');
+    let reads=0;f.audienceState.beforeRead=async()=>{if(++reads===2)f.audienceState.viewerIds.push('100000000000000099');};
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:1,paused:expect.stringContaining('has not linked')}]);
+    expect(f.sendState.sent.map(m=>m.content.split('\n')[1])).toEqual(['One']);
+  });
+  it('stops when the feed is switched off, the bot leaves the group, or the group moves to another server',async()=>{
+    const f=await feedFixture();await f.on();
+    await f.note('Posted');expect((await f.feed())[0].posted).toBe(1);
+    await f.on(null);await f.note('After switching off');
+    expect(await f.feed()).toEqual([]);
+    await f.on();await f.note('After switching on again');
+    await f.base.removeSubscriber('test-group','router_bot');
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:0}]);
+    await f.base.addSubscriber('test-group','router_bot','member');
+    await f.call('alice','bind',{groupId:'test-group',botHandle:'router_bot',scope:'guild',guildId:'100000000000000777'});
+    expect(await f.feed()).toEqual([]);
+    expect(f.sendState.sent).toHaveLength(1);
+  });
+  it('tries a note again when Discord did not accept it, and posts at most a few per pass',async()=>{
+    const f=await feedFixture();await f.on();
+    await f.note('Will be retried');
+    f.sendState.failing=true;
+    expect((await f.feed())[0]).toMatchObject({posted:0,paused:expect.stringContaining('could not')});
+    expect((await f.base.getChannel('test-group'))!.discord!.feed!.posted).toEqual([]);
+    f.sendState.failing=false;
+    expect((await f.feed())[0].posted).toBe(1);
+    for(let i=0;i<FEED_PER_RUN+2;i++)await f.note(`Burst ${i}`);
+    expect((await f.feed())[0].posted).toBe(FEED_PER_RUN);
+    expect((await f.feed())[0].posted).toBe(2);
+    expect(f.sendState.sent).toHaveLength(FEED_PER_RUN+3);
+  });
+  it('skips a note deleted before its turn',async()=>{
+    const f=await feedFixture();await f.on();
+    const gone=await f.note('Deleted before posting');await f.note('Still here');
+    // The note is listed, then its author deletes it while Discord is answering the audience question.
+    let reads=0;f.audienceState.beforeRead=async()=>{if(++reads===1)await f.operate(f.grant,{action:'delete',entryId:gone.id});};
+    expect((await f.feed())[0].posted).toBe(1);
+    expect(f.sendState.sent.map(m=>m.content.split('\n')[1])).toEqual(['Still here']);
+  });
+  it('shortens a long note with a link to the rest, and shows only topics for an AI-only note',()=>{
+    const base={id:'abc-1',pseudonym:'p',handle:'alice',client:'code',timestamp:1_700_000_000_000} as JournalEntry;
+    const long=feedMessage({...base,content:'word '.repeat(400)},'https://router.example');
+    expect(long.length).toBeLessThan(1100);
+    expect(long).toContain('… [continued](<https://router.example/e/abc-1>)');
+    expect(long.split('\n')[0]).toBe('**@alice** · <t:1700000000:f> · [open](<https://router.example/e/abc-1>)');
+    const hidden=feedMessage({...base,content:'Private detail',aiOnly:true,topicHints:['enclaves','latency']},'https://router.example');
+    expect(hidden).toContain('_posted about: enclaves, latency_');expect(hidden).not.toContain('Private detail');
+    expect(feedMessage({...base,content:'A reply',inReplyTo:'abc-0'},'https://router.example')).toContain(' · reply · ');
   });
 });

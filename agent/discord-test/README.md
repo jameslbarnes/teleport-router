@@ -76,6 +76,8 @@ Set `private_conversation: true` in the participation profile to handle mentions
 
 A group admin enables destinations with `POST /api/discord/conversation/configure` and `{groupId, channelIds}`. An empty list turns shared recall off without revoking ephemeral commands. The Router service needs the existing `DISCORD_BOT_TOKEN` to check membership independently of the bot process. It uses Discord's complete, paginated member list, not the gateway cache or IDs supplied by a model. The bot needs Discord's Guild Members privileged intent; a denied, malformed or incomplete response stops retrieval. Router works out who can see the channel from the server's roles, the channel's permission overwrites and each member's roles, in Discord's documented order; the owner and administrators see every channel. Every viewer except this exact bot must have a verified, active link to the connected Router group, and a channel that a person with no roles could see is refused outright. It is intended for a small group using one server.
 
+A group admin gives the group a feed channel with `POST /api/discord/feed/configure` and `{groupId, channelId}`; `channelId: null` switches it off. Router then posts each new group note there itself, after the same audience check as shared replies, and refuses to switch it on while that check fails. See "The group feed channel" in `DOCS.md`.
+
 ### The server door
 
 With `member_role_id` and `welcome_channel_id` in the private plugin's settings (guild scope only), the bot keeps the server closed to everyone but the group. Set the server up so that @everyone sees only the welcome channel and the member role sees the rest. The bot needs Manage Roles, a role above the member role, and permission to post in the welcome channel. It then:
