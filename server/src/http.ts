@@ -1959,7 +1959,7 @@ interface VisibleSkills {
   waiting: string[];
 }
 
-/** Above this many remembered notes, a group or a person keeps only the current version of each skill. */
+/** Above this many remembered notes, pointers to versions that have been replaced are dropped from a group or a person. */
 const SKILL_NOTES_BEFORE_TIDYING = 200;
 /** How long a starting session waits for the skills list before going on without it. */
 const SKILL_LOOKUP_MS = Number(process.env.SKILL_LOOKUP_MS || 2500);
@@ -1975,18 +1975,18 @@ function within<T>(ms: number, task: Promise<T>): Promise<T | null> {
 }
 
 // One server process handles every request, so taking turns per record keeps two updates
-// to the same group or person from overwriting each other. A turn that never finishes is
-// given up on after SKILL_RECORD_MS, so it cannot hold up the ones behind it.
+// to the same group or person from overwriting each other. A caller stops waiting after
+// SKILL_RECORD_MS, but the turn is held until the work really ends: letting the next update
+// start while a slow one is still running is how an older value overwrites a newer one.
 const skillRecordTurns = new Map<string, Promise<unknown>>();
 function inTurn<T>(key: string, task: () => Promise<T>): Promise<T> {
-  const bounded = () => new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('The skill record took too long to update.')), SKILL_RECORD_MS);
-    task().then(value => { clearTimeout(timer); resolve(value); }, err => { clearTimeout(timer); reject(err); });
-  });
-  const run = (skillRecordTurns.get(key) || Promise.resolve()).then(bounded, bounded);
+  const run = (skillRecordTurns.get(key) || Promise.resolve()).then(task, task);
   const tail: Promise<unknown> = run.catch(() => {}).finally(() => { if (skillRecordTurns.get(key) === tail) skillRecordTurns.delete(key); });
   skillRecordTurns.set(key, tail);
-  return run;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The skill record took too long to update.')), SKILL_RECORD_MS);
+    run.then(value => { clearTimeout(timer); resolve(value); }, err => { clearTimeout(timer); reject(err); });
+  });
 }
 
 /** Reads notes by ID, twenty at a time, and keeps the published skill notes among them. */
@@ -1999,9 +1999,15 @@ async function readSkillNotes(ids: string[]): Promise<SkillEntry[]> {
   return found;
 }
 
-/** The IDs worth keeping once a record has grown: the current version of each skill. Older versions and deleted notes go. */
-async function currentSkillNoteIds(ids: string[]): Promise<Set<string>> {
-  return new Set(currentSkills(await readSkillNotes(ids)).map(entry => entry.id));
+/**
+ * The IDs that can be dropped once a record has grown: notes that were read just now and seen
+ * to have a newer version by the same author. An ID whose note could not be read is kept,
+ * because a store that is briefly out of reach looks the same as a deleted note.
+ */
+async function retiredSkillNoteIds(ids: string[]): Promise<Set<string>> {
+  const read = await readSkillNotes(ids);
+  const current = new Set(currentSkills(read).map(entry => entry.id));
+  return new Set(read.filter(entry => !current.has(entry.id)).map(entry => entry.id));
 }
 
 /**
@@ -2024,9 +2030,8 @@ async function rememberSkillNote(entry: JournalEntry): Promise<boolean> {
         if (!group || group.skillNotes?.[entry.id] || !group.subscribers.some(s => s.handle === entry.handle)) return;
         let skillNotes = { ...(group.skillNotes || {}), [entry.id]: { uses: 0, helped: 0, notHelped: 0, lastAt: 0 } };
         if (Object.keys(skillNotes).length > SKILL_NOTES_BEFORE_TIDYING) {
-          const keep = await currentSkillNoteIds(Object.keys(skillNotes));
-          keep.add(entry.id);
-          skillNotes = Object.fromEntries(Object.entries(skillNotes).filter(([id]) => keep.has(id)));
+          const retired = await retiredSkillNoteIds(Object.keys(skillNotes));
+          skillNotes = Object.fromEntries(Object.entries(skillNotes).filter(([id]) => !retired.has(id)));
         }
         await storage.updateChannel(groupId, { skillNotes });
       });
@@ -2041,9 +2046,8 @@ async function rememberSkillNote(entry: JournalEntry): Promise<boolean> {
       if (!author || author.skillNotes?.includes(entry.id)) return;
       let skillNotes = [...(author.skillNotes || []), entry.id];
       if (skillNotes.length > SKILL_NOTES_BEFORE_TIDYING) {
-        const keep = await currentSkillNoteIds(skillNotes);
-        keep.add(entry.id);
-        skillNotes = skillNotes.filter(id => keep.has(id));
+        const retired = await retiredSkillNoteIds(skillNotes);
+        skillNotes = skillNotes.filter(id => !retired.has(id));
       }
       await storage.updateUser(entry.handle, { skillNotes });
     });
@@ -2064,12 +2068,13 @@ async function rememberSkillNoteWithRetries(entry: JournalEntry): Promise<void> 
 }
 
 /**
- * Repairs what a failed recording left out: looks through the person's recent notes for
- * published skills and remembers any that are missing. Run when the person's agent lists skills.
+ * Repairs what a failed recording left out: looks through the person's 200 most recent notes
+ * for the current version of each published skill and remembers any that are missing. Run when
+ * the person's agent lists skills. A skill older than that is repaired by posting it again.
  */
 async function repairOwnSkillNotes(user: User): Promise<void> {
   const known = new Set(user.skillNotes || []);
-  const recent = (await storage.getEntriesByHandle(user.handle, 200)).filter(e => !storage.isPending(e.id) && isSkillNote(e));
+  const recent = currentSkills((await storage.getEntriesByHandle(user.handle, 200)).filter(e => !storage.isPending(e.id) && isSkillNote(e)));
   for (const entry of recent) {
     const groups = (entry.to || []).filter(d => d.startsWith('#')).map(d => d.slice(1));
     const missingFromGroup = (await Promise.all(groups.map(id => storage.getChannel(id).catch(() => null))))
@@ -3042,8 +3047,8 @@ async function createMCPServer(secretKey: string) {
       try { counted = await count('read'); } catch { /* a count that could not be saved does not stop the read */ }
       if (counted === 'left') return noLonger();
       if (counted) use = counted;
-      // A count that failed proves nothing about membership, so check it directly before handing over the text.
-      if (sharedIn && !own && !counted) {
+      // The last thing before handing over the text: the person may have been removed while the count was being saved.
+      if (sharedIn && !own) {
         const group = await storage.getChannel(sharedIn);
         if (!group || !isInviteOnlyGroup(group) || !group.subscribers.some(s => s.handle === handle)) return noLonger();
       }

@@ -147,7 +147,7 @@ A skill is a note that holds know-how for a kind of task: what to check, in what
 
 A skill is stored as an ordinary note with four extra fields: a stable name, one line saying when it applies, an optional line on what it was drawn from, and an optional pointer to the note it replaces. Everything else is the same as for any note. It goes to the audience the author chose, waits before it publishes, can be deleted while it waits, and is stored where that author's other notes are: encrypted in their own storage if they have linked it, and otherwise in the older database that the operator can read.
 
-When a skill publishes, Router records the note's ID on each group it was shared in and on its author's account, so that it can be found later however many ordinary notes follow it. Only the ID and the counts described below are kept there. The name and the text stay in the note. Once a group or a person has more than 200 recorded, Router keeps the current version of each skill and drops the pointers to older versions; the older notes themselves are untouched.
+When a skill publishes, Router records the note's ID on each group it was shared in and on its author's account, so that it can be found later however many ordinary notes follow it. Only the ID and the counts described below are kept there. The name and the text stay in the note. Once a group or a person has more than 200 recorded, Router drops the pointers to versions that have been replaced; the older notes themselves are untouched.
 
 ### How an agent comes to use one
 
@@ -182,9 +182,10 @@ After using a skill, an agent can report whether it helped. Router keeps a count
 
 ### Limits
 
-- Deleting the newest version of a skill brings back the one before it, if that note still exists. To withdraw a skill, delete every version.
+- Deleting the newest version of a skill can bring back the one before it, if that note still exists and is still recorded. To withdraw a skill, delete every version.
 - The list is given to the agent when the session starts. A skill published later reaches that session only if the agent lists its tools or its skills again.
-- Recording a published skill on its group is tried three times. If all three fail, the skill is a note like any other but is not listed, until its author's agent lists skills, which repairs it.
+- Recording a published skill on its group is tried three times. If all three fail, the skill is a note like any other but is not listed. Its author's agent listing skills repairs it when the note is among the author's 200 most recent; otherwise the author posts it again.
+- These records grow with the number of different skills in a group and are kept on the group's own record. That is fine for hundreds of skills and would need its own store well before tens of thousands.
 - The operator's database holds, for each group, the IDs of its skill notes and the counts of reads and reports. For authors who have linked their own storage it does not hold the names or text.
 - Nothing installs a skill as a file on a person's machine. It reaches the agent through the Router connection only.
 - Tests cover notes Router stores, a group's own storage and an author's encrypted storage, each with a stand-in for the storage service. The path through the production database and the real storage service is covered by reading the code, not by a test.
