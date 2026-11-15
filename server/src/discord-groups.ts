@@ -5,6 +5,7 @@ import { tokenize } from './storage.js';
 import type { Channel, JournalEntry, Storage, User } from './storage.js';
 import type { DiscordAudienceReader } from './discord-audience.js';
 import type { DiscordChatMessage, DiscordHistoryReader } from './discord-history.js';
+import type { DiscordSender } from './discord-send.js';
 import type { PostingRules } from './posting-rules.js';
 
 export interface DiscordGroupBinding {
@@ -16,6 +17,30 @@ export interface DiscordGroupBinding {
   version: string;
   /** Shared replies are opt-in and checked against everyone who can currently see the channel. */
   conversationChannelIds?: string[];
+  /** One channel that shows each new group note. Opt-in, and checked the same way before every note. */
+  feed?: DiscordGroupFeed;
+}
+export interface DiscordGroupFeed {
+  channelId: string;
+  /** When the feed was switched on. Notes written before this are never replayed into the channel. */
+  since: number;
+  /** IDs of the notes already posted, newest first. */
+  posted: string[];
+}
+/** Most notes one pass posts to one group's feed, and how many posted IDs a feed remembers. */
+export const FEED_PER_RUN = 5, FEED_REMEMBER = 300;
+const FEED_BODY_MAX = 900; // a feed, not an archive: a long note links to its full text
+
+/** One group note as a feed message: who, when, a link, and the text or, for an AI-only note, its topics. */
+export function feedMessage(entry: JournalEntry, baseUrl: string): string {
+  const who = entry.handle ? '@' + entry.handle : entry.pseudonym || 'someone';
+  const url = `${baseUrl}/e/${encodeURIComponent(entry.id)}`;
+  const head = `**${who}** · <t:${Math.floor(entry.timestamp / 1000)}:f>${entry.inReplyTo ? ' · reply' : ''} · [open](<${url}>)`;
+  if (entry.humanVisible === false || entry.aiOnly || typeof entry.content !== 'string' || !entry.content.trim())
+    return `${head}\n_posted about: ${(entry.topicHints?.length ? entry.topicHints.join(', ') : 'various topics').slice(0, 300)}_`;
+  let body = entry.content.trim();
+  if (body.length > FEED_BODY_MAX) body = body.slice(0, FEED_BODY_MAX - 40).replace(/\s+\S*$/, '') + ` … [continued](<${url}>)`;
+  return `${head}\n${body}`;
 }
 export interface DiscordGroupGrant extends DiscordGroupBinding {
   id: string;
@@ -68,7 +93,8 @@ export function rankNotes<T extends {content: string}>(notes: T[], query: string
 }
 
 export function discordGroups(storage: Storage, published: Storage, authorStatus: AuthorStatus,
-  { baseUrl, now = Date.now, audience, history }: {baseUrl: string; now?: () => number; audience?: DiscordAudienceReader; history?: DiscordHistoryReader}) {
+  { baseUrl, now = Date.now, audience, history, send }: {baseUrl: string; now?: () => number; audience?: DiscordAudienceReader;
+    history?: DiscordHistoryReader; send?: DiscordSender}) {
   const pending = new Map<string, {handle: string; groupId: string; discordUserId: string; binding: DiscordGroupBinding; expiresAt: number}>();
   type Pair = { groupId: string; discordUserId: string; channelId: string; displayName: string; username: string;
     binding: DiscordGroupBinding; expiresAt: number; owner?: string; grantId?: string; connected?: boolean;
@@ -206,6 +232,71 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
 
   const conversationView = (entry: JournalEntry) => ({...view(entry), version: digest(JSON.stringify(view(entry)))});
 
+  /**
+   * Why a group's notes may not be posted into a channel right now, or null when they may. The same test
+   * as shared replies, without a requesting person: the channel is hidden from newcomers, and everyone
+   * who can see it, other than the bot, is a current group member with a connected account.
+   */
+  async function feedBlocked(group: Channel, channelId: string): Promise<string | null> {
+    if (!audience || !send || !group.discord) return 'Router cannot reach Discord for this group.';
+    let viewers;
+    try { viewers = await audience(group.discord.guildId, channelId); }
+    catch { return 'Router cannot check who can see this channel.'; }
+    if (viewers.open) return 'This channel is visible to everyone who joins the Discord server.';
+    const linked = await linkedMembers(group);
+    if (viewers.viewerIds.some(id => id !== viewers.botId && !linked.has(id)))
+      return 'Someone who can see this channel has not linked their account and joined the Router group.';
+    return null;
+  }
+
+  /**
+   * Posts a group's new notes to its feed channel, oldest first, a few at a time. Before each note it reads
+   * the group again and asks Discord again who can see the channel, so a member removed or a channel opened
+   * a moment ago stops the feed at once; the notes wait and go out when the channel is in order again.
+   * A note is remembered only after Discord accepted it, so a failure between the two can post it twice
+   * but never drop it. Discord keeps what was posted: deleting or editing a note does not change the channel.
+   */
+  async function runFeed(groupId: string): Promise<{groupId: string; posted: number; paused?: string}> {
+    const group = await storage.getChannel(groupId), binding = group?.discord, feed = binding?.feed;
+    if (!group || !binding || !feed || !privateGroup(group) || !member(group, binding.botHandle)) return {groupId, posted: 0};
+    const done = new Set(feed.posted);
+    const fresh = (await published.getChannelEntries(group.id, 100))
+      .filter(e => e.to?.includes(`#${group.id}`) && e.timestamp >= feed.since && !done.has(e.id))
+      .sort((a, b) => a.timestamp - b.timestamp).slice(0, FEED_PER_RUN);
+    let posted = 0;
+    for (const listed of fresh) {
+      const current = await storage.getChannel(groupId);
+      if (!current?.discord?.feed || !privateGroup(current) || !sameBinding(binding, current.discord)
+        || current.discord.feed.channelId !== feed.channelId || !member(current, binding.botHandle)) break;
+      const paused = await feedBlocked(current, feed.channelId);
+      if (paused) return {groupId, posted, paused};
+      // Read again: the note may have been deleted or moved while Discord was answering.
+      const entry = await published.getEntry(listed.id);
+      if (!entry || !entry.to?.includes(`#${group.id}`)) continue;
+      await send!(feed.channelId, feedMessage(entry, baseUrl));
+      await exclusive('links', async () => {
+        const latest = await storage.getChannel(groupId), now_ = latest?.discord?.feed;
+        if (!latest?.discord || !now_ || now_.channelId !== feed.channelId || now_.since !== feed.since) return;
+        await storage.updateChannel(groupId, {discord: {...latest.discord,
+          feed: {...now_, posted: [entry.id, ...now_.posted.filter(id => id !== entry.id)].slice(0, FEED_REMEMBER)}}});
+      });
+      posted++;
+    }
+    return {groupId, posted};
+  }
+  /** One pass over every group that has a feed channel. One pass at a time; a failing group does not stop the others. */
+  function feed(): Promise<{groupId: string; posted: number; paused?: string}[]> {
+    return exclusive('feed', async () => {
+      const results = [];
+      for (const group of await storage.listChannels()) {
+        if (!group.discord?.feed) continue;
+        try { results.push(await runFeed(group.id)); }
+        catch { results.push({groupId: group.id, posted: 0, paused: 'Router could not read the notes or reach Discord.'}); }
+      }
+      return results;
+    });
+  }
+
   async function renewGrant(owner: User, grant: DiscordGroupGrant) {
     const renewed = Math.min(now() + GRANT_IDLE_MS, grant.createdAt + GRANT_MAX_MS);
     if (renewed - grant.expiresAt < GRANT_RENEW_EVERY_MS) return grant.expiresAt;
@@ -264,6 +355,34 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           return fail(400, 'Choose up to 20 text channels covered by the existing Discord connection.');
         await storage.updateChannel(group.id, {discord: {...group.discord, conversationChannelIds: body.channelIds as string[]}});
         return {groupId: group.id, channelIds: body.channelIds};
+      });
+    }
+    if (path === '/api/discord/feed/configure') {
+      // Switch a group's feed channel on (channelId) or off (channelId: null). Admin only. Switching on is
+      // refused unless the channel passes the audience test right now, so a mistake shows at once.
+      const requested = await groupFor(body.groupId);
+      if (!requested.subscribers.some(s => s.handle === user.handle && s.role === 'admin')) return fail(403, 'Group admin required.');
+      if (!requested.discord) return fail(400, 'Connect this group to a Discord server first.');
+      if (body.channelId !== null) {
+        if (!snowflake(body.channelId) || (requested.discord.scope !== 'guild' && body.channelId !== requested.discord.channelId))
+          return fail(400, 'Choose one text channel covered by the existing Discord connection, or null to switch the feed off.');
+        const blocked = await feedBlocked(requested, body.channelId);
+        if (blocked) return fail(409, `The feed was not switched on. ${blocked}`);
+      }
+      return exclusive('links', async () => {
+        // Discord can take seconds. Read the group again before saving.
+        const group = await groupFor(body.groupId);
+        if (!group.discord || !sameBinding(requested.discord!, group.discord)
+          || !group.subscribers.some(s => s.handle === user.handle && s.role === 'admin')) return fail(409, 'The group changed. Please try again.');
+        const {feed: prior, ...binding} = group.discord;
+        if (body.channelId === null) {
+          await storage.updateChannel(group.id, {discord: binding});
+          return {groupId: group.id, channelId: null};
+        }
+        // Switching the same channel on again keeps its place; a different channel starts from now.
+        const next: DiscordGroupFeed = prior?.channelId === body.channelId ? prior : {channelId: body.channelId as string, since: now(), posted: []};
+        await storage.updateChannel(group.id, {discord: {...binding, feed: next}});
+        return {groupId: group.id, channelId: next.channelId, since: next.since};
       });
     }
     if (path === '/api/discord/conversation/operate') {
@@ -381,7 +500,8 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           version: prior && sameDestination(prior, destination)
             ? prior.version : randomBytes(16).toString('hex'),
           ...(prior && sameDestination(prior, destination) && prior.conversationChannelIds
-            ? {conversationChannelIds: prior.conversationChannelIds} : {})};
+            ? {conversationChannelIds: prior.conversationChannelIds} : {}),
+          ...(prior && sameDestination(prior, destination) && prior.feed ? {feed: prior.feed} : {})};
         // The admin explicitly grants this service identity membership, without a cross-platform invitation.
         if (!member(group, bot.handle)) await storage.addSubscriber(group.id, bot.handle, 'member');
         await storage.updateChannel(group.id, {discord: binding});
@@ -506,5 +626,5 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     }
     return fail(400, 'Unknown private-group action.');
   }
-  return {serve, chat};
+  return {serve, chat, feed};
 }

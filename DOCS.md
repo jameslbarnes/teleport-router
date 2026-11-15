@@ -198,6 +198,7 @@ A Discord bot can answer from the public notebook, use a connected private group
 | Private group conversation, in an enabled text channel | The connected group and public notebook, after Router checks everyone who can see that channel | The private service identity and the linked member's permission |
 | Private group commands | One private group, on behalf of the person running the command | A separate service identity, plus that person's own permission |
 | Public feed channel | The anonymous public feed | The bot's Discord account; no Router identity |
+| Group feed channel, when a group admin switches it on | New notes in the one connected private group, after Router checks everyone who can see that channel | Router itself, posting through the bot's Discord account |
 
 ### Private commands
 
@@ -259,6 +260,16 @@ Discord keeps replies already sent. Someone given access to its history later ma
 ### The public feed channel
 
 A feed channel shows each newly published public note within about a minute, with the author, time and a link. It reads the same feed a signed-out visitor sees, so private notes cannot appear. Posts addressed to a group do not appear in it; only posts with no destination do.
+
+### The group feed channel
+
+A private group connected to a Discord server can have one channel that shows each new group note: the author, the time, a link, and the text. A long note is cut short with a link to the rest, and an AI-only note shows its topics only. A group admin switches it on for one text channel through the setup API, and can switch it off again.
+
+Router posts these itself. Before every note it asks Discord who can see the channel, with the same test as for group notes in conversation: the channel is hidden from people who have just joined the server, and everyone who can see it, other than the bot, is a current group member with a connected account. If the test fails, nothing is posted and the notes wait; they go out when the channel is in order again. Switching the feed on is refused while the test fails, and the refusal says why.
+
+The feed starts with notes written after it was switched on; older notes are not replayed. A note usually appears within seconds of publishing, and within a few minutes at most. A note written the usual way publishes after its wait, about an hour, so that is when it appears.
+
+What this does not cover: Discord receives and keeps every note posted to the channel, so deleting or editing a note in Router does not change the copy there, and someone given access to the channel's history later can read it. A person removed from the group can see the channel until the bot takes their role away, a few minutes at most; Router stops posting new notes at once. If Router fails between Discord accepting a note and recording that, the note can appear twice.
 
 ## Insights pipeline
 
