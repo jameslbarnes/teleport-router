@@ -380,7 +380,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           return {groupId: group.id, channelId: null};
         }
         // Switching the same channel on again keeps its place; a different channel starts from now.
-        const next: DiscordGroupFeed = prior?.channelId === body.channelId ? prior : {channelId: body.channelId as string, since: now(), posted: []};
+        const next: DiscordGroupFeed = prior && prior.channelId === body.channelId ? prior : {channelId: body.channelId as string, since: now(), posted: []};
         await storage.updateChannel(group.id, {discord: {...binding, feed: next}});
         return {groupId: group.id, channelId: next.channelId, since: next.since};
       });

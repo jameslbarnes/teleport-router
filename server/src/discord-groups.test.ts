@@ -593,8 +593,8 @@ describe('A group feed channel',()=>{
   it('skips a note deleted before its turn',async()=>{
     const f=await feedFixture();await f.on();
     const gone=await f.note('Deleted before posting');await f.note('Still here');
-    const original=f.layer.storage.getEntry.bind(f.layer.storage);
-    (f.layer.storage as any).getEntry=async(id:string)=>id===gone.id?null:original(id);
+    // The note is listed, then its author deletes it while Discord is answering the audience question.
+    let reads=0;f.audienceState.beforeRead=async()=>{if(++reads===1)await f.operate(f.grant,{action:'delete',entryId:gone.id});};
     expect((await f.feed())[0].posted).toBe(1);
     expect(f.sendState.sent.map(m=>m.content.split('\n')[1])).toEqual(['Still here']);
   });
