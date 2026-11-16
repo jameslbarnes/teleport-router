@@ -317,7 +317,7 @@ A private group connected to a Discord server can have one channel that shows ea
 
 Router posts these itself. Before every note it asks Discord who can see the channel, with the same test as for group notes in conversation: the channel is hidden from people who have just joined the server, and everyone who can see it, other than the bot, is a current group member with a connected account. If the test fails, nothing is posted and the notes wait; they go out when the channel is in order again. Switching the feed on is refused while the test fails, and the refusal says why.
 
-The feed starts with notes written after it was switched on; older notes are not replayed. A note usually appears within seconds of publishing, and within a few minutes at most. A note written the usual way publishes after its wait, about an hour, so that is when it appears.
+Notes that had already published when the feed was switched on are not posted, unless the admin asks for the newest few of them (`backfill`, up to 20). A note still waiting then is posted when it publishes. A note usually appears within seconds of publishing, and within a few minutes at most. A note written the usual way publishes after its wait, about an hour, so that is when it appears.
 
 What this does not cover: Discord receives and keeps every note posted to the channel, so deleting or editing a note in Router does not change the copy there, and someone given access to the channel's history later can read it. A person removed from the group can see the channel until the bot takes their role away, a few minutes at most; Router stops posting new notes at once. If Router fails between Discord accepting a note and recording that, the note can appear twice.
 
