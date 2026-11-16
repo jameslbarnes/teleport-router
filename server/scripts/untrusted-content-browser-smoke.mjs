@@ -132,7 +132,8 @@ try {
   const visitor = await (await browser.newContext()).newPage();
   const nextPath = async next => {
     await visitor.goto(base + '/join?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
-    return visitor.evaluate(() => getSafeNextPath());
+    await visitor.locator('#create-account').waitFor();
+    return visitor.evaluate(() => document.documentElement.dataset.safeNext || null);
   };
   for (const next of ['/.//evil.example', '//evil.example', '/' + String.fromCharCode(92) + 'evil.example', 'https://evil.example/', 'javascript:alert(1)']) {
     assert.equal(await nextPath(next), null, 'unsafe next path refused: ' + next);
