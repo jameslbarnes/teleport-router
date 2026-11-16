@@ -522,7 +522,7 @@ describe('A group feed channel',()=>{
     await expect(narrow.call('alice','feed/configure',{groupId:'test-group',channelId:FEED})).rejects.toMatchObject({status:400});
     expect(await narrow.call('alice','feed/configure',{groupId:'test-group',channelId:narrow.context.channelId})).toMatchObject({channelId:narrow.context.channelId});
   });
-  it('posts each new group note once, oldest first, and nothing written before it was switched on',async()=>{
+  it('posts each new group note once, oldest first, and nothing published before it was switched on',async()=>{
     const f=await feedFixture();
     await f.note('Written before the feed existed');
     expect(await f.feed()).toEqual([]);
@@ -597,6 +597,39 @@ describe('A group feed channel',()=>{
     let reads=0;f.audienceState.beforeRead=async()=>{if(++reads===1)await f.operate(f.grant,{action:'delete',entryId:gone.id});};
     expect((await f.feed())[0].posted).toBe(1);
     expect(f.sendState.sent.map(m=>m.content.split('\n')[1])).toEqual(['Still here']);
+  });
+  it('posts a note that was written before the switch-on but published after it',async()=>{
+    const f=await feedFixture();
+    await f.note('Already published');
+    const writtenAt=(await f.note('Also already published') as any).timestamp;
+    f.advance(1000);await f.on();
+    // A note written earlier that waited and publishes only now keeps its earlier time.
+    await f.layer.storage.addEntry({id:'waited-note',pseudonym:'x',handle:'alice',content:'Waited an hour',client:'code',
+      timestamp:writtenAt-500,to:['#test-group']} as JournalEntry);
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:1}]);
+    expect(f.sendState.sent.map(m=>m.content.split('\n')[1])).toEqual(['Waited an hour']);
+  });
+  it('starts with the newest published notes when an admin asks for a backfill, and only then',async()=>{
+    const f=await feedFixture();
+    await f.note('Oldest');await f.note('Middle');await f.note('Newest');
+    await expect(f.call('alice','feed/configure',{groupId:'test-group',channelId:FEED,backfill:21})).rejects.toMatchObject({status:400});
+    await expect(f.call('alice','feed/configure',{groupId:'test-group',channelId:FEED,backfill:-1})).rejects.toMatchObject({status:400});
+    expect(await f.call('alice','feed/configure',{groupId:'test-group',channelId:FEED,backfill:2})).toMatchObject({skipped:1});
+    expect((await f.feed())[0].posted).toBe(2);
+    expect(f.sendState.sent.map(m=>m.content.split('\n')[1])).toEqual(['Middle','Newest']);
+    // Switching on again without a backfill keeps its place.
+    await f.on();expect((await f.feed())[0].posted).toBe(0);
+  });
+  it('reseeds a feed switched on before seeding existed when it is switched on again',async()=>{
+    const f=await feedFixture();
+    await f.note('Before');
+    const group=(await f.base.getChannel('test-group'))!;
+    await f.base.updateChannel('test-group',{discord:{...group.discord!,feed:{channelId:FEED,since:Date.now()+86400000,posted:[]}}});
+    const waited=await f.note('Written before the old switch-on time');
+    expect(await f.feed()).toEqual([{groupId:'test-group',posted:0}]);
+    expect(await f.call('alice','feed/configure',{groupId:'test-group',channelId:FEED,backfill:1})).toMatchObject({skipped:1});
+    expect((await f.feed())[0].posted).toBe(1);
+    expect(f.sendState.sent[0].content).toContain(waited.id);
   });
   it('shortens a long note with a link to the rest, and shows only topics for an AI-only note',()=>{
     const base={id:'abc-1',pseudonym:'p',handle:'alice',client:'code',timestamp:1_700_000_000_000} as JournalEntry;

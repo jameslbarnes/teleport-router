@@ -22,13 +22,24 @@ export interface DiscordGroupBinding {
 }
 export interface DiscordGroupFeed {
   channelId: string;
-  /** When the feed was switched on. Notes written before this are never replayed into the channel. */
+  /** When the feed was switched on. */
   since: number;
-  /** IDs of the notes already posted, newest first. */
+  /**
+   * IDs of the notes not to post: those already posted, and those that had already published when the
+   * feed was switched on. Newest first.
+   */
   posted: string[];
+  /**
+   * True when `posted` was filled with the group's published notes at switch-on. A note still waiting
+   * then is posted when it publishes, however long ago it was written. Feeds switched on before this
+   * existed lack it, and fall back to posting only notes written after `since`.
+   */
+  seeded?: boolean;
 }
 /** Most notes one pass posts to one group's feed, and how many posted IDs a feed remembers. */
 export const FEED_PER_RUN = 5, FEED_REMEMBER = 300;
+/** At most how many already-published notes an admin may ask a new feed to start with. */
+export const FEED_BACKFILL_MAX = 20;
 const FEED_BODY_MAX = 900; // a feed, not an archive: a long note links to its full text
 
 /** One group note as a feed message: who, when, a link, and the text or, for an AI-only note, its topics. */
@@ -261,7 +272,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     if (!group || !binding || !feed || !privateGroup(group) || !member(group, binding.botHandle)) return {groupId, posted: 0};
     const done = new Set(feed.posted);
     const fresh = (await published.getChannelEntries(group.id, 100))
-      .filter(e => e.to?.includes(`#${group.id}`) && e.timestamp >= feed.since && !done.has(e.id))
+      .filter(e => e.to?.includes(`#${group.id}`) && !done.has(e.id) && (feed.seeded || e.timestamp >= feed.since))
       .sort((a, b) => a.timestamp - b.timestamp).slice(0, FEED_PER_RUN);
     let posted = 0;
     for (const listed of fresh) {
@@ -360,7 +371,11 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     if (path === '/api/discord/feed/configure') {
       // Switch a group's feed channel on (channelId) or off (channelId: null). Admin only. Switching on is
       // refused unless the channel passes the audience test right now, so a mistake shows at once.
+      // Notes already published at switch-on are not posted, except the newest `backfill` of them.
       const requested = await groupFor(body.groupId);
+      const backfill = body.backfill === undefined ? undefined : Number(body.backfill);
+      if (backfill !== undefined && (!Number.isInteger(backfill) || backfill < 0 || backfill > FEED_BACKFILL_MAX))
+        return fail(400, `backfill must be a whole number from 0 to ${FEED_BACKFILL_MAX}.`);
       if (!requested.subscribers.some(s => s.handle === user.handle && s.role === 'admin')) return fail(403, 'Group admin required.');
       if (!requested.discord) return fail(400, 'Connect this group to a Discord server first.');
       if (body.channelId !== null) {
@@ -379,10 +394,18 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
           await storage.updateChannel(group.id, {discord: binding});
           return {groupId: group.id, channelId: null};
         }
-        // Switching the same channel on again keeps its place; a different channel starts from now.
-        const next: DiscordGroupFeed = prior && prior.channelId === body.channelId ? prior : {channelId: body.channelId as string, since: now(), posted: []};
+        // Switching the same channel on again keeps its place, unless the admin asks for a backfill or the
+        // feed predates seeding. Otherwise the feed starts after every note published so far.
+        let next: DiscordGroupFeed;
+        if (prior && prior.channelId === body.channelId && prior.seeded && backfill === undefined) next = prior;
+        else {
+          const published_ = (await published.getChannelEntries(group.id, FEED_REMEMBER))
+            .filter(e => e.to?.includes(`#${group.id}`)).sort((a, b) => b.timestamp - a.timestamp);
+          next = {channelId: body.channelId as string, since: now(), seeded: true,
+            posted: published_.slice(backfill ?? 0).map(e => e.id)};
+        }
         await storage.updateChannel(group.id, {discord: {...binding, feed: next}});
-        return {groupId: group.id, channelId: next.channelId, since: next.since};
+        return {groupId: group.id, channelId: next.channelId, since: next.since, skipped: next.posted.length};
       });
     }
     if (path === '/api/discord/conversation/operate') {
