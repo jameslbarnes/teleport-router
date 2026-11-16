@@ -536,7 +536,9 @@ describe('A group feed channel',()=>{
     expect(f.sendState.sent[0].content).toContain('First note after the feed was switched on');
     expect(f.sendState.sent[1].content).toContain('Second note');
     expect(f.sendState.sent.some(m=>/before the feed existed|A public note/.test(m.content))).toBe(false);
-    expect((await f.base.getChannel('test-group'))!.discord!.feed!.posted).toEqual([second.id,first.id]);
+    // Posted notes come first; the one already published at switch-on is remembered so it is never posted.
+    expect((await f.base.getChannel('test-group'))!.discord!.feed!.posted.slice(0,2)).toEqual([second.id,first.id]);
+    expect((await f.base.getChannel('test-group'))!.discord!.feed!.posted).toHaveLength(3);
     expect(await f.feed()).toEqual([{groupId:'test-group',posted:0}]);
     expect(f.sendState.sent).toHaveLength(2);
     // Switching the same channel on again keeps its place; shared replies and links are untouched.
