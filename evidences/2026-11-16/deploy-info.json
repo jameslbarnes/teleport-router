@@ -1,0 +1,11 @@
+{
+  "git_sha": "16a27933aefe9448f6c326837a98f0b33a7c7297",
+  "git_sha_short": "16a2793",
+  "image_digest": "sha256:6bd9004df22ddb544243b59186c0ffdc06134a0147419c5f8016ced856dff317",
+  "agent_image_digest": "sha256:354d138432769ee1c9a327d4bffddd3c38f5d84d2aed3a47766dd69cd3dc7470",
+  "discord_image_digest": "sha256:c403d2b14086cb05c1091128e27406216b613b54fddeadc402dfbf0ac32b4328",
+  "app_id": "db82f581256a3c9244c4d7129a67336990d08cdf",
+  "evidence_source": "Phala attestation API",
+  "deployed_at": "2026-11-16T01:02:18Z",
+  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/43783282826"
+}
