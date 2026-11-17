@@ -45,7 +45,7 @@ async function write(client: Client, key: string, benchmark: Record<string, unkn
   const result = await client.callTool({ name: 'router_write_entry', arguments: {
     client: 'code', entry: `Synthetic benchmark note ${tag}`, benchmark, to, search_keywords: [], sensitivity_check: 'Synthetic benchmark test', posting_intent: 'user-requested',
   } });
-  if (result.isError) return { error: text(result), id: '', text: '' };
+  if (result.isError) return { error: text(result), id: '', text: '', structured: {} as any };
   const receipt = (result.structuredContent as any).receipt;
   if (publish) {
     if (receipt.notification_required) {
@@ -56,7 +56,7 @@ async function write(client: Client, key: string, benchmark: Record<string, unkn
     }
     expect((await api(`/api/entries/${receipt.entry_id}/publish`, {}, key)).ok).toBe(true);
   }
-  return { error: '', id: receipt.entry_id as string, text: text(result) };
+  return { error: '', id: receipt.entry_id as string, text: text(result), structured: result.structuredContent as any };
 }
 
 const board = (client: Client, args: Record<string, unknown>) => client.callTool({ name: 'router_benchmarks', arguments: args });
@@ -118,6 +118,8 @@ describe('benchmark notes', () => {
     const posted = await write(memberClient, member.key, { kind: 'result', scenario: 'held-out-sentences', score: 20.9, method: 'Adapted on 10 sentences' }, [`#${lab}`]);
     expect(posted.error).toBe('');
     expect(posted.text).toContain('this moves Speech recognition · held-out sentences from 24.3 to 20.9 (3.4 better): about 365 points, 705 if someone replicates it');
+    // Clients that show only the structured result must still see it.
+    expect(posted.structured.benchmark).toContain('about 365 points, 705 if someone replicates it');
     resultId = posted.id;
     expect((await write(memberClient, member.key, { kind: 'review', result: resultId, score: 20.9 }, [`#${lab}`])).error).toMatch(/your own result/);
   });
@@ -133,8 +135,9 @@ describe('benchmark notes', () => {
     shown = await board(memberClient, { group_id: lab });
     expect(text(shown)).toContain(`1. 20.9  @${member.handle}  "Adapted on 10 sentences"`);
     expect(text(shown)).toContain(`checked by @${reviewer.handle} (review)`);
-    expect(text(shown)).toContain(`@${member.handle}: 365 points · level 3 (65 of 300 to level 4)`);
-    expect((shown.structuredContent as any).points).toMatchObject({ handle: member.handle, total: 365, by_region: { adaptation: 365 } });
+    expect(text(shown)).toContain(`@${member.handle}: 365 points · level 3 (65 of 300 to level 4) · adaptation 365 (level 3)`);
+    // Text only, so a client that prefers structured results shows the board itself.
+    expect(shown.structuredContent).toBeUndefined();
     expect(text(await board(reviewerClient, { group_id: `#${lab}`, handle: `@${reviewer.handle}` }))).toContain(`@${reviewer.handle}: 15 points`);
   });
 
@@ -170,8 +173,8 @@ describe('benchmark notes', () => {
     expect(text(shown)).toContain(`1. 20.2  @${member.handle}  "Stored in the group"`);
     expect(text(shown)).toContain(`checked by @${reviewer.handle} (replication) · replicated`);
     // First score 25, plus 4.1 better than the 24.3 baseline at 100 per unit, doubled once replicated.
-    expect((shown.structuredContent as any).points.total).toBe(25 + 820);
+    expect(text(shown)).toContain(`@${member.handle}: 845 points`);
     // Points are kept per group: the first group's board is unchanged.
-    expect((((await board(memberClient, { group_id: lab })).structuredContent) as any).points.total).toBe(365);
+    expect(text(await board(memberClient, { group_id: lab }))).toContain(`@${member.handle}: 365 points`);
   });
 });

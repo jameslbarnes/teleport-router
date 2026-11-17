@@ -45,7 +45,7 @@ import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { normalizeSkillNote, currentSkills, isSkillNote, skillKey, renderSkillIndex, renderSkillBody, renderSkillHint, recordSkillUse, isMuted, oneLine,
   type SkillNote, type SkillUse, type SkillIndexItem } from './skill-notes.js';
-import { normalizeBenchmarkNote, computeBoard, renderBoard, benchmarkWriteProblem, previewBenchmarkNote, levelFor,
+import { normalizeBenchmarkNote, computeBoard, renderBoard, benchmarkWriteProblem, previewBenchmarkNote,
   type BenchmarkNote } from './benchmarks.js';
 import { normalizeTerritoryNote, normalizePlaceRef, normalizeMark, computeMaps, renderMaps, placeWriteProblem,
   type TerritoryNote, type MarkKind, type MapView } from './research-map.js';
@@ -2996,18 +2996,24 @@ async function createMCPServer(secretKey: string) {
         responseText += `\n\nVisibility: ${visibility}`;
       }
 
+      // Some clients show only the structured result, so these lines go in both.
+      let benchmarkLine: string | undefined;
+      let mapLine: string | undefined;
       if (benchmarkNote && benchmarkGroup && currentHandle) {
-        responseText += `\n\n${previewBenchmarkNote(benchmarkNote, currentHandle, benchmarkGroup.entries, benchmarkGroup.admins)}`;
+        benchmarkLine = previewBenchmarkNote(benchmarkNote, currentHandle, benchmarkGroup.entries, benchmarkGroup.admins);
+        responseText += `\n\n${benchmarkLine}`;
       }
       if (territoryNote) {
         const statused = territoryNote.places.filter(p => p.status).length;
-        responseText += `\n\nMap: "${territoryNote.title}" (${territoryNote.name}), ${territoryNote.places.length} places, ${statused} with a status. Members can attach notes to its places once it publishes.`;
+        mapLine = `Map: "${territoryNote.title}" (${territoryNote.name}), ${territoryNote.places.length} places, ${statused} with a status. Members can attach notes to its places once it publishes.`;
+        responseText += `\n\n${mapLine}`;
       }
       if (placeRef && benchmarkGroup) {
         const [mapName, placeId] = placeRef.split('/');
         const view = computeMaps(benchmarkGroup.entries, benchmarkGroup.admins).find(v => v.name === mapName);
         const label = view?.places.find(p => p.id === placeId)?.label ?? placeId;
-        responseText += `\n\nOn the map: ${markKind ? `${markKind.replace('-', ' ')} at ` : ''}"${label}" (${placeRef}), shown there once it publishes.`;
+        mapLine = `On the map: ${markKind ? `${markKind.replace('-', ' ')} at ` : ''}"${label}" (${placeRef}), shown there once it publishes.`;
+        responseText += `\n\n${mapLine}`;
       }
 
       const { queryUsed, results: relatedResults } = await buildRelatedResults({
@@ -3022,7 +3028,7 @@ async function createMCPServer(secretKey: string) {
       })}`;
 
       return {
-        structuredContent: { receipt },
+        structuredContent: { receipt, ...(benchmarkLine ? { benchmark: benchmarkLine } : {}), ...(mapLine ? { map: mapLine } : {}) },
         content: [{
           type: 'text' as const,
           text: responseText,
@@ -3117,10 +3123,8 @@ async function createMCPServer(secretKey: string) {
       try { place = normalizePlaceRef(a.place); } catch (err) { return say((err as Error).message, true); }
       const loaded = await groupMapData(typeof a.group_id === 'string' ? a.group_id : '', viewer.handle);
       if ('error' in loaded) return say(loaded.error, true);
-      return {
-        content: [{ type: 'text' as const, text: renderMaps(loaded.maps, { group: loaded.groupId, place }) }],
-        structuredContent: { group: loaded.groupId, maps: loaded.maps },
-      };
+      // Text only: clients that prefer a structured result would show it instead of this text.
+      return { content: [{ type: 'text' as const, text: renderMaps(loaded.maps, { group: loaded.groupId, place }) }] };
     }
 
     if (name === 'router_benchmarks') {
@@ -3140,19 +3144,8 @@ async function createMCPServer(secretKey: string) {
       const board = computeBoard(entries, admins);
       const scenario = typeof a.scenario === 'string' && a.scenario.trim() ? a.scenario.trim().toLowerCase() : undefined;
       const handle = typeof a.handle === 'string' && a.handle.trim() ? a.handle.trim().toLowerCase().replace(/^@/, '') : undefined;
-      const mine = board.standings.get(viewer.handle);
-      return {
-        content: [{ type: 'text' as const, text: renderBoard(board, { group: groupId, viewer: viewer.handle, scenario, handle }) }],
-        structuredContent: {
-          group: groupId,
-          scenarios: board.scenarios.map(s => ({
-            name: s.fields.name, title: s.fields.title, region: s.fields.region, better: s.fields.better,
-            best: s.best ? { score: s.best.score, handle: s.best.handle, entry_id: s.best.id, replicated: s.best.replicated } : null,
-            published_score: s.fields.publishedScore ?? null, baseline: s.fields.baseline ?? null,
-          })),
-          points: { handle: viewer.handle, total: mine?.total ?? 0, level: levelFor(mine?.total ?? 0), by_region: mine?.byRegion ?? {} },
-        },
-      };
+      // Text only: clients that prefer a structured result would show it instead of the board.
+      return { content: [{ type: 'text' as const, text: renderBoard(board, { group: groupId, viewer: viewer.handle, scenario, handle }) }] };
     }
 
     if (name === 'router_use_skill') {
