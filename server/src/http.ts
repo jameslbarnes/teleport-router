@@ -45,6 +45,8 @@ import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { normalizeSkillNote, currentSkills, isSkillNote, skillKey, renderSkillIndex, renderSkillBody, renderSkillHint, recordSkillUse, isMuted, oneLine,
   type SkillNote, type SkillUse, type SkillIndexItem } from './skill-notes.js';
+import { normalizeBenchmarkNote, computeBoard, renderBoard, benchmarkWriteProblem, previewBenchmarkNote, levelFor,
+  type BenchmarkNote } from './benchmarks.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -312,6 +314,33 @@ export const SYSTEM_SKILLS: Skill[] = [
           },
           required: ['name', 'when_to_use'],
         },
+        benchmark: {
+          type: 'object',
+          description: 'Only for a benchmark note in a private group, addressed to that group alone (see router_benchmarks). kind "scenario": a group admin defines what is measured. "result": a score against a scenario. "review": you re-scored someone else’s saved outputs. "replication": you re-ran their method. Describe the work in `entry` as usual.',
+          properties: {
+            kind: { type: 'string', enum: ['scenario', 'result', 'review', 'replication'] },
+            scenario: { type: 'string', description: 'For a scenario, its stable name; for a result, which scenario. Lowercase with hyphens, e.g. "held-out-sentences".' },
+            score: { type: 'number', description: 'For a result: the score. For a review or replication: the score you got.' },
+            method: { type: 'string', description: 'For a result: one line on what was done.' },
+            run: { type: 'string', description: 'For a result: one line on how to re-run it (command, model, code version).' },
+            outputs_sha256: { type: 'string', description: 'For a result or review: SHA-256 of the saved outputs that were scored.' },
+            revises: { type: 'string', description: 'For a result: ID of your own earlier result on the same scenario that this corrects or replaces.' },
+            builds_on: { type: 'string', description: 'For a result: ID of someone else’s result whose method this extends.' },
+            result: { type: 'string', description: 'For a review or replication: the result note’s ID.' },
+            title: { type: 'string', description: 'For a scenario: one line people read.' },
+            region: { type: 'string', description: 'For a scenario: the part of the field, lowercase with hyphens. Levels are kept per region.' },
+            metric: { type: 'string', description: 'For a scenario: what is measured, with units.' },
+            better: { type: 'string', enum: ['lower', 'higher'], description: 'For a scenario: which way is better.' },
+            points_per_unit: { type: 'number', description: 'For a scenario: points per unit gained. Default 100.' },
+            tolerance: { type: 'number', description: 'For a scenario: how far a check may differ and still confirm. Default 0.01.' },
+            baseline: { type: 'number', description: 'For a scenario: the score to beat before anyone posts.' },
+            published_score: { type: 'number', description: 'For a scenario: the best published score on a comparable setup. Leave it out when none is comparable.' },
+            published_source: { type: 'string', description: 'For a scenario with published_score: where it was published.' },
+            published_date: { type: 'string', description: 'For a scenario: YYYY-MM-DD of that publication.' },
+            how_to_score: { type: 'string', description: 'For a scenario: one line on the data, split and scoring, so others can review.' },
+          },
+          required: ['kind'],
+        },
         search_keywords: {
           type: 'array',
           items: { type: 'string' },
@@ -478,6 +507,23 @@ export const SYSTEM_SKILLS: Skill[] = [
         author: { type: 'string', description: 'Optional. The author’s handle, when two people use the same name, or to mute everything by one author.' },
         outcome: { type: 'string', enum: ['helped', 'did_not_help'], description: 'For report.' },
       },
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_benchmarks',
+    name: 'router_benchmarks',
+    description: 'Leaderboards, points and levels for benchmark scenarios in a private group, worked out from the group’s notes. Benchmark notes are written with router_write_entry and its `benchmark` field. Points come only from work someone else has checked: a new best counts once another member reviews it (re-scores its saved outputs) or replicates it (re-runs the method). Reviewing, replicating and revising earn points too. Use it when the person asks about a benchmark or their progress, and show them what it returns.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        group_id: { type: 'string', description: 'The private group, for example "lab-notes".' },
+        scenario: { type: 'string', description: 'Optional. One scenario’s name, for its full board.' },
+        handle: { type: 'string', description: 'Optional. A member’s handle, for their points.' },
+      },
+      required: ['group_id'],
     },
     createdAt: 0,
   },
@@ -1049,6 +1095,7 @@ export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> =
   router_search_matrix: ['Search Matrix rooms', 'read'],
   router_get_entry: ['Read a note', 'read'],
   router_use_skill: ['Read, rate, mute or turn on shared skills', 'write'],
+  router_benchmarks: ['Read benchmark leaderboards and points', 'read'],
   router_delete_entry: ['Delete a note', 'destructive'],
   router_label_entry: ['Label a note', 'write'],
   router_settings: ['Read or change settings', 'write'],
@@ -2646,6 +2693,12 @@ async function createMCPServer(secretKey: string) {
       let skillNote: SkillNote | undefined;
       try { skillNote = normalizeSkillNote((args as { skill?: unknown })?.skill); }
       catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
+      let benchmarkNote: BenchmarkNote | undefined;
+      try { benchmarkNote = normalizeBenchmarkNote((args as { benchmark?: unknown })?.benchmark); }
+      catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
+      if (benchmarkNote && skillNote) {
+        return { content: [{ type: 'text' as const, text: 'A note is a skill or a benchmark note, not both.' }], isError: true };
+      }
       const rawSearchKeywords = (args as { search_keywords?: string[] })?.search_keywords;
       // Addressing parameters
       let toAddresses = (args as { to?: string[] })?.to;
@@ -2700,6 +2753,24 @@ async function createMCPServer(secretKey: string) {
         }
       }
 
+      // A benchmark note goes to one private group, where the leaderboard is worked out from members' notes.
+      let benchmarkGroup: { admins: string[]; entries: JournalEntry[] } | undefined;
+      if (benchmarkNote) {
+        const fail = (text: string) => ({ content: [{ type: 'text' as const, text }], isError: true });
+        if (!currentHandle) return fail(`Benchmark notes are shared under a handle. The person can choose one at ${BASE_URL}/join.`);
+        const destinations = toAddresses || [];
+        const groupId = destinations.length === 1 && destinations[0].startsWith('#') ? destinations[0].slice(1).toLowerCase() : '';
+        const group = groupId && isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+        if (!group || !isInviteOnlyGroup(group) || !group.subscribers.some(s => s.handle === currentHandle)) {
+          return fail('A benchmark note goes to exactly one private group the person belongs to, and nowhere else: set `to` to ["#group"].');
+        }
+        const admins = group.subscribers.filter(s => s.role === 'admin').map(s => s.handle);
+        const entries = (await storage.getChannelEntries(groupId, 500)).filter(e => !storage.isPending(e.id));
+        const problem = benchmarkWriteProblem(benchmarkNote, currentHandle, entries, admins);
+        if (problem) return fail(problem);
+        benchmarkGroup = { admins, entries };
+      }
+
       // Determine aiOnly: explicit ai_only > legacy human_visible > legacy visibility > user default
       let aiOnly: boolean;
       if (aiOnlyOverride !== undefined) {
@@ -2733,6 +2804,7 @@ async function createMCPServer(secretKey: string) {
         repo,
         tags,
         skill: skillNote,
+        benchmark: benchmarkNote,
         // Addressing fields
         to: toAddresses && toAddresses.length > 0 ? toAddresses : undefined,
         inReplyTo: inReplyTo || undefined,
@@ -2834,6 +2906,10 @@ async function createMCPServer(secretKey: string) {
         responseText += `\n\nVisibility: ${visibility}`;
       }
 
+      if (benchmarkNote && benchmarkGroup && currentHandle) {
+        responseText += `\n\n${previewBenchmarkNote(benchmarkNote, currentHandle, benchmarkGroup.entries, benchmarkGroup.admins)}`;
+      }
+
       const { queryUsed, results: relatedResults } = await buildRelatedResults({
         entryText: entry.trim(),
         searchKeywords: searchKeywords,
@@ -2932,6 +3008,38 @@ async function createMCPServer(secretKey: string) {
     }
 
     // Handle get entry details tool
+    if (name === 'router_benchmarks') {
+      const a = (args || {}) as { group_id?: string; scenario?: string; handle?: string };
+      const say = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError: true } : {}) });
+      const viewer = await storage.getUserByKeyHash(keyHash);
+      if (!viewer?.handle) return say(`Benchmarks are kept in private groups, which need a handle. The person can choose one at ${BASE_URL}/join.`, true);
+      const groupId = (typeof a.group_id === 'string' ? a.group_id : '').trim().toLowerCase().replace(/^#/, '');
+      const group = isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+      if (!group || !group.subscribers.some(s => s.handle === viewer.handle)) return say('The person must be a current member of that group.', true);
+      if (!isInviteOnlyGroup(group)) return say(`#${groupId} is an open group, which anyone can join. Benchmarks are kept only in private groups.`, true);
+      const entries = (await storage.getChannelEntries(groupId, 500)).filter(e => !storage.isPending(e.id));
+      // Re-read membership after storage access, which can await a remote author store.
+      const current = await storage.getChannel(groupId);
+      if (!current?.subscribers.some(s => s.handle === viewer.handle)) return say('The person’s group membership changed. Nothing was returned.', true);
+      const admins = current.subscribers.filter(s => s.role === 'admin').map(s => s.handle);
+      const board = computeBoard(entries, admins);
+      const scenario = typeof a.scenario === 'string' && a.scenario.trim() ? a.scenario.trim().toLowerCase() : undefined;
+      const handle = typeof a.handle === 'string' && a.handle.trim() ? a.handle.trim().toLowerCase().replace(/^@/, '') : undefined;
+      const mine = board.standings.get(viewer.handle);
+      return {
+        content: [{ type: 'text' as const, text: renderBoard(board, { group: groupId, viewer: viewer.handle, scenario, handle }) }],
+        structuredContent: {
+          group: groupId,
+          scenarios: board.scenarios.map(s => ({
+            name: s.fields.name, title: s.fields.title, region: s.fields.region, better: s.fields.better,
+            best: s.best ? { score: s.best.score, handle: s.best.handle, entry_id: s.best.id, replicated: s.best.replicated } : null,
+            published_score: s.fields.publishedScore ?? null, baseline: s.fields.baseline ?? null,
+          })),
+          points: { handle: viewer.handle, total: mine?.total ?? 0, level: levelFor(mine?.total ?? 0), by_region: mine?.byRegion ?? {} },
+        },
+      };
+    }
+
     if (name === 'router_use_skill') {
       const a = (args || {}) as { action?: string; name?: string; author?: string; outcome?: string; group?: string; entry_id?: string };
       const action = a.action || 'read';

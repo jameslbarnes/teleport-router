@@ -33,6 +33,8 @@ export interface JournalEntry {
   tags?: string[];    // Topic tags, lowercase slugs. Shown with the note.
   /** Present when the note is a skill: know-how for other agents (see skill-notes.ts). Not a posting tool. */
   skill?: import('./skill-notes.js').SkillNote;
+  /** Present when the note is a benchmark scenario, result, review or replication (see benchmarks.ts). */
+  benchmark?: import('./benchmarks.js').BenchmarkNote;
 
   // Unified addressing system
   to?: string[];             // Destinations: @handles, #channels, emails, webhook URLs. Empty = public.
@@ -961,6 +963,7 @@ export class FirestoreStorage implements Storage {
     if (newEntry.repo) docData.repo = newEntry.repo;
     if (newEntry.tags && newEntry.tags.length > 0) docData.tags = newEntry.tags;
     if (newEntry.skill) docData.skill = newEntry.skill;
+    if (newEntry.benchmark) docData.benchmark = newEntry.benchmark;
 
     // Unified addressing fields
     if (newEntry.to && newEntry.to.length > 0) {
