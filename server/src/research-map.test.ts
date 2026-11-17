@@ -34,6 +34,11 @@ describe('reading a map', () => {
     expect(parsed.places[4]).toEqual({ id: 'few-examples', label: 'Few-example adaptation', parent: 'adaptation', status: 'emerging', tags: ['dysarthria'] });
   });
 
+  it('reads a map sent as JSON text by a client whose tool list predates the field', () => {
+    expect(normalizeTerritoryNote(JSON.stringify(MAP))!.places).toHaveLength(6);
+    expect(() => normalizeTerritoryNote('{"name":')).toThrow(/looks like JSON but could not be read/);
+  });
+
   it('refuses malformed maps with a reason', () => {
     expect(() => normalizeTerritoryNote({ ...MAP, name: 'X' })).toThrow(/territory\.name/);
     expect(() => normalizeTerritoryNote({ ...MAP, title: '' })).toThrow(/title/);

@@ -91,7 +91,8 @@ describe('research maps', () => {
     expect((await write(memberClient, member.key, 'Map', { territory: MAP }, [`#${lab}`])).error).toMatch(/Only an admin/);
     expect((await write(adminClient, admin.key, 'Map', { territory: MAP }, [`#${lab}`, `@${member.handle}`])).error).toMatch(/exactly one private group/);
     expect((await write(adminClient, admin.key, 'Map', { territory: MAP, place: 'field-map/listening' }, [`#${lab}`])).error).toMatch(/only the map/);
-    const posted = await write(adminClient, admin.key, 'The field as of today.', { territory: MAP }, [`#${lab}`]);
+    // Sent as JSON text, the way a client with a tool list from before the deploy sends it.
+    const posted = await write(adminClient, admin.key, 'The field as of today.', { territory: JSON.stringify(MAP) }, [`#${lab}`]);
     expect(posted.error).toBe('');
     expect(posted.text).toContain('Map: "A synthetic field" (field-map), 3 places, 2 with a status.');
     // Clients that show only the structured result must still see it.
