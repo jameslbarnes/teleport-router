@@ -150,4 +150,28 @@ describe('benchmark notes', () => {
     expect(text(await board(outsiderClient, { group_id: lab }))).toMatch(/current member/);
     expect(text(await board(memberClient, { group_id: open }))).toMatch(/open group/);
   });
+
+  it('works the same in a group whose notes live in the group’s own storage', async () => {
+    const vault = `vault-${tag}`;
+    const created = await api('/api/channels', { secret_key: admin.key, id: vault, name: 'Own storage', storage: 'tinycloud' });
+    expect(created.ok).toBe(true);
+    expect((await created.json() as any).store?.kind).toBe('tinycloud');
+    const { token } = await (await api(`/api/channels/${vault}/invite`, { secret_key: admin.key })).json() as { token: string };
+    for (const user of [member, reviewer]) {
+      expect((await api(`/api/channels/${vault}/join`, { secret_key: user.key, invite_token: token })).ok).toBe(true);
+    }
+
+    expect((await write(adminClient, admin.key, SCENARIO, [`#${vault}`])).error).toBe('');
+    const posted = await write(memberClient, member.key, { kind: 'result', scenario: 'held-out-sentences', score: 20.2, method: 'Stored in the group' }, [`#${vault}`]);
+    expect(posted.error).toBe('');
+    expect((await write(reviewerClient, reviewer.key, { kind: 'replication', result: posted.id, score: 20.1 }, [`#${vault}`])).error).toBe('');
+
+    const shown = await board(memberClient, { group_id: vault });
+    expect(text(shown)).toContain(`1. 20.2  @${member.handle}  "Stored in the group"`);
+    expect(text(shown)).toContain(`checked by @${reviewer.handle} (replication) · replicated`);
+    // First score 25, plus 4.1 better than the 24.3 baseline at 100 per unit, doubled once replicated.
+    expect((shown.structuredContent as any).points.total).toBe(25 + 820);
+    // Points are kept per group: the first group's board is unchanged.
+    expect((((await board(memberClient, { group_id: lab })).structuredContent) as any).points.total).toBe(365);
+  });
 });
