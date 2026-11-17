@@ -168,6 +168,40 @@ describe('working out the board', () => {
   });
 });
 
+describe('guards against rewarding noise', () => {
+  it('does not move the best for a gain within the scenario\'s noise', () => {
+    const s = note('james', { ...SCENARIO, min_gain: 1 });
+    const r1 = note('james', result(20.9));
+    const small = note('bob', result(20.2));
+    const real = note('ana', result(19.8));
+    const board = computeBoard([s, r1, small, real,
+      note('ref', review(r1.id, 20.9)), note('ref', review(small.id, 20.2)), note('ref', review(real.id, 19.8))], ADMINS);
+    expect(points(board, 'bob')).toBe(0);
+    // Measured from 20.9, the best that moved, not from 20.2.
+    expect(board.results.get(real.id)).toMatchObject({ previousBest: 20.9, points: 110 });
+    expect(previewBenchmarkNote(normalizeBenchmarkNote(result(20.5))!, 'james', [s, r1, note('ref', review(r1.id, 20.9))], ADMINS))
+      .toMatch(/within this scenario's noise \(the smallest gain that counts is 1\)\. It goes on the board but does not move the best\./);
+    expect(renderBoard(board, { group: 'speech', viewer: 'james' })).toContain('smallest gain that counts 1');
+  });
+
+  it('compares only results scored on the scenario\'s fixed test set', () => {
+    const fixed = 'a'.repeat(64);
+    const s = note('james', { ...SCENARIO, test_set_sha256: fixed });
+    const entries = [s];
+    expect(benchmarkWriteProblem(normalizeBenchmarkNote(result(20))!, 'bob', entries, ADMINS)).toMatch(/fixed test set \(SHA-256 aaaaaaaaaaaa…\)/);
+    expect(benchmarkWriteProblem(normalizeBenchmarkNote(result(20, { test_set_sha256: 'b'.repeat(64) }))!, 'bob', entries, ADMINS)).toMatch(/fixed test set/);
+    expect(benchmarkWriteProblem(normalizeBenchmarkNote(result(20, { test_set_sha256: fixed }))!, 'bob', entries, ADMINS)).toBeUndefined();
+
+    const other = note('bob', result(18, { test_set_sha256: 'b'.repeat(64) }));
+    const same = note('ana', result(20.9, { test_set_sha256: fixed }));
+    const board = computeBoard([s, other, same, note('ref', review(other.id, 18)), note('ref', review(same.id, 20.9))], ADMINS);
+    expect(board.results.has(other.id)).toBe(false);
+    expect(board.scenarios[0].best!.id).toBe(same.id);
+    expect(renderBoard(board, { group: 'speech', viewer: 'ana' })).toContain('fixed test set aaaaaaaaaaaa');
+    expect(() => normalizeBenchmarkNote({ ...SCENARIO, test_set_sha256: 'short' })).toThrow(/test_set_sha256/);
+  });
+});
+
 describe('levels', () => {
   it('takes 100 more points for each level than the last', () => {
     expect(levelFor(0)).toEqual({ level: 1, into: 0, needed: 100 });

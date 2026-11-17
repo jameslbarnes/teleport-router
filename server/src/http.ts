@@ -338,6 +338,8 @@ export const SYSTEM_SKILLS: Skill[] = [
             published_source: { type: 'string', description: 'For a scenario with published_score: where it was published.' },
             published_date: { type: 'string', description: 'For a scenario: YYYY-MM-DD of that publication.' },
             how_to_score: { type: 'string', description: 'For a scenario: one line on the data, split and scoring, so others can review.' },
+            min_gain: { type: 'number', description: 'For a scenario: the smallest gain that moves the best, set from the measured noise. Smaller gains go on the board without moving it.' },
+            test_set_sha256: { type: 'string', description: 'For a scenario: SHA-256 of the file that fixes its test set. For a result: the test set you scored; it must match the scenario’s.' },
           },
           required: ['kind'],
         },

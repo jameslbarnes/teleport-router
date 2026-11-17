@@ -11,6 +11,11 @@
  * reviewed or replicated it. Reviewing, replicating, revising and being built on earn points too.
  * A review re-scores saved outputs, so it proves the arithmetic, not that nobody tuned on the test
  * data. That is why a replication doubles a result's points.
+ *
+ * Two guards against rewarding noise on a small, fixed test set: a scenario can name the exact test
+ * set by its SHA-256, so every result is scored on the same items, and it can set the smallest gain
+ * that counts. A result that beats the best by less than that goes on the board but does not move
+ * the best (the rule of the Ladder leaderboard, Blum and Hardt 2015).
  */
 import type { JournalEntry } from './storage.js';
 import { oneLine } from './skill-notes.js';
@@ -55,6 +60,10 @@ export interface ScenarioFields {
   publishedDate?: string;
   /** One line on the data, the split and how to score, so a reviewer can re-score. */
   howToScore?: string;
+  /** The smallest gain that moves the best, in the metric's units: set it from the measured noise. */
+  minGain?: number;
+  /** SHA-256 of the file that fixes the test set (and anything else held fixed). Results must name the same. */
+  testSetSha256?: string;
 }
 
 export interface ResultFields {
@@ -66,6 +75,8 @@ export interface ResultFields {
   run?: string;
   /** SHA-256 of the saved outputs a reviewer re-scores. */
   outputsSha256?: string;
+  /** SHA-256 of the test set file the result was scored on. */
+  testSetSha256?: string;
   /** The author's own earlier result on the same scenario that this one corrects or replaces. */
   revises?: string;
   /** Someone else's result on the same scenario whose method this one extends. */
@@ -124,10 +135,10 @@ function noteId(value: unknown, field: string): string | undefined {
   return text;
 }
 
-function sha(value: unknown): string | undefined {
+function sha(value: unknown, field = 'outputs_sha256'): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (!SHA256.test(text)) throw new Error('benchmark.outputs_sha256 must be a SHA-256 in hex: 64 characters.');
+  if (!SHA256.test(text)) throw new Error(`benchmark.${field} must be a SHA-256 in hex: 64 characters.`);
   return text;
 }
 
@@ -171,6 +182,10 @@ export function normalizeBenchmarkNote(input: unknown): BenchmarkNote | undefine
     }
     const how = line(pick('how_to_score', 'howToScore'), 'how_to_score', false);
     if (how) note.howToScore = how;
+    const minGain = num(pick('min_gain', 'minGain'), 'min_gain', false, n => n >= 0, 'zero or more');
+    if (minGain !== undefined) note.minGain = minGain;
+    const testSet = sha(pick('test_set_sha256', 'testSetSha256'), 'test_set_sha256');
+    if (testSet) note.testSetSha256 = testSet;
     return note;
   }
 
@@ -185,6 +200,8 @@ export function normalizeBenchmarkNote(input: unknown): BenchmarkNote | undefine
     if (run) note.run = run;
     const outputs = sha(pick('outputs_sha256', 'outputsSha256'));
     if (outputs) note.outputsSha256 = outputs;
+    const testSet = sha(pick('test_set_sha256', 'testSetSha256'), 'test_set_sha256');
+    if (testSet) note.testSetSha256 = testSet;
     const revises = noteId(raw.revises, 'revises');
     if (revises) note.revises = revises;
     const buildsOn = noteId(pick('builds_on', 'buildsOn'), 'builds_on');
@@ -298,6 +315,9 @@ export function computeBoard(entries: JournalEntry[], admins: Iterable<string>):
   for (const entry of sorted) {
     const note = benchmarkOf(entry);
     if (note?.kind !== 'result' || !scenarios.has(note.scenario)) continue;
+    // A scenario with a fixed test set compares only results scored on that test set.
+    const fixed = scenarios.get(note.scenario)!.fields.testSetSha256;
+    if (fixed && note.testSetSha256 !== fixed) continue;
     results.set(entry.id, {
       id: entry.id, handle: entry.handle!, scenario: note.scenario, timestamp: entry.timestamp, score: note.score,
       method: note.method, run: note.run, outputsSha256: note.outputsSha256, revises: note.revises, buildsOn: note.buildsOn,
@@ -368,6 +388,8 @@ export function computeBoard(entries: JournalEntry[], admins: Iterable<string>):
       if (best === undefined) { best = result.score; continue; }
       if (!better(fields.better, result.score, best)) continue;
       const gain = Math.abs(result.score - best);
+      // Within the noise: on the board, but the best does not move.
+      if (gain <= (fields.minGain ?? 0) + EPS) continue;
       let points = gain * (fields.pointsPerUnit ?? POINTS.perUnitDefault);
       const beatsPublished = fields.publishedScore !== undefined && better(fields.better, result.score, fields.publishedScore);
       if (beatsPublished) points *= 2;
@@ -443,7 +465,12 @@ export function benchmarkWriteProblem(note: BenchmarkNote, author: string, group
     return admins.map(h => h.toLowerCase()).includes(author.toLowerCase()) ? undefined : 'Only an admin of the group can define a scenario.';
   }
   if (note.kind === 'result') {
-    if (!board.scenarios.some(s => s.fields.name === note.scenario)) return `No scenario "${note.scenario}" in this group yet. An admin defines one first; router_benchmarks lists them.`;
+    const scenario = board.scenarios.find(s => s.fields.name === note.scenario);
+    if (!scenario) return `No scenario "${note.scenario}" in this group yet. An admin defines one first; router_benchmarks lists them.`;
+    const fixed = scenario.fields.testSetSha256;
+    if (fixed && note.testSetSha256 !== fixed) {
+      return `This scenario is scored on a fixed test set (SHA-256 ${fixed.slice(0, 12)}…). Score on that test set and give its SHA-256 as benchmark.test_set_sha256.`;
+    }
     if (note.revises) {
       const old = board.results.get(note.revises);
       if (!old || old.handle !== author || old.scenario !== note.scenario) return 'benchmark.revises must be your own earlier result on the same scenario in this group.';
@@ -482,6 +509,10 @@ export function previewBenchmarkNote(note: BenchmarkNote, author: string, groupE
         + `It goes on the board${first ? `, and as the first checked score it would earn ${POINTS.firstScore} points` : ' but earns no points of its own'}.`;
     }
     const gain = Math.abs(note.score - reference);
+    if (gain <= (fields.minGain ?? 0) + EPS) {
+      return `Benchmark: this beats ${formatScore(reference)} on ${fields.title} by ${formatScore(gain)}, which is within this scenario's noise (the smallest gain that counts is ${formatScore(fields.minGain!)}). `
+        + `It goes on the board but does not move the best${first ? `; as the first checked score it would earn ${POINTS.firstScore} points` : ''}.`;
+    }
     let points = gain * (fields.pointsPerUnit ?? POINTS.perUnitDefault);
     const beatsPublished = fields.publishedScore !== undefined && better(fields.better, note.score, fields.publishedScore);
     if (beatsPublished) points *= 2;
@@ -531,6 +562,8 @@ export function renderBoard(board: Board, opts: { group: string; viewer: string;
     const facts = [f.metric, `${f.better} is better`];
     if (f.publishedScore !== undefined) facts.push(`best published ${formatScore(f.publishedScore)} (${f.publishedSource}${f.publishedDate ? `, ${f.publishedDate}` : ''})`);
     if (f.baseline !== undefined) facts.push(`baseline ${formatScore(f.baseline)}`);
+    if (f.minGain) facts.push(`smallest gain that counts ${formatScore(f.minGain)}`);
+    if (f.testSetSha256) facts.push(`fixed test set ${f.testSetSha256.slice(0, 12)}`);
     lines.push('', `${f.title} (${f.name}, region ${f.region})`, facts.join(' · '));
     if (f.howToScore) lines.push(`How to score: ${f.howToScore}`);
     const checked = scenario.results.filter(r => r.status === 'checked');
