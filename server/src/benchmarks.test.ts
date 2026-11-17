@@ -34,6 +34,12 @@ describe('reading benchmark notes', () => {
     expect(normalizeBenchmarkNote(undefined)).toBeUndefined();
   });
 
+  it('reads a note sent as JSON text by a client whose tool list predates the field', () => {
+    expect(normalizeBenchmarkNote(JSON.stringify(review('abc', 20.9)))).toEqual({ kind: 'review', result: 'abc', score: 20.9 });
+    expect(() => normalizeBenchmarkNote('{"kind": "review",')).toThrow(/looks like JSON but could not be read/);
+    expect(() => normalizeBenchmarkNote('a review')).toThrow(/must be an object/);
+  });
+
   it('refuses malformed notes with a reason', () => {
     expect(() => normalizeBenchmarkNote({ kind: 'quest' })).toThrow(/kind must be/);
     expect(() => normalizeBenchmarkNote({ ...SCENARIO, scenario: 'Not A Slug' })).toThrow(/benchmark\.scenario/);

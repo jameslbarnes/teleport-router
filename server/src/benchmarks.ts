@@ -143,11 +143,23 @@ function sha(value: unknown, field = 'outputs_sha256'): string | undefined {
 }
 
 /**
+ * A client whose tool list predates a field does not know it is an object, and sends it as JSON
+ * text. Read that text as the object it stands for; anything else is left for the caller to refuse.
+ */
+export function parseObjectText(input: unknown, field: string): unknown {
+  if (typeof input !== 'string') return input;
+  const text = input.trim();
+  if (!text.startsWith('{')) return input;
+  try { return JSON.parse(text); } catch { throw new Error(`${field} looks like JSON but could not be read; send it as an object.`); }
+}
+
+/**
  * Reads the `benchmark` argument of a write, or a stored record. Returns undefined when absent;
  * throws with a readable reason when malformed. Accepts snake_case (tool input) and camelCase (stored).
  */
 export function normalizeBenchmarkNote(input: unknown): BenchmarkNote | undefined {
   if (input === undefined || input === null) return undefined;
+  input = parseObjectText(input, 'benchmark');
   if (typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('benchmark must be an object whose kind is scenario, result, review or replication.');
   }

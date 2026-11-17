@@ -6,7 +6,8 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
 // A group admin posts a research map; members attach notes to its places; router_map and the
 // members-only API show the map with what is attached. Nobody outside the group sees any of it.
-const port = 29000 + Math.floor(Math.random() * 3000);
+// Windows reserves some ports above 29000; this range has none reserved and no other test uses it.
+const port = 12000 + Math.floor(Math.random() * 2500);
 const base = `http://127.0.0.1:${port}`;
 const tag = Date.now().toString(36).slice(-6);
 const admin = { key: generateSecretKey(), handle: `adm${tag}` };
@@ -46,10 +47,10 @@ async function write(client: Client, key: string, entry: string, fields: Record<
   const result = await client.callTool({ name: 'router_write_entry', arguments: {
     client: 'code', entry, to, search_keywords: [], sensitivity_check: 'Synthetic map test', posting_intent: 'user-requested', ...fields,
   } });
-  if (result.isError) return { error: text(result), id: '', text: '' };
+  if (result.isError) return { error: text(result), id: '', text: '', structured: {} as any };
   const receipt = (result.structuredContent as any).receipt;
   expect((await api(`/api/entries/${receipt.entry_id}/publish`, {}, key)).ok).toBe(true);
-  return { error: '', id: receipt.entry_id as string, text: text(result) };
+  return { error: '', id: receipt.entry_id as string, text: text(result), structured: result.structuredContent as any };
 }
 
 describe('research maps', () => {
@@ -90,9 +91,12 @@ describe('research maps', () => {
     expect((await write(memberClient, member.key, 'Map', { territory: MAP }, [`#${lab}`])).error).toMatch(/Only an admin/);
     expect((await write(adminClient, admin.key, 'Map', { territory: MAP }, [`#${lab}`, `@${member.handle}`])).error).toMatch(/exactly one private group/);
     expect((await write(adminClient, admin.key, 'Map', { territory: MAP, place: 'field-map/listening' }, [`#${lab}`])).error).toMatch(/only the map/);
-    const posted = await write(adminClient, admin.key, 'The field as of today.', { territory: MAP }, [`#${lab}`]);
+    // Sent as JSON text, the way a client with a tool list from before the deploy sends it.
+    const posted = await write(adminClient, admin.key, 'The field as of today.', { territory: JSON.stringify(MAP) }, [`#${lab}`]);
     expect(posted.error).toBe('');
     expect(posted.text).toContain('Map: "A synthetic field" (field-map), 3 places, 2 with a status.');
+    // Clients that show only the structured result must still see it.
+    expect(posted.structured.map).toContain('Map: "A synthetic field" (field-map), 3 places, 2 with a status.');
   });
 
   it('attaches notes to places that exist', async () => {
@@ -101,10 +105,13 @@ describe('research maps', () => {
     const attached = await write(memberClient, member.key, 'Training on its own output did nothing.', { place: 'field-map/few-examples', mark: 'failed-attempt' }, [`#${lab}`]);
     expect(attached.error).toBe('');
     expect(attached.text).toContain('On the map: failed attempt at "Few-example adaptation" (field-map/few-examples)');
+    expect(attached.structured.map).toContain('On the map: failed attempt at "Few-example adaptation"');
   });
 
   it('shows members the map through the tool and the API', async () => {
-    const overview = text(await memberClient.callTool({ name: 'router_map', arguments: { group_id: lab } }));
+    const overviewResult = await memberClient.callTool({ name: 'router_map', arguments: { group_id: lab } });
+    expect(overviewResult.structuredContent).toBeUndefined();
+    const overview = text(overviewResult);
     expect(overview).toContain('  Few-example adaptation [emerging] · 1 failed attempt  (field-map/few-examples)');
     expect(overview).toContain('  Hidden errors [open gap]  (field-map/hidden-errors)');
     const detail = text(await adminClient.callTool({ name: 'router_map', arguments: { group_id: `#${lab}`, place: 'field-map/few-examples' } }));

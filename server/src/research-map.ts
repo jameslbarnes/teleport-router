@@ -11,7 +11,7 @@
  */
 import type { JournalEntry } from './storage.js';
 import { oneLine } from './skill-notes.js';
-import { benchmarkOf, formatScore, type Board } from './benchmarks.js';
+import { benchmarkOf, formatScore, parseObjectText, type Board } from './benchmarks.js';
 
 export type PlaceStatus = 'established' | 'emerging' | 'open';
 export const PLACE_STATUSES: PlaceStatus[] = ['established', 'emerging', 'open'];
@@ -49,6 +49,7 @@ function isSlug(value: unknown, min = 2): value is string {
 /** Reads the `territory` argument of a write, or a stored record. Throws with a readable reason when malformed. */
 export function normalizeTerritoryNote(input: unknown): TerritoryNote | undefined {
   if (input === undefined || input === null) return undefined;
+  input = parseObjectText(input, 'territory');
   if (typeof input !== 'object' || Array.isArray(input)) throw new Error('territory must be an object with name, title and places.');
   const raw = input as Record<string, unknown>;
   const name = typeof raw.name === 'string' ? raw.name.trim().toLowerCase() : '';
