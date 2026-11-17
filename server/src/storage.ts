@@ -35,6 +35,12 @@ export interface JournalEntry {
   skill?: import('./skill-notes.js').SkillNote;
   /** Present when the note is a benchmark scenario, result, review or replication (see benchmarks.ts). */
   benchmark?: import('./benchmarks.js').BenchmarkNote;
+  /** Present when the note is a group's research map (see research-map.ts). */
+  territory?: import('./research-map.js').TerritoryNote;
+  /** "<map>/<place>": where on a group's map this note sits. */
+  place?: string;
+  /** What kind of mark the note makes at its place. */
+  mark?: import('./research-map.js').MarkKind;
 
   // Unified addressing system
   to?: string[];             // Destinations: @handles, #channels, emails, webhook URLs. Empty = public.
@@ -964,6 +970,9 @@ export class FirestoreStorage implements Storage {
     if (newEntry.tags && newEntry.tags.length > 0) docData.tags = newEntry.tags;
     if (newEntry.skill) docData.skill = newEntry.skill;
     if (newEntry.benchmark) docData.benchmark = newEntry.benchmark;
+    if (newEntry.territory) docData.territory = newEntry.territory;
+    if (newEntry.place) docData.place = newEntry.place;
+    if (newEntry.mark) docData.mark = newEntry.mark;
 
     // Unified addressing fields
     if (newEntry.to && newEntry.to.length > 0) {
