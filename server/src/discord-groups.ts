@@ -42,11 +42,16 @@ export const FEED_PER_RUN = 5, FEED_REMEMBER = 300;
 export const FEED_BACKFILL_MAX = 20;
 const FEED_BODY_MAX = 900; // a feed, not an archive: a long note links to its full text
 
-/** One group note as a feed message: who, when, a link, and the text or, for an AI-only note, its topics. */
-export function feedMessage(entry: JournalEntry, baseUrl: string): string {
-  const who = entry.handle ? '@' + entry.handle : entry.pseudonym || 'someone';
+/**
+ * One group note as a feed message: who, when, a link, and the text or, for an AI-only note, its topics.
+ * `authorDiscordId` is the author's own Discord account when they have connected it to this group: the
+ * message then tags them with a Discord mention beside their Router handle. The sender lets no mention notify.
+ */
+export function feedMessage(entry: JournalEntry, baseUrl: string, authorDiscordId?: string): string {
+  const tag = entry.handle && snowflake(authorDiscordId) ? ` (<@${authorDiscordId}>)` : '';
+  const who = entry.handle ? `**@${entry.handle}**${tag}` : `**${entry.pseudonym || 'someone'}**`;
   const url = `${baseUrl}/e/${encodeURIComponent(entry.id)}`;
-  const head = `**${who}** · <t:${Math.floor(entry.timestamp / 1000)}:f>${entry.inReplyTo ? ' · reply' : ''} · [open](<${url}>)`;
+  const head = `${who} · <t:${Math.floor(entry.timestamp / 1000)}:f>${entry.inReplyTo ? ' · reply' : ''} · [open](<${url}>)`;
   if (entry.humanVisible === false || entry.aiOnly || typeof entry.content !== 'string' || !entry.content.trim())
     return `${head}\n_posted about: ${(entry.topicHints?.length ? entry.topicHints.join(', ') : 'various topics').slice(0, 300)}_`;
   let body = entry.content.trim();
@@ -244,20 +249,21 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
   const conversationView = (entry: JournalEntry) => ({...view(entry), version: digest(JSON.stringify(view(entry)))});
 
   /**
-   * Why a group's notes may not be posted into a channel right now, or null when they may. The same test
-   * as shared replies, without a requesting person: the channel is hidden from newcomers, and everyone
-   * who can see it, other than the bot, is a current group member with a connected account.
+   * Whether a group's notes may be posted into a channel right now. The same test as shared replies,
+   * without a requesting person: the channel is hidden from newcomers, and everyone who can see it, other
+   * than the bot, is a current group member with a connected account. When they may, the answer carries
+   * the members' connected Discord accounts, so a post can tag its author; otherwise it says why not.
    */
-  async function feedBlocked(group: Channel, channelId: string): Promise<string | null> {
-    if (!audience || !send || !group.discord) return 'Router cannot reach Discord for this group.';
+  async function feedAudience(group: Channel, channelId: string): Promise<{blocked: string} | {linked: Map<string, string>}> {
+    if (!audience || !send || !group.discord) return {blocked: 'Router cannot reach Discord for this group.'};
     let viewers;
     try { viewers = await audience(group.discord.guildId, channelId); }
-    catch { return 'Router cannot check who can see this channel.'; }
-    if (viewers.open) return 'This channel is visible to everyone who joins the Discord server.';
+    catch { return {blocked: 'Router cannot check who can see this channel.'}; }
+    if (viewers.open) return {blocked: 'This channel is visible to everyone who joins the Discord server.'};
     const linked = await linkedMembers(group);
     if (viewers.viewerIds.some(id => id !== viewers.botId && !linked.has(id)))
-      return 'Someone who can see this channel has not linked their account and joined the Router group.';
-    return null;
+      return {blocked: 'Someone who can see this channel has not linked their account and joined the Router group.'};
+    return {linked};
   }
 
   /**
@@ -279,12 +285,14 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
       const current = await storage.getChannel(groupId);
       if (!current?.discord?.feed || !privateGroup(current) || !sameBinding(binding, current.discord)
         || current.discord.feed.channelId !== feed.channelId || !member(current, binding.botHandle)) break;
-      const paused = await feedBlocked(current, feed.channelId);
-      if (paused) return {groupId, posted, paused};
+      const check = await feedAudience(current, feed.channelId);
+      if ('blocked' in check) return {groupId, posted, paused: check.blocked};
       // Read again: the note may have been deleted or moved while Discord was answering.
       const entry = await published.getEntry(listed.id);
       if (!entry || !entry.to?.includes(`#${group.id}`)) continue;
-      await send!(feed.channelId, feedMessage(entry, baseUrl));
+      // Tag the author only while their Discord connection to this group is active.
+      const authorDiscordId = [...check.linked].find(([, owner]) => owner === entry.handle)?.[0];
+      await send!(feed.channelId, feedMessage(entry, baseUrl, authorDiscordId));
       await exclusive('links', async () => {
         const latest = await storage.getChannel(groupId), now_ = latest?.discord?.feed;
         if (!latest?.discord || !now_ || now_.channelId !== feed.channelId || now_.since !== feed.since) return;
@@ -381,8 +389,8 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
       if (body.channelId !== null) {
         if (!snowflake(body.channelId) || (requested.discord.scope !== 'guild' && body.channelId !== requested.discord.channelId))
           return fail(400, 'Choose one text channel covered by the existing Discord connection, or null to switch the feed off.');
-        const blocked = await feedBlocked(requested, body.channelId);
-        if (blocked) return fail(409, `The feed was not switched on. ${blocked}`);
+        const check = await feedAudience(requested, body.channelId);
+        if ('blocked' in check) return fail(409, `The feed was not switched on. ${check.blocked}`);
       }
       return exclusive('links', async () => {
         // Discord can take seconds. Read the group again before saving.

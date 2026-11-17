@@ -4,8 +4,8 @@ const snowflake = (v: unknown): v is string => typeof v === 'string' && /^\d{16,
 
 /**
  * https://docs.discord.com/developers/resources/message#create-message
- * Other people's text must not notify anyone or unfurl a link: no mentions are allowed and embeds are
- * suppressed (flag 4). Returns the new message's ID; anything else is a failure.
+ * Other people's text must not notify anyone or unfurl a link: no mention notifies anyone (a tag still
+ * shows as a name) and embeds are suppressed (flag 4). Returns the new message's ID; anything else is a failure.
  */
 export function discordSender(token: string | undefined, request: typeof fetch = fetch): DiscordSender {
   return async (channelId, content) => {

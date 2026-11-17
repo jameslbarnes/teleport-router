@@ -315,6 +315,8 @@ A feed channel shows each newly published public note within about a minute, wit
 
 A private group connected to a Discord server can have one channel that shows each new group note: the author, the time, a link, and the text. A long note is cut short with a link to the rest, and an AI-only note shows its topics only. A group admin switches it on for one text channel through the setup API, and can switch it off again.
 
+When the author has connected their Discord account to the group, the post tags that account beside their Router handle, so it shows their Discord name. The tag notifies nobody, the author included. An author who has not connected Discord, or whose connection has ended, is shown by Router handle only.
+
 Router posts these itself. Before every note it asks Discord who can see the channel, with the same test as for group notes in conversation: the channel is hidden from people who have just joined the server, and everyone who can see it, other than the bot, is a current group member with a connected account. If the test fails, nothing is posted and the notes wait; they go out when the channel is in order again. Switching the feed on is refused while the test fails, and the refusal says why.
 
 Notes that had already published when the feed was switched on are not posted, unless the admin asks for the newest few of them (`backfill`, up to 20). A note still waiting then is posted when it publishes. A note usually appears within seconds of publishing, and within a few minutes at most. A note written the usual way publishes after its wait, about an hour, so that is when it appears.

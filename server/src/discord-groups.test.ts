@@ -633,6 +633,24 @@ describe('A group feed channel',()=>{
     expect((await f.feed())[0].posted).toBe(1);
     expect(f.sendState.sent[0].content).toContain(waited.id);
   });
+  it('tags the author with their own Discord account while it is connected to the group, and not after',async()=>{
+    const f=await feedFixture();await f.on();
+    // Bob connects a Discord account that cannot see the feed channel, so the feed still passes its check.
+    const BOB='100000000000000004', bob=(await f.link('bob',BOB)).grant;
+    const bobNote=async(id:string,content:string)=>{const at=(await f.note('By Alice '+id) as any).timestamp;
+      await f.layer.storage.addEntry({id,pseudonym:'x',handle:'bob',content,client:'code',timestamp:at+1,to:['#test-group']} as JournalEntry);};
+    await bobNote('bob-1','By Bob while connected');
+    expect((await f.feed())[0].posted).toBe(2);
+    const heads=()=>f.sendState.sent.map(m=>m.content.split('\n')[0].split(' · ')[0]);
+    expect(heads()).toEqual([`**@alice** (<@${f.context.discordUserId}>)`,`**@bob** (<@${BOB}>)`]);
+    // Once Bob withdraws the connection, his notes name him by his Router handle only.
+    await f.operate(bob,{action:'unlink',discordUserId:BOB});
+    await bobNote('bob-2','By Bob after unlinking');
+    expect((await f.feed())[0].posted).toBe(2);
+    expect(heads().slice(2)).toEqual([`**@alice** (<@${f.context.discordUserId}>)`,'**@bob**']);
+    expect(f.sendState.sent[3].content).toContain('By Bob after unlinking');
+    expect(f.sendState.sent[3].content).not.toContain('<@');
+  });
   it('shortens a long note with a link to the rest, and shows only topics for an AI-only note',()=>{
     const base={id:'abc-1',pseudonym:'p',handle:'alice',client:'code',timestamp:1_700_000_000_000} as JournalEntry;
     const long=feedMessage({...base,content:'word '.repeat(400)},'https://router.example');
@@ -642,5 +660,15 @@ describe('A group feed channel',()=>{
     const hidden=feedMessage({...base,content:'Private detail',aiOnly:true,topicHints:['enclaves','latency']},'https://router.example');
     expect(hidden).toContain('_posted about: enclaves, latency_');expect(hidden).not.toContain('Private detail');
     expect(feedMessage({...base,content:'A reply',inReplyTo:'abc-0'},'https://router.example')).toContain(' · reply · ');
+  });
+  it('writes a tag only from a Discord account ID, and only beside a Router handle',()=>{
+    const base={id:'abc-1',pseudonym:'p',handle:'alice',client:'code',timestamp:1_700_000_000_000,content:'Text'} as JournalEntry;
+    expect(feedMessage(base,'https://router.example','100000000000000003').split('\n')[0])
+      .toBe('**@alice** (<@100000000000000003>) · <t:1700000000:f> · [open](<https://router.example/e/abc-1>)');
+    expect(feedMessage({...base,aiOnly:true,topicHints:['enclaves']},'https://router.example','100000000000000003'))
+      .toMatch(/^\*\*@alice\*\* \(<@100000000000000003>\) · /);
+    for (const bad of ['everyone','&100000000000000003','100000000000000003> @everyone','12345',''])
+      expect(feedMessage(base,'https://router.example',bad)).not.toContain('<@');
+    expect(feedMessage({...base,handle:undefined},'https://router.example','100000000000000003').split(' · ')[0]).toBe('**p**');
   });
 });
