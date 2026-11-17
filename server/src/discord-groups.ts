@@ -45,7 +45,7 @@ const FEED_BODY_MAX = 900; // a feed, not an archive: a long note links to its f
 /**
  * One group note as a feed message: who, when, a link, and the text or, for an AI-only note, its topics.
  * `authorDiscordId` is the author's own Discord account when they have connected it to this group: the
- * message then tags them with a Discord mention beside their Router handle. The sender lets no mention notify.
+ * message then tags them with a Discord mention beside their Router handle, and the feed notifies them.
  */
 export function feedMessage(entry: JournalEntry, baseUrl: string, authorDiscordId?: string): string {
   const tag = entry.handle && snowflake(authorDiscordId) ? ` (<@${authorDiscordId}>)` : '';
@@ -290,9 +290,10 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
       // Read again: the note may have been deleted or moved while Discord was answering.
       const entry = await published.getEntry(listed.id);
       if (!entry || !entry.to?.includes(`#${group.id}`)) continue;
-      // Tag the author only while their Discord connection to this group is active.
+      // Tag and notify the author only while their Discord connection to this group is active. Nobody
+      // else is notified: not @everyone, a role, or anyone the note's text tags.
       const authorDiscordId = [...check.linked].find(([, owner]) => owner === entry.handle)?.[0];
-      await send!(feed.channelId, feedMessage(entry, baseUrl, authorDiscordId));
+      await send!(feed.channelId, feedMessage(entry, baseUrl, authorDiscordId), authorDiscordId ? [authorDiscordId] : []);
       await exclusive('links', async () => {
         const latest = await storage.getChannel(groupId), now_ = latest?.discord?.feed;
         if (!latest?.discord || !now_ || now_.channelId !== feed.channelId || now_.since !== feed.since) return;

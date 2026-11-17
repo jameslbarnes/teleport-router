@@ -15,7 +15,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const audienceState = {botId:'100000000000000090',viewerIds:['100000000000000003','100000000000000090'], open:false, unavailable:false,
     beforeRead:async()=>{}};
   const chatState = {messages:[] as any[], reads:[] as string[], unavailable:false};
-  const sendState = {sent:[] as {channelId:string;content:string}[], failing:false};
+  const sendState = {sent:[] as {channelId:string;content:string;notify:string[]}[], failing:false};
   const layer = authorStorage(base, async b => {
     const check = () => {if (revoked.has(b.space)) throw new Error('revoked');};
     const records = data.get(b.space)!;
@@ -35,7 +35,7 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
     audience:async()=>{await audienceState.beforeRead();if(audienceState.unavailable)throw Error('unavailable');return {botId:audienceState.botId,open:audienceState.open,viewerIds:[...audienceState.viewerIds]};},
     history:async(_guild,channelId)=>{chatState.reads.push(channelId);if(chatState.unavailable)throw Error('unavailable');
       return {channelName:'general',messages:chatState.messages.filter(m=>m.channelId===channelId)};},
-    send:async(channelId,content)=>{if(sendState.failing)throw Error('Discord message not sent');sendState.sent.push({channelId,content});return String(200000000000000000n+BigInt(sendState.sent.length));}});
+    send:async(channelId,content,notify=[])=>{if(sendState.failing)throw Error('Discord message not sent');sendState.sent.push({channelId,content,notify});return String(200000000000000000n+BigInt(sendState.sent.length));}});
   const context = {guildId:'100000000000000001', channelId:'100000000000000002', discordUserId:'100000000000000003'};
   const call = (who: keyof typeof keys, path: string, body: Record<string,unknown>) => service.serve('/api/discord/'+path, `Bearer ${keys[who]}`, body) as Promise<any>;
   await call('alice','bind',{groupId:'test-group',botHandle:'router_bot',
@@ -633,21 +633,25 @@ describe('A group feed channel',()=>{
     expect((await f.feed())[0].posted).toBe(1);
     expect(f.sendState.sent[0].content).toContain(waited.id);
   });
-  it('tags the author with their own Discord account while it is connected to the group, and not after',async()=>{
+  it('tags and notifies the author with their own Discord account while it is connected to the group, and not after',async()=>{
     const f=await feedFixture();await f.on();
+    const ALICE=f.context.discordUserId;
     // Bob connects a Discord account that cannot see the feed channel, so the feed still passes its check.
     const BOB='100000000000000004', bob=(await f.link('bob',BOB)).grant;
     const bobNote=async(id:string,content:string)=>{const at=(await f.note('By Alice '+id) as any).timestamp;
       await f.layer.storage.addEntry({id,pseudonym:'x',handle:'bob',content,client:'code',timestamp:at+1,to:['#test-group']} as JournalEntry);};
-    await bobNote('bob-1','By Bob while connected');
+    // A note that tags someone else, or everyone, notifies only its author.
+    await bobNote('bob-1',`By Bob while connected, for <@${ALICE}> and @everyone`);
     expect((await f.feed())[0].posted).toBe(2);
     const heads=()=>f.sendState.sent.map(m=>m.content.split('\n')[0].split(' · ')[0]);
-    expect(heads()).toEqual([`**@alice** (<@${f.context.discordUserId}>)`,`**@bob** (<@${BOB}>)`]);
-    // Once Bob withdraws the connection, his notes name him by his Router handle only.
+    expect(heads()).toEqual([`**@alice** (<@${ALICE}>)`,`**@bob** (<@${BOB}>)`]);
+    expect(f.sendState.sent.map(m=>m.notify)).toEqual([[ALICE],[BOB]]);
+    // Once Bob withdraws the connection, his notes name him by his Router handle only and notify nobody.
     await f.operate(bob,{action:'unlink',discordUserId:BOB});
     await bobNote('bob-2','By Bob after unlinking');
     expect((await f.feed())[0].posted).toBe(2);
-    expect(heads().slice(2)).toEqual([`**@alice** (<@${f.context.discordUserId}>)`,'**@bob**']);
+    expect(heads().slice(2)).toEqual([`**@alice** (<@${ALICE}>)`,'**@bob**']);
+    expect(f.sendState.sent.slice(2).map(m=>m.notify)).toEqual([[ALICE],[]]);
     expect(f.sendState.sent[3].content).toContain('By Bob after unlinking');
     expect(f.sendState.sent[3].content).not.toContain('<@');
   });
