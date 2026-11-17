@@ -45,6 +45,10 @@ import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-
 import { normalizeRepo, normalizeTags, labelFilter, matchesLabels } from './note-labels.js';
 import { normalizeSkillNote, currentSkills, isSkillNote, skillKey, renderSkillIndex, renderSkillBody, renderSkillHint, recordSkillUse, isMuted, oneLine,
   type SkillNote, type SkillUse, type SkillIndexItem } from './skill-notes.js';
+import { normalizeBenchmarkNote, computeBoard, renderBoard, benchmarkWriteProblem, previewBenchmarkNote, levelFor,
+  type BenchmarkNote } from './benchmarks.js';
+import { normalizeTerritoryNote, normalizePlaceRef, normalizeMark, computeMaps, renderMaps, placeWriteProblem,
+  type TerritoryNote, type MarkKind, type MapView } from './research-map.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -312,6 +316,69 @@ export const SYSTEM_SKILLS: Skill[] = [
           },
           required: ['name', 'when_to_use'],
         },
+        benchmark: {
+          type: 'object',
+          description: 'Only for a benchmark note in a private group, addressed to that group alone (see router_benchmarks). kind "scenario": a group admin defines what is measured. "result": a score against a scenario. "review": you re-scored someone else’s saved outputs. "replication": you re-ran their method. Describe the work in `entry` as usual.',
+          properties: {
+            kind: { type: 'string', enum: ['scenario', 'result', 'review', 'replication'] },
+            scenario: { type: 'string', description: 'For a scenario, its stable name; for a result, which scenario. Lowercase with hyphens, e.g. "held-out-sentences".' },
+            score: { type: 'number', description: 'For a result: the score. For a review or replication: the score you got.' },
+            method: { type: 'string', description: 'For a result: one line on what was done.' },
+            run: { type: 'string', description: 'For a result: one line on how to re-run it (command, model, code version).' },
+            outputs_sha256: { type: 'string', description: 'For a result or review: SHA-256 of the saved outputs that were scored.' },
+            revises: { type: 'string', description: 'For a result: ID of your own earlier result on the same scenario that this corrects or replaces.' },
+            builds_on: { type: 'string', description: 'For a result: ID of someone else’s result whose method this extends.' },
+            result: { type: 'string', description: 'For a review or replication: the result note’s ID.' },
+            title: { type: 'string', description: 'For a scenario: one line people read.' },
+            region: { type: 'string', description: 'For a scenario: the part of the field, lowercase with hyphens. Levels are kept per region.' },
+            metric: { type: 'string', description: 'For a scenario: what is measured, with units.' },
+            better: { type: 'string', enum: ['lower', 'higher'], description: 'For a scenario: which way is better.' },
+            points_per_unit: { type: 'number', description: 'For a scenario: points per unit gained. Default 100.' },
+            tolerance: { type: 'number', description: 'For a scenario: how far a check may differ and still confirm. Default 0.01.' },
+            baseline: { type: 'number', description: 'For a scenario: the score to beat before anyone posts.' },
+            published_score: { type: 'number', description: 'For a scenario: the best published score on a comparable setup. Leave it out when none is comparable.' },
+            published_source: { type: 'string', description: 'For a scenario with published_score: where it was published.' },
+            published_date: { type: 'string', description: 'For a scenario: YYYY-MM-DD of that publication.' },
+            how_to_score: { type: 'string', description: 'For a scenario: one line on the data, split and scoring, so others can review.' },
+            min_gain: { type: 'number', description: 'For a scenario: the smallest gain that moves the best, set from the measured noise. Smaller gains go on the board without moving it.' },
+            test_set_sha256: { type: 'string', description: 'For a scenario: SHA-256 of the file that fixes its test set. For a result: the test set you scored; it must match the scenario’s.' },
+          },
+          required: ['kind'],
+        },
+        territory: {
+          type: 'object',
+          description: 'Only for a group admin posting a research map to one private group (see router_map): the places in a field, each established, emerging or open. A newer map with the same name replaces it.',
+          properties: {
+            name: { type: 'string', description: 'Stable name, lowercase with hyphens, e.g. "atypical-speech".' },
+            title: { type: 'string', description: 'One line people read.' },
+            places: {
+              type: 'array',
+              description: 'Each place, parents before their children.',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'Lowercase with hyphens, unique in the map.' },
+                  label: { type: 'string' },
+                  parent: { type: 'string', description: 'Optional. The id of an earlier place.' },
+                  status: { type: 'string', enum: ['established', 'emerging', 'open'] },
+                  note: { type: 'string', description: 'Optional. One or two lines.' },
+                  tags: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['id', 'label'],
+              },
+            },
+          },
+          required: ['name', 'title', 'places'],
+        },
+        place: {
+          type: 'string',
+          description: 'Optional. Where this note sits on a private group\u2019s research map, as "<map>/<place>" (router_map lists them). The note then goes to that group alone.',
+        },
+        mark: {
+          type: 'string',
+          enum: ['finding', 'failed-attempt', 'direction', 'question'],
+          description: 'Optional, with `place`: what the note marks there.',
+        },
         search_keywords: {
           type: 'array',
           items: { type: 'string' },
@@ -478,6 +545,39 @@ export const SYSTEM_SKILLS: Skill[] = [
         author: { type: 'string', description: 'Optional. The author’s handle, when two people use the same name, or to mute everything by one author.' },
         outcome: { type: 'string', enum: ['helped', 'did_not_help'], description: 'For report.' },
       },
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_benchmarks',
+    name: 'router_benchmarks',
+    description: 'Leaderboards, points and levels for benchmark scenarios in a private group, worked out from the group’s notes. Benchmark notes are written with router_write_entry and its `benchmark` field. Points come only from work someone else has checked: a new best counts once another member reviews it (re-scores its saved outputs) or replicates it (re-runs the method). Reviewing, replicating and revising earn points too. Use it when the person asks about a benchmark or their progress, and show them what it returns.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        group_id: { type: 'string', description: 'The private group, for example "lab-notes".' },
+        scenario: { type: 'string', description: 'Optional. One scenario’s name, for its full board.' },
+        handle: { type: 'string', description: 'Optional. A member’s handle, for their points.' },
+      },
+      required: ['group_id'],
+    },
+    createdAt: 0,
+  },
+  {
+    id: 'system_router_map',
+    name: 'router_map',
+    description: 'A private group’s research map: the places in a field, which are established, emerging or open, and the notes members attached to each, with benchmark boards where they sit. Look before starting work in an area, to see what others found, tried and left open; attach what you learn with router_write_entry and `place`.',
+    instructions: '',
+    handlerType: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        group_id: { type: 'string', description: 'The private group, for example "lab-notes".' },
+        place: { type: 'string', description: 'Optional. "<map>/<place>" for everything attached there.' },
+      },
+      required: ['group_id'],
     },
     createdAt: 0,
   },
@@ -1049,6 +1149,8 @@ export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> =
   router_search_matrix: ['Search Matrix rooms', 'read'],
   router_get_entry: ['Read a note', 'read'],
   router_use_skill: ['Read, rate, mute or turn on shared skills', 'write'],
+  router_benchmarks: ['Read benchmark leaderboards and points', 'read'],
+  router_map: ['Read a group research map', 'read'],
   router_delete_entry: ['Delete a note', 'destructive'],
   router_label_entry: ['Label a note', 'write'],
   router_settings: ['Read or change settings', 'write'],
@@ -1957,6 +2059,20 @@ function isInviteOnlyGroup(channel: Channel): boolean {
   return (channel.joinRule || (channel.visibility === 'private' ? 'invite' : 'open')) === 'invite';
 }
 
+/** A private group's research maps, worked out for one of its current members, or why not. */
+async function groupMapData(rawGroupId: string, handle: string): Promise<{ groupId: string; maps: MapView[] } | { error: string }> {
+  const groupId = rawGroupId.trim().toLowerCase().replace(/^#/, '');
+  const group = isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+  if (!group || !group.subscribers.some(s => s.handle === handle)) return { error: 'The person must be a current member of that group.' };
+  if (!isInviteOnlyGroup(group)) return { error: `#${groupId} is an open group, which anyone can join. Maps are kept only in private groups.` };
+  const entries = (await storage.getChannelEntries(groupId, 500)).filter(e => !storage.isPending(e.id));
+  // Re-read membership after storage access, which can await a remote author store.
+  const current = await storage.getChannel(groupId);
+  if (!current?.subscribers.some(s => s.handle === handle)) return { error: 'The person’s group membership changed. Nothing was returned.' };
+  const admins = current.subscribers.filter(s => s.role === 'admin').map(s => s.handle);
+  return { groupId, maps: computeMaps(entries, admins, computeBoard(entries, admins)) };
+}
+
 type SkillEntry = JournalEntry & { skill: SkillNote; handle: string };
 interface VisibleSkills {
   /** The current version of each skill, for the list. */
@@ -2646,6 +2762,26 @@ async function createMCPServer(secretKey: string) {
       let skillNote: SkillNote | undefined;
       try { skillNote = normalizeSkillNote((args as { skill?: unknown })?.skill); }
       catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
+      let benchmarkNote: BenchmarkNote | undefined;
+      try { benchmarkNote = normalizeBenchmarkNote((args as { benchmark?: unknown })?.benchmark); }
+      catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
+      if (benchmarkNote && skillNote) {
+        return { content: [{ type: 'text' as const, text: 'A note is a skill or a benchmark note, not both.' }], isError: true };
+      }
+      let territoryNote: TerritoryNote | undefined;
+      let placeRef: string | undefined;
+      let markKind: MarkKind | undefined;
+      try {
+        territoryNote = normalizeTerritoryNote((args as { territory?: unknown })?.territory);
+        placeRef = normalizePlaceRef((args as { place?: unknown })?.place);
+        markKind = normalizeMark((args as { mark?: unknown })?.mark);
+      } catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
+      if (territoryNote && (placeRef || markKind || benchmarkNote || skillNote)) {
+        return { content: [{ type: 'text' as const, text: 'A map note holds only the map: no place, mark, skill or benchmark.' }], isError: true };
+      }
+      if (markKind && !placeRef) {
+        return { content: [{ type: 'text' as const, text: 'A mark needs a place: set `place` to "<map>/<place>".' }], isError: true };
+      }
       const rawSearchKeywords = (args as { search_keywords?: string[] })?.search_keywords;
       // Addressing parameters
       let toAddresses = (args as { to?: string[] })?.to;
@@ -2700,6 +2836,28 @@ async function createMCPServer(secretKey: string) {
         }
       }
 
+      // Benchmark notes, maps and notes placed on a map go to one private group, where boards and maps
+      // are worked out from members' notes.
+      let benchmarkGroup: { admins: string[]; entries: JournalEntry[] } | undefined;
+      if (benchmarkNote || territoryNote || placeRef) {
+        const fail = (text: string) => ({ content: [{ type: 'text' as const, text }], isError: true });
+        const what = territoryNote ? 'A map' : benchmarkNote ? 'A benchmark note' : 'A note placed on a map';
+        if (!currentHandle) return fail(`${what} is shared under a handle. The person can choose one at ${BASE_URL}/join.`);
+        const destinations = toAddresses || [];
+        const groupId = destinations.length === 1 && destinations[0].startsWith('#') ? destinations[0].slice(1).toLowerCase() : '';
+        const group = groupId && isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+        if (!group || !isInviteOnlyGroup(group) || !group.subscribers.some(s => s.handle === currentHandle)) {
+          return fail(`${what} goes to exactly one private group the person belongs to, and nowhere else: set \`to\` to ["#group"].`);
+        }
+        const admins = group.subscribers.filter(s => s.role === 'admin').map(s => s.handle);
+        if (territoryNote && !admins.includes(currentHandle)) return fail('Only an admin of the group can post its map.');
+        const entries = (await storage.getChannelEntries(groupId, 500)).filter(e => !storage.isPending(e.id));
+        const problem = (benchmarkNote && benchmarkWriteProblem(benchmarkNote, currentHandle, entries, admins))
+          || (placeRef && placeWriteProblem(placeRef, entries, admins));
+        if (problem) return fail(problem);
+        benchmarkGroup = { admins, entries };
+      }
+
       // Determine aiOnly: explicit ai_only > legacy human_visible > legacy visibility > user default
       let aiOnly: boolean;
       if (aiOnlyOverride !== undefined) {
@@ -2733,6 +2891,10 @@ async function createMCPServer(secretKey: string) {
         repo,
         tags,
         skill: skillNote,
+        benchmark: benchmarkNote,
+        territory: territoryNote,
+        place: placeRef,
+        mark: markKind,
         // Addressing fields
         to: toAddresses && toAddresses.length > 0 ? toAddresses : undefined,
         inReplyTo: inReplyTo || undefined,
@@ -2834,6 +2996,20 @@ async function createMCPServer(secretKey: string) {
         responseText += `\n\nVisibility: ${visibility}`;
       }
 
+      if (benchmarkNote && benchmarkGroup && currentHandle) {
+        responseText += `\n\n${previewBenchmarkNote(benchmarkNote, currentHandle, benchmarkGroup.entries, benchmarkGroup.admins)}`;
+      }
+      if (territoryNote) {
+        const statused = territoryNote.places.filter(p => p.status).length;
+        responseText += `\n\nMap: "${territoryNote.title}" (${territoryNote.name}), ${territoryNote.places.length} places, ${statused} with a status. Members can attach notes to its places once it publishes.`;
+      }
+      if (placeRef && benchmarkGroup) {
+        const [mapName, placeId] = placeRef.split('/');
+        const view = computeMaps(benchmarkGroup.entries, benchmarkGroup.admins).find(v => v.name === mapName);
+        const label = view?.places.find(p => p.id === placeId)?.label ?? placeId;
+        responseText += `\n\nOn the map: ${markKind ? `${markKind.replace('-', ' ')} at ` : ''}"${label}" (${placeRef}), shown there once it publishes.`;
+      }
+
       const { queryUsed, results: relatedResults } = await buildRelatedResults({
         entryText: entry.trim(),
         searchKeywords: searchKeywords,
@@ -2932,6 +3108,53 @@ async function createMCPServer(secretKey: string) {
     }
 
     // Handle get entry details tool
+    if (name === 'router_map') {
+      const a = (args || {}) as { group_id?: string; place?: string };
+      const say = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError: true } : {}) });
+      const viewer = await storage.getUserByKeyHash(keyHash);
+      if (!viewer?.handle) return say(`Maps are kept in private groups, which need a handle. The person can choose one at ${BASE_URL}/join.`, true);
+      let place: string | undefined;
+      try { place = normalizePlaceRef(a.place); } catch (err) { return say((err as Error).message, true); }
+      const loaded = await groupMapData(typeof a.group_id === 'string' ? a.group_id : '', viewer.handle);
+      if ('error' in loaded) return say(loaded.error, true);
+      return {
+        content: [{ type: 'text' as const, text: renderMaps(loaded.maps, { group: loaded.groupId, place }) }],
+        structuredContent: { group: loaded.groupId, maps: loaded.maps },
+      };
+    }
+
+    if (name === 'router_benchmarks') {
+      const a = (args || {}) as { group_id?: string; scenario?: string; handle?: string };
+      const say = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError: true } : {}) });
+      const viewer = await storage.getUserByKeyHash(keyHash);
+      if (!viewer?.handle) return say(`Benchmarks are kept in private groups, which need a handle. The person can choose one at ${BASE_URL}/join.`, true);
+      const groupId = (typeof a.group_id === 'string' ? a.group_id : '').trim().toLowerCase().replace(/^#/, '');
+      const group = isValidChannelId(groupId) ? await storage.getChannel(groupId) : null;
+      if (!group || !group.subscribers.some(s => s.handle === viewer.handle)) return say('The person must be a current member of that group.', true);
+      if (!isInviteOnlyGroup(group)) return say(`#${groupId} is an open group, which anyone can join. Benchmarks are kept only in private groups.`, true);
+      const entries = (await storage.getChannelEntries(groupId, 500)).filter(e => !storage.isPending(e.id));
+      // Re-read membership after storage access, which can await a remote author store.
+      const current = await storage.getChannel(groupId);
+      if (!current?.subscribers.some(s => s.handle === viewer.handle)) return say('The person’s group membership changed. Nothing was returned.', true);
+      const admins = current.subscribers.filter(s => s.role === 'admin').map(s => s.handle);
+      const board = computeBoard(entries, admins);
+      const scenario = typeof a.scenario === 'string' && a.scenario.trim() ? a.scenario.trim().toLowerCase() : undefined;
+      const handle = typeof a.handle === 'string' && a.handle.trim() ? a.handle.trim().toLowerCase().replace(/^@/, '') : undefined;
+      const mine = board.standings.get(viewer.handle);
+      return {
+        content: [{ type: 'text' as const, text: renderBoard(board, { group: groupId, viewer: viewer.handle, scenario, handle }) }],
+        structuredContent: {
+          group: groupId,
+          scenarios: board.scenarios.map(s => ({
+            name: s.fields.name, title: s.fields.title, region: s.fields.region, better: s.fields.better,
+            best: s.best ? { score: s.best.score, handle: s.best.handle, entry_id: s.best.id, replicated: s.best.replicated } : null,
+            published_score: s.fields.publishedScore ?? null, baseline: s.fields.baseline ?? null,
+          })),
+          points: { handle: viewer.handle, total: mine?.total ?? 0, level: levelFor(mine?.total ?? 0), by_region: mine?.byRegion ?? {} },
+        },
+      };
+    }
+
     if (name === 'router_use_skill') {
       const a = (args || {}) as { action?: string; name?: string; author?: string; outcome?: string; group?: string; entry_id?: string };
       const action = a.action || 'read';
@@ -7939,6 +8162,27 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/channels/:id/map - a private group's research maps, for current members (key in the Authorization header)
+    if (req.method === 'GET' && url.pathname.match(/^\/api\/channels\/[^/]+\/map$/)) {
+      const auth = req.headers.authorization || '';
+      const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      const viewer = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
+      if (!viewer?.handle) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Sign in with your Router key to see a group map.' }));
+        return;
+      }
+      const loaded = await groupMapData(decodeURIComponent(url.pathname.split('/')[3]), viewer.handle);
+      if ('error' in loaded) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: loaded.error }));
+        return;
+      }
+      res.writeHead(200, { 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ group: loaded.groupId, viewer: viewer.handle, maps: loaded.maps }));
+      return;
+    }
+
     // GET /api/channels/:id/entries - Get channel entries
     if (req.method === 'GET' && url.pathname.match(/^\/api\/channels\/[^/]+\/entries$/)) {
       const channelId = decodeURIComponent(url.pathname.split('/')[3]);
@@ -9962,7 +10206,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         filePath = '/group-setup.html';
       } else if (filePath === '/setup/cli') {
         filePath = '/join.html';
-      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe'].includes(filePath)) {
+      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe', '/map'].includes(filePath)) {
         filePath = `${filePath}.html`;
       }
 
@@ -9991,6 +10235,10 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         // In production every page sits in STATIC_DIR. In a checkout the home page is built by Astro into
         // web/dist (npm --prefix web run build), so look there second. That folder does not exist in the image.
         const content = await readFile(fullPath).catch(() => readFile(join(STATIC_DIR, 'web', 'dist', filePath)));
+        if (filePath === '/map.html') {
+          res.setHeader('Referrer-Policy', 'no-referrer');
+          res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+        }
         if (filePath === '/group-setup.html') {
           res.setHeader('Referrer-Policy', 'no-referrer');
           res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
