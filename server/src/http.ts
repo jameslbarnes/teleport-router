@@ -10335,7 +10335,9 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         }
         if (filePath === '/group-setup.html' || filePath === '/trace-access.html') {
           res.setHeader('Referrer-Policy', 'no-referrer');
-          res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; frame-src https://openkey.so; connect-src 'self' https://openkey.so https://api.openkey.so ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+          // OpenKey SDK 0.12.2 renders its approval dialog with one shadow stylesheet per viewport.
+          const dialogStyles = "'sha256-hOOT8h7q1H3LU8iyV5Zftp7ILUuDEmNBAPxe5R5Ee5Q=' 'sha256-S4LFEtipxDMZQffTNv8jtHuVfpKqmu+zOFzDvaxjpR8='";
+          res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' ${dialogStyles}; frame-src https://openkey.so; connect-src 'self' https://openkey.so https://api.openkey.so ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
         }
         res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': keyRecovery ? 'no-store' : cacheControl });
         res.end(keyRecovery && ext === '.html'

@@ -48,6 +48,31 @@ try {
     await context.route('**/api/discord/link/status', route => route.fulfill({ json: { configured: false, linked: false } }));
     return context;
   };
+  // OpenKey inserts a different shadow stylesheet at each width. Exercise the real SDK
+  // and Router's CSP, with the third-party frame replaced by an empty local fixture.
+  for (const width of [390, 1160]) {
+    const dialogContext = await newContext({ viewport: { width, height: 850 } });
+    try {
+      await dialogContext.addInitScript(k => localStorage.setItem('router_key', k), ownerKey);
+      await dialogContext.route('**/api/tinycloud/status', route => route.fulfill({ json: { linked: false } }));
+      await dialogContext.route('**/api/tinycloud/router', route => route.fulfill({ json: {
+        mode: 'authors', folder: 'router/', ownerRecovery: 'secp256k1-v1', recordEncryption: 'aes-256-gcm-v2',
+        recoveryConfirmationRequired: true, actions: ['tinycloud.kv/get'], host: 'https://tee.node.tinycloud.xyz',
+      } }));
+      await dialogContext.route('https://openkey.so/widget/**', route => route.fulfill({ contentType: 'text/html', body: '<title>OpenKey frame fixture</title>' }));
+      const dialog = await dialogContext.newPage();
+      await dialog.goto(base + '/group-setup?storage=1');
+      await dialog.locator('#storage-new').waitFor();
+      await dialog.locator('#openkey-choice summary').click();
+      const opened = dialog.waitForEvent('framenavigated', frame => frame.url().startsWith('https://openkey.so/widget/'));
+      await dialog.getByRole('button', { name: 'Connect with OpenKey' }).click();
+      const element = await (await opened).frameElement();
+      assert.equal(await element.evaluate(frame => getComputedStyle(frame).borderTopStyle), 'none',
+        'Router must allow the OpenKey dialog stylesheet at ' + width + 'px');
+    } finally {
+      await dialogContext.close();
+    }
+  }
   const context = await newContext({ viewport: { width: 1160, height: 1000 } });
   const page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
