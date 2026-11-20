@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { tinyCloudIdentity } from './tinycloud-identity.js';
+import { sealRecoveredKeys } from './recovered-identity.js';
 import { derivePseudonym, generateSecretKey } from './identity.js';
 
 const ownerKey = generateSecretKey();
@@ -108,6 +109,23 @@ it('serves notebook reads on a real SDK rotation and resumes the original identi
   await stop();
   expect(await readFile(queue, 'utf8')).toBe(pending);
   expect(await Promise.all([pin, pin + '.encryption-v1'].map(p => readFile(p, 'utf8')))).toEqual(originalPins);
+  // Keep the SDK on the new epoch. Only the sealed, pin-verified original pair may reopen the notebook.
+  const recoveredFile = join(dir, 'identity.v1');
+  env.TINYCLOUD_RECOVERED_KEYS = recoveredFile;
+  await writeFile(recoveredFile, sealRecoveredKeys({ identity: Buffer.alloc(32, 1), encryption: Buffer.alloc(32, 99) },
+    { identity: Buffer.alloc(32, 2), encryption: Buffer.alloc(32, 34) }));
+  await start(503);
+  await stop();
+  await writeFile(recoveredFile, sealRecoveredKeys({ identity: Buffer.alloc(32, 1), encryption: Buffer.alloc(32, 33) },
+    { identity: Buffer.alloc(32, 2), encryption: Buffer.alloc(32, 34) }));
+  await start(200);
+  expect(await (await fetch(base + '/api/tinycloud/router')).json()).toMatchObject({ did: originalDid });
+  expect(await (await fetch(base + '/api/entry/waiting-example', { headers: { Authorization: 'Bearer ' + ownerKey } })).json()).toMatchObject({ id: 'waiting-example' });
+  expect(await Promise.all([pin, pin + '.encryption-v1'].map(p => readFile(p, 'utf8')))).toEqual(originalPins);
+  await stop();
+  delete env.TINYCLOUD_RECOVERED_KEYS;
+  // Start the independent original-SDK scenario from its own on-disk waiting queue.
+  await writeFile(queue, pending);
   generation = 1;
   await start(200);
   expect(await (await fetch(base + '/api/tinycloud/router')).json()).toMatchObject({ did: originalDid, keySource: 'dstack' });

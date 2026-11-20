@@ -13,6 +13,11 @@ on:
         required: true
         type: boolean
         default: false
+      recover_keys:
+        description: 'Run the approved one-shot Router KMS recovery before restoring the normal compose'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: docker.io
@@ -403,42 +408,29 @@ jobs:
       - name: Verify generated deploy compose and image
         run: SHAPE_COMPOSE_PULL_IMAGE=1 node scripts/shape-compose-boundary-check.mjs --check-image docker-compose.deploy.yml
 
-      - name: Deploy to Phala Cloud
-        id: phala_deploy
-        run: |
-          set -euo pipefail
-          # Compose-only deploy — encrypted env vars are set in Phala dashboard
-          # and persist across deploys. CI only updates the image tag.
-          # --no-public-logs: container logs stay private (the CLI defaults to public).
-          for attempt in {1..20}; do
-            echo "Phala deploy attempt ${attempt}/20"
-            set +e
-            phala deploy --wait --cvm-id ${{ secrets.PHALA_APP_ID }} -c docker-compose.deploy.yml -e /tmp/phala.env --no-public-logs 2>&1 | tee /tmp/phala-deploy.log
-            status=${PIPESTATUS[0]}
-            set -e
-
-            if [ "$status" -eq 0 ]; then
-              exit 0
-            fi
-
-            if grep -q "Another operation is already in progress" /tmp/phala-deploy.log; then
-              if [ "$attempt" -eq 20 ]; then
-                echo "Phala deploy is still locked after ${attempt} attempts"
-                exit "$status"
-              fi
-              echo "Phala reports an operation in progress; waiting 60s before retrying"
-              sleep 60
-              continue
-            fi
-
-            exit "$status"
-          done
+      - name: Recover the two pinned Router keys inside the CVM
+        id: recover_kms
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_keys && inputs.deploy }}
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: |
+          node scripts/phala-kms-recovery.mjs compose docker-compose.deploy.yml /tmp/router-kms-recovery.yml
+          bash scripts/deploy-phala-compose.sh /tmp/router-kms-recovery.yml
+          node scripts/phala-kms-recovery.mjs wait "$PHALA_APP_ID"
+
+      - name: Deploy to Phala Cloud
+        id: phala_deploy
+        # Always remove the temporary recovery process, including after a failed key check.
+        if: ${{ !cancelled() && (success() || steps.recover_kms.outcome == 'failure') }}
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+          PHALA_APP_ID: ${{ secrets.PHALA_APP_ID }}
+        run: bash scripts/deploy-phala-compose.sh docker-compose.deploy.yml
 
       - name: Cleanup
         if: always()
-        run: rm -f docker-compose.deploy.yml /tmp/phala.env
+        run: rm -f docker-compose.deploy.yml /tmp/router-kms-recovery.yml /tmp/phala.env
 
       - name: Verify Phala deployment
         id: phala_verify

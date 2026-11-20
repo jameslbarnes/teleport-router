@@ -1,0 +1,23 @@
+  # Incident-only. This process exits after checking the original pair. It accepts no connections.
+  kms-recovery:
+    image: __ROUTER_IMAGE__
+    entrypoint: ["node", "/app/server/scripts/recover-kms-identity.mjs"]
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true", "seccomp=unconfined"]
+    networks: [kms-recovery-egress]
+    devices:
+      - /dev/tdx_guest:/dev/tdx_guest
+      - /dev/vsock:/dev/vsock
+    volumes:
+      - router-data:/pins:ro
+      - router-recovery:/router-recovery
+      - /var/run/subhost/router:/var/run/dstack-filtered:ro
+      - /dstack/.host-shared:/dstack/.host-shared:ro
+      - /run/log/dstack:/run/log/dstack:ro
+      - /sys/firmware/acpi/tables/data/CCEL:/ccel.bin:ro
+      - /etc/tdx-attest.conf:/etc/tdx-attest.conf:ro
+    depends_on:
+      subhost:
+        condition: service_healthy
