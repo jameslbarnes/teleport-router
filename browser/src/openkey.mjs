@@ -13,7 +13,7 @@ const sorted = value => JSON.stringify(value, (_, v) => v && typeof v === 'objec
 const digest = async value => hexlify(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sorted(value))))).slice(2);
 
 /** The account selector and both signature prompts belong to OpenKey. Only the browser session gets decrypt. */
-export async function openKeyOwner(host, { forTrace, expectedDid } = {}) {
+export async function openKeyOwner(host, { traceSession, expectedDid } = {}) {
   const origin = location.origin;
   const manifest = keyManifest(origin);
   const openkey = new OpenKey({ appName: 'Router', mode: 'iframe' });
@@ -22,21 +22,20 @@ export async function openKeyOwner(host, { forTrace, expectedDid } = {}) {
   if (expectedDid && expectedDid.toLowerCase() !== did.toLowerCase()) throw Error('Choose the OpenKey account that owns this storage.');
   const manifestDigest = await digest(manifest);
   const provider = new OpenKeyProvider(openkey, account);
-  const kv = forTrace ? [
-    { path: 'router/recovery-v1', actions: ['get'] },
-    { path: 'router/traces/' + forTrace + '/', actions: ['get'] },
-  ] : [{ path: 'router/', actions: ['get', 'put', 'list', 'del'] }];
+  const space = traceSession?.spacePrefix || 'router';
+  const traceScope = traceSession?.manifest.permissions[0];
+  const permissions = traceScope ? [{ ...traceScope, path: 'router/recovery-v1' }, traceScope]
+    : [{ service: 'tinycloud.kv', space, path: 'router/', actions: ['get', 'put', 'list', 'del'] }];
   const owner = new TinyCloudWeb({
     provider, openkey: { mode: 'iframe', client: {
       authorizeTinyCloud: (input, options) => openkey.authorizeTinyCloud({ ...input, keyId: account.keyId,
         presentation: { ...input.presentation, displayName: 'Router', manifestDigest } }, options),
     } },
-    manifest: { ...manifest, keys: [{ path: recoveryKeyPath(origin), abilities: forTrace ? ['decrypt'] : ['key.create', 'decrypt'] }],
-      defaults: false, prefix: '', space: 'router', includePublicSpace: false, expiry: forTrace ? '2d' : '366d',
-      permissions: kv.map(p => ({ ...p, service: 'tinycloud.kv', space: 'router' })) },
-    tinycloudHosts: [host], spacePrefix: 'router', autoCreateSpace: !forTrace, autoDiscoverLocalNode: false,
+    manifest: { ...manifest, keys: [{ path: recoveryKeyPath(origin), abilities: traceSession ? ['decrypt'] : ['key.create', 'decrypt'] }],
+      defaults: false, prefix: '', space, includePublicSpace: false, expiry: traceSession ? '2d' : '366d', permissions },
+    tinycloudHosts: [host], spacePrefix: space, autoCreateSpace: !traceSession, autoDiscoverLocalNode: false,
     autoBootstrapAccount: false, includeAccountRegistryPermissions: false, persistSession: false,
-    ui: false, sessionExpirationMs: (forTrace ? 2 : 366) * DAY,
+    ui: false, sessionExpirationMs: (traceSession ? 2 : 366) * DAY,
   });
   return { owner, sign: async message => (await openkey.signMessage({ message, keyId: account.keyId })).signature };
 }

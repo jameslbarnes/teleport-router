@@ -1,3 +1,5 @@
+import { grantTraceRead, traceReadSession } from './trace-permission.mjs';
+
 const $ = id => document.getElementById(id);
 const id = new URLSearchParams(location.search).get('entry');
 let key = localStorage.getItem('router_key'), storage, account, busy = false;
@@ -36,18 +38,17 @@ async function grant(r) {
   if (!storage?.linked) throw Error('Connect your TinyCloud storage from setup before approving.');
   const [{ TinyCloudWeb, serializeDelegation }, { localProvider, readRecovery }, { rewrapTraceKey }] = await Promise.all([
     import('@tinycloud/web-sdk'), import('./storage.mjs'), import('./trace-keys.mjs')]);
+  const session = traceReadSession(storage.space, r.entry_id, location.origin);
   if (storage.recoveryMode === 'openkey') {
     const { openKeyOwner } = await import('./openkey.mjs');
-    owner = (await openKeyOwner(host, { forTrace: r.entry_id, expectedDid: storage.ownerDid })).owner;
+    owner = (await openKeyOwner(host, { traceSession: session, expectedDid: storage.ownerDid })).owner;
   } else {
     const { unlockOldStorage } = await import('./unlock-backup.mjs');
     const saved = await unlockOldStorage(account.handle, key, $('backup').files[0], $('password').value);
     $('password').value = ''; privateKey = saved.tinycloudKey;
-    owner = new TinyCloudWeb({ provider: localProvider(privateKey), tinycloudHosts: [host], spacePrefix: 'router',
+    owner = new TinyCloudWeb({ provider: localProvider(privateKey), tinycloudHosts: [host], ...session,
       autoCreateSpace: false, autoBootstrapAccount: false, includeAccountRegistryPermissions: false, autoDiscoverLocalNode: false,
-      persistSession: false, ui: false, sessionExpirationMs: 2 * 86400000,
-      manifest: { defaults: false, prefix: '', space: 'router', includePublicSpace: false, permissions: [
-        { service: 'tinycloud.kv', space: 'router', path: 'router/traces/' + r.entry_id + '/', actions: ['get'] }] } });
+      persistSession: false, ui: false, sessionExpirationMs: 2 * 86400000 });
   }
   try {
     await owner.signIn();
@@ -62,7 +63,7 @@ async function grant(r) {
     const meta = typeof result.data.data === 'string' ? JSON.parse(result.data.data) : result.data.data;
     if (meta.entryId !== r.entry_id || meta.ownerDid.toLowerCase() !== owner.did.toLowerCase()) throw Error('The stored trace belongs to a different note or owner.');
     const wrap = await rewrapTraceKey(meta.full, meta.sealedOwnerDid || meta.ownerDid, r.entry_id, privateKey, r.reader_public_key);
-    const d = await owner.createDelegation({ delegateDID: r.reader_did, path: folder, actions: ['tinycloud.kv/get'], includePublicSpace: false, expiryMs: 86400000 });
+    const d = await grantTraceRead(owner, r.reader_did, session);
     await access({ action: 'approve', request_id: r.request_id, revision: r.revision, delegation: serializeDelegation(d), wrap });
   } finally { owner.cleanup(); }
 }

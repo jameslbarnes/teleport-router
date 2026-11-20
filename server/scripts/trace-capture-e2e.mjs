@@ -13,6 +13,7 @@ import {Wallet} from 'ethers';
 import {TinyCloudNode,serializeDelegation} from '@tinycloud/node-sdk';
 import {readGrantedTrace} from './trace-reader.mjs';
 import {rewrapTraceKey} from '../../browser/src/trace-keys.mjs';
+import {grantTraceRead,traceReadSession} from '../../browser/src/trace-permission.mjs';
 import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {sealFull,openFull} from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
@@ -166,8 +167,14 @@ try {
   assert(savedMeta.ok);
   const m = JSON.parse(stored(savedMeta.data));
   const wrap = await rewrapTraceKey(m.full,m.ownerDid,ids[0],ownerKey,reader.signingKey.compressedPublicKey);
-  const scope = await owner.createDelegation({delegateDID:r.reader_did,path:'router/traces/'+ids[0]+'/',actions:['tinycloud.kv/get'],includePublicSpace:false,expiryMs:3600000});
-  await ask(secretKey,{action:'approve',request_id:r.request_id,revision:r.revision,delegation:serializeDelegation(scope),wrap});
+  const readSession = traceReadSession(grant.spaceId, ids[0], base);
+  const approvingOwner = new TinyCloudNode({ privateKey:ownerKey, host, ...readSession, autoCreateSpace:false,
+    enablePublicSpace:false, autoBootstrapAccount:false, includeAccountRegistryPermissions:false, sessionExpirationMs:2*86400000 });
+  try {
+    await approvingOwner.signIn();
+    const scope = await grantTraceRead(approvingOwner, r.reader_did, readSession);
+    await ask(secretKey,{action:'approve',request_id:r.request_id,revision:r.revision,delegation:serializeDelegation(scope),wrap});
+  } finally { await approvingOwner.signOut(); }
   const approved = await ask(readerAccount,{action:'status',request_id:r.request_id});
   assert((await readGrantedTrace(approved,reader.privateKey,host)).toString().includes('MARKER-ALPHA'));
   console.log('PASS the approved reader opens exactly the named post through its TinyCloud grant');
