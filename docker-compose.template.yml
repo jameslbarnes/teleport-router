@@ -11,6 +11,7 @@ services:
       - TINYCLOUD_AUTHORS=tinycloud
       - TINYCLOUD_KEY_SOURCE=dstack
       - DSTACK_ENDPOINT=/var/run/dstack-filtered/dstack.sock
+      - TINYCLOUD_RECOVERED_KEYS=/router-recovery/identity.v1
       - TINYCLOUD_HOST=https://tee.node.tinycloud.xyz
       - STAGING_DELAY_MS=3600000
       - GIT_SHA=${GIT_SHA}
@@ -31,6 +32,7 @@ services:
       - SENDGRID_FROM_EMAIL
     volumes:
       - router-data:/data
+      - router-recovery:/router-recovery:ro
       # Router asks dstack only for its two keys, through the subhost service.
       - /var/run/subhost/router:/var/run/dstack-filtered:ro
     depends_on:
@@ -222,6 +224,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  router-recovery:
   router-data:
   shape-matrix-bridge-data:
   discord-data:

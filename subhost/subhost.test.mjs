@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import http from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,6 +141,29 @@ test('the template match handles the real template, which embeds the host progra
   assert.throws(() => matchTemplate(template, filled.replace('- SUBHOST_MAIN=1', '- SUBHOST_MAIN=1\n      - EXTRA=1')));
   assert.throws(() => matchTemplate(template, filled.replace('/var/run/subhost/router:/var/run/dstack-filtered:ro', '/var/run:/var/run/dstack-filtered:ro')));
   assert.throws(() => matchTemplate(template, filled.replace(/base64,[A-Za-z0-9]/, m => `${m}A`)), 'one changed byte of the host program');
+});
+
+test('the one-shot migration is isolated and is refused by normal subhost grantors', () => {
+  const template = lf(readFileSync(join(ROOT, 'docker-compose.template.yml'), 'utf8'));
+  const normal = template.replace(/\$\{([A-Z_]+)\}/g, (_, name) => name === 'GIT_SHA' ? 'abc1234' : 'sha256:' + '1'.repeat(64));
+  const dir = mkdtempSync(join(tmpdir(), 'router-compose-'));
+  try {
+    const original = join(dir, 'normal.yml'), output = join(dir, 'maintenance.yml');
+    writeFileSync(original, normal);
+    execFileSync(process.execPath, [join(ROOT, 'scripts/phala-kms-recovery.mjs'), 'compose', original, output]);
+    const maintenance = lf(readFileSync(output, 'utf8'));
+    const helper = maintenance.split('  kms-recovery:\n')[1].split('  # BEGIN subhost:')[0];
+    assert.ok(!normal.includes('  kms-recovery:'));
+    assert.throws(() => matchTemplate(template, maintenance));
+    assert.match(helper, /networks: \[kms-recovery-egress\]/);
+    assert.match(helper, /restart: "no"/);
+    assert.match(helper, /router-data:\/pins:ro/);
+    assert.match(helper, /router-recovery:\/router-recovery\n/);
+    assert.match(maintenance, /TINYCLOUD_RECOVERED_KEYS=\/router-recovery\/deferred/);
+    assert.match(normal, /router-recovery:\/router-recovery:ro/);
+    assert.doesNotMatch(helper, /ports:|privileged:|environment:|docker\.sock|\/var\/run\/dstack\.sock|network_mode/);
+    assert.equal(readFileSync(original, 'utf8'), normal);
+  } finally { rmSync(dir, { recursive:true, force:true }); }
 });
 
 test('the compose template: socket mounts are exactly as intended and the embedded block is current', () => {

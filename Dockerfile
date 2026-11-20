@@ -1,3 +1,5 @@
+FROM ghcr.io/dstack-tee/dstack-key-recovery:0.6.5@sha256:26803eb7eb34f69f367d7ebc0b4abc31f35caad5e58213de77a91dddcd2d0b6b AS epoch-recovery-tool
+
 FROM node:22-alpine AS builder
 
 WORKDIR /app/server
@@ -42,6 +44,10 @@ RUN npm ci --only=production
 
 # Copy built files
 COPY --from=builder /app/server/dist ./dist
+
+# Used only by the one-shot enclave recovery service.
+COPY --from=epoch-recovery-tool /dstack-key-recovery /usr/local/bin/dstack-key-recovery
+COPY server/scripts/recover-kms-identity.mjs ./scripts/recover-kms-identity.mjs
 
 # Copy legacy static files (except index, now built by Astro)
 COPY prompt.html setup.html profile.html entry.html dashboard.html join.html settings.html connect.html trace-access.html release.html RELEASE_NOTES.md docs.html DOCS.md docs-overview.svg /app/
