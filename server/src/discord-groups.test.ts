@@ -1,5 +1,5 @@
 import {describe, it, expect} from 'vitest';
-import {MemoryStorage, type JournalEntry} from './storage.js';
+import {MemoryStorage, StagedStorage, type JournalEntry} from './storage.js';
 import {authorStorage, recordCodec} from './author-store.js';
 import {discordGroups, feedMessage, groupPostingMode, rankNotes, FEED_PER_RUN, GRANT_IDLE_MS, GRANT_MAX_MS} from './discord-groups.js';
 import {derivePseudonym, hashSecretKey} from './identity.js';
@@ -48,6 +48,83 @@ async function fixture(scope: 'channel' | 'guild' = 'channel') {
   const save = (grant: string, content='Selected synthetic note', interactionId='100000000000000010') => operate(grant,{action:'save',content,interactionId});
   return {base,layer,data,revoked,keys,context,call,link,operate,save,audienceState,chatState,sendState,chat:service.chat,feed:service.feed,advance:(ms=60001)=>{clock+=ms;}};
 }
+
+describe('Scheduled Discord digest access',()=>{
+  async function digestFixture() {
+    const f=await fixture('guild');await f.link();
+    await f.call('alice','conversation/configure',{groupId:'test-group',channelIds:[f.context.channelId]});
+    const ask=(action:string,extra:Record<string,unknown>={})=>f.call('router_bot','digest',
+      {...f.context,groupId:'test-group',action,...extra});
+    const read=(extra:Record<string,unknown>={})=>ask('read',{since:900000,until:1000000,...extra});
+    const note=(id:string,extra:Partial<JournalEntry>={})=>f.layer.storage.addEntry({id,pseudonym:'x',handle:'alice',
+      content:`Note ${id}`,client:'code',timestamp:950000,...extra} as JournalEntry);
+    return {...f,ask,read,note};
+  }
+  it('includes only published human-visible notes from this group and public Router in the exact period',async()=>{
+    const f=await digestFixture();
+    await f.note('public');await f.note('group',{to:['#test-group']});
+    await f.note('other-group',{to:['#elsewhere']});await f.note('dm',{to:['@alice']});
+    await f.note('ai-only',{aiOnly:true});await f.note('hidden',{humanVisible:false,to:['#test-group']});
+    await f.note('legacy-ai',{visibility:'ai-only'});await f.note('private',{visibility:'private'});
+    await f.note('before',{timestamp:899999});await f.note('start',{timestamp:900000});
+    await f.note('end',{timestamp:1000000});
+    const result=await f.read();
+    expect(result.entries.map((e:any)=>e.id).sort()).toEqual(['group','public','start']);
+    expect(result.entries.find((e:any)=>e.id==='group')).toMatchObject({audience:'group',url:'https://router.example/e/group'});
+    expect(result.entries.find((e:any)=>e.id==='public').audience).toBe('public');
+    const proof={audienceVersion:result.audienceVersion,sources:result.entries.map((e:any)=>({id:e.id,version:e.version}))};
+    expect(await f.ask('verify',proof)).toMatchObject({verified:true});
+    expect(f.sendState.sent).toEqual([]);
+  });
+  it('requires the bound member bot, opted-in channel and current complete Discord audience',async()=>{
+    const f=await digestFixture();
+    await expect(f.call('alice','digest',{...f.context,groupId:'test-group',action:'read',since:0,until:1000000})).rejects.toMatchObject({status:403});
+    await expect(f.read({channelId:'100000000000000088'})).rejects.toMatchObject({status:403});
+    await expect(f.read({guildId:'100000000000000088'})).rejects.toMatchObject({status:403});
+    f.audienceState.open=true;await expect(f.read()).rejects.toMatchObject({status:403});f.audienceState.open=false;
+    f.audienceState.viewerIds.push('100000000000000088');await expect(f.read()).rejects.toMatchObject({status:403});
+    f.audienceState.viewerIds.pop();f.audienceState.unavailable=true;await expect(f.read()).rejects.toMatchObject({status:403});
+    f.audienceState.unavailable=false;await f.base.removeSubscriber('test-group','router_bot');
+    await expect(f.read()).rejects.toMatchObject({status:403});
+  });
+  it('cannot include or verify a note still waiting to publish',async()=>{
+    const f=await digestFixture(), staged=new StagedStorage(3600000,f.layer.storage);
+    try {
+      const pending=await staged.addEntry({pseudonym:'x',handle:'alice',content:'Still waiting',client:'code',timestamp:950000,to:['#test-group']});
+      const service=discordGroups(staged,f.layer.storage,f.layer.status,{baseUrl:'https://router.example',now:()=>1000000,
+        audience:async()=>f.audienceState,send:async()=>'unused'});
+      const ask=(action:string,extra:Record<string,unknown>={})=>service.serve('/api/discord/digest',`Bearer ${f.keys.router_bot}`,
+        {...f.context,groupId:'test-group',action,...extra}) as Promise<any>;
+      const read=await ask('read',{since:900000,until:1000000});expect(read.entries).toEqual([]);
+      await expect(ask('verify',{audienceVersion:read.audienceVersion,sources:[{id:pending.id,version:'a'.repeat(64)}]})).rejects.toMatchObject({status:409});
+    } finally {staged.stop();}
+  });
+  it('rejects a changed, moved, hidden or deleted source before delivery',async()=>{
+    const f=await digestFixture();await f.note('source',{to:['#test-group']});
+    const result=await f.read(),original=(await f.layer.storage.getEntry('source'))!;
+    const proof={audienceVersion:result.audienceVersion,sources:result.entries.map((e:any)=>({id:e.id,version:e.version}))};
+    for(const patch of [{content:'Edited'}, {to:['#elsewhere']}, {aiOnly:true}]) {
+      await f.layer.storage.addEntry({...original,...patch});
+      await expect(f.ask('verify',proof)).rejects.toMatchObject({status:409});
+    }
+    await f.layer.storage.addEntry(original);expect(await f.ask('verify',proof)).toMatchObject({verified:true});
+    await f.layer.storage.deleteEntry('source');await expect(f.ask('verify',proof)).rejects.toMatchObject({status:409});
+  });
+  it('rejects a changed audience and membership changes while Discord is responding',async()=>{
+    const f=await digestFixture();const result=await f.read();
+    const bob='100000000000000008';await f.link('bob',bob);f.audienceState.viewerIds.push(bob);
+    await expect(f.ask('verify',{audienceVersion:result.audienceVersion,sources:[]})).rejects.toMatchObject({status:409});
+    f.audienceState.beforeRead=async()=>{await f.base.removeSubscriber('test-group','router_bot');};
+    await expect(f.read()).rejects.toMatchObject({status:409});
+  });
+  it('reports an empty period, rejects invalid windows and refuses incomplete coverage',async()=>{
+    const f=await digestFixture();expect((await f.read()).entries).toEqual([]);
+    for(const window of [{since:1000000},{until:1000001},{since:-1},{since:'900000'}])
+      await expect(f.read(window)).rejects.toMatchObject({status:400});
+    for(let i=0;i<201;i++)await f.note(`n-${i}`);
+    await expect(f.read()).rejects.toMatchObject({status:413});
+  });
+});
 
 describe('Shared conversational group access',()=>{
   async function conversation() {
