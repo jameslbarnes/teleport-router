@@ -56,6 +56,7 @@ Router decides who may read what, and it sees plaintext while it serves a reques
 | Raw usage reports from the insights pipeline | Their owner only. Router has no access to that folder |
 | Text typed into Discord commands, and the bot's replies | Discord |
 | Notes summarized by the Discord recall command | The AI model service the bot calls |
+| Notes selected for a scheduled Discord digest, and its summaries | The scheduled job's host and the AI model service it calls |
 
 ### What each person has to trust
 
@@ -358,7 +359,7 @@ A scheduled Discord digest can include a daily or weekly summary of Router notes
 
 The digest uses the bound bot's own membership. Router checks who can see the destination channel before returning notes, using the same audience checks as shared group replies. Before each summary message is sent, it checks the audience again and verifies that every source read for the summary still exists, has the same text and can still be shared there. The channel must already be enabled for group replies or be the group's feed channel.
 
-The summary writer receives the selected notes through its model provider, without browsing tools. Its private summaries are kept separately from the outside-research digest and are not fed to web searches or included in the research archive. Links are built from the supplied note IDs. Summaries can still get a claim wrong: follow the sources. Discord retains the messages it receives; editing or deleting a source later does not erase its summary. A membership change can also happen between the final check and delivery.
+The scheduled writer runs on its configured host, outside Router; that host and its model provider receive the selected notes. Router's access checks run inside Router. The writer has no browsing tools. Its private summaries are kept separately from the outside-research digest and are not fed to web searches or included in the research archive. Links are built from the supplied note IDs. Summaries can still get a claim wrong: follow the sources. Discord retains the messages it receives; editing or deleting a source later does not erase its summary. A membership change can also happen between the final check and delivery.
 
 The read and verification endpoint is `POST /api/discord/digest`, authenticated with the bound bot's Router key. It never posts messages itself. The scheduled producer in `agent/discord-digest/router_digest.py` verifies sources before sending and records successful deliveries so a normal rerun does not duplicate an edition. A send with an unknown result stops for reconciliation. Its credentials, destination and schedule are supplied by the operator.
 
