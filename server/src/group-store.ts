@@ -85,7 +85,7 @@ export interface DelegatedKv {
   kv: {
     put(key: string, value: unknown, options?: ConditionalPut): Promise<SdkResult<unknown>>;
     get(key: string, options?: { source: 'network' }): Promise<SdkResult<unknown>>;
-    list(options: { path: string }): Promise<SdkResult<{ keys?: string[] } | unknown>>;
+    list(options: { path: string; prefix?: string; source: 'network'; limit: number; cursor?: string }): Promise<SdkResult<{ keys?: string[]; truncated?: boolean; nextCursor?: string }>>;
     delete(key: string): Promise<SdkResult<unknown>>;
   };
 }
@@ -128,8 +128,20 @@ export function groupStoreFromAccess(access: DelegatedKv, grantPath = ''): Group
       return { value: value.value, etag: value.etag };
     },
     async list(path) {
-      const data = unwrap(await access.kv.list({ path }), 'list') as { keys?: unknown };
-      const keys = Array.isArray(data?.keys) ? (data.keys as string[]) : [];
+      // The SDK trims the slash from its default prefix. Listing "router" is outside a grant for "router/".
+      const options = { path, ...(grantPath && !path ? { prefix: grantPath } : {}), source: 'network' as const, limit: 1000 };
+      const keys: string[] = [];
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const page = unwrap(await access.kv.list({ ...options, ...(cursor ? { cursor } : {}) }), 'list');
+        if (!Array.isArray(page?.keys) || page.keys.some(k => typeof k !== 'string')) throw new Error('TinyCloud returned an invalid list of keys.');
+        keys.push(...page.keys);
+        if (!page.truncated && !page.nextCursor) break;
+        cursor = page.nextCursor;
+        if (!cursor || cursors.has(cursor)) throw new Error('TinyCloud returned an incomplete list of keys.');
+        cursors.add(cursor);
+      } while (cursor);
       // Accept keys relative to the grant, to the path, or to the space root
       if (!path) return keys.map(k => grantPath && k.startsWith(grantPath) ? k.slice(grantPath.length) : k);
       return keys.map(k => { const at = k.lastIndexOf(path); return at >= 0 ? k.slice(at) : path + k; });

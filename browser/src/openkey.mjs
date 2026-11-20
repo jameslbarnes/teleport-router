@@ -8,11 +8,22 @@ export const recoveryKeyPath = origin => 'apps/' + appId(origin) + '/recovery';
 export function keyManifest(origin) {
   return { name: 'Router', app_id: appId(origin), keys: [{ path: recoveryKeyPath(origin), abilities: ['key.create', 'decrypt'] }] };
 }
+export function networkCreationManifest(origin, ownerDid) {
+  return {
+    name: 'Router', app_id: appId(origin), defaults: false, prefix: '', space: 'router',
+    includePublicSpace: false, expiry: '10m',
+    permissions: [
+      // OpenKey's signed session must identify the Router space. Reading its permission list grants no access to records.
+      { service: 'tinycloud.capabilities', space: 'router', path: '', actions: ['tinycloud.capabilities/read'] },
+      { service: 'tinycloud.encryption', path: 'urn:tinycloud:encryption:' + ownerDid + ':default', actions: ['network.create'] },
+    ],
+  };
+}
 const sorted = value => JSON.stringify(value, (_, v) => v && typeof v === 'object' && !Array.isArray(v)
   ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : v);
 const digest = async value => hexlify(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sorted(value))))).slice(2);
 
-/** The account selector and both signature prompts belong to OpenKey. Only the browser session gets decrypt. */
+/** OpenKey handles signing. Only the browser's recovery session gets the named decrypt permission. */
 export async function openKeyOwner(host, { traceSession, expectedDid } = {}) {
   const origin = location.origin;
   const manifest = keyManifest(origin);
@@ -21,23 +32,44 @@ export async function openKeyOwner(host, { traceSession, expectedDid } = {}) {
   const did = 'did:pkh:eip155:1:' + account.address;
   if (expectedDid && expectedDid.toLowerCase() !== did.toLowerCase()) throw Error('Choose the OpenKey account that owns this storage.');
   const manifestDigest = await digest(manifest);
-  const provider = new OpenKeyProvider(openkey, account);
   const space = traceSession?.spacePrefix || 'router';
   const traceScope = traceSession?.manifest.permissions[0];
   const permissions = traceScope ? [{ ...traceScope, path: 'router/recovery-v1' }, traceScope]
     : [{ service: 'tinycloud.kv', space, path: 'router/', actions: ['get', 'put', 'list', 'del'] }];
-  const owner = new TinyCloudWeb({
-    provider, openkey: { mode: 'iframe', client: {
+  const options = {
+    openkey: { mode: 'iframe', client: {
       authorizeTinyCloud: (input, options) => openkey.authorizeTinyCloud({ ...input, keyId: account.keyId,
         presentation: { ...input.presentation, displayName: 'Router', manifestDigest } }, options),
     } },
+    tinycloudHosts: [host], spacePrefix: space, autoDiscoverLocalNode: false, autoBootstrapAccount: false,
+    includeAccountRegistryPermissions: false, persistSession: false, ui: false,
+  };
+  const owner = new TinyCloudWeb({
+    ...options, provider: new OpenKeyProvider(openkey, account),
     manifest: { ...manifest, keys: [{ path: recoveryKeyPath(origin), abilities: traceSession ? ['decrypt'] : ['key.create', 'decrypt'] }],
       defaults: false, prefix: '', space, includePublicSpace: false, expiry: traceSession ? '2d' : '366d', permissions },
-    tinycloudHosts: [host], spacePrefix: space, autoCreateSpace: !traceSession, autoDiscoverLocalNode: false,
-    autoBootstrapAccount: false, includeAccountRegistryPermissions: false, persistSession: false,
-    ui: false, sessionExpirationMs: (traceSession ? 2 : 366) * DAY,
+    autoCreateSpace: !traceSession, sessionExpirationMs: (traceSession ? 2 : 366) * DAY,
   });
-  return { owner, sign: async message => (await openkey.signMessage({ message, keyId: account.keyId })).signature };
+  // Account setup is a separate short-lived approval. It cannot decrypt data and is never delegated to Router.
+  async function initializeNetwork() {
+    const setup = new TinyCloudWeb({
+      ...options, provider: new OpenKeyProvider(openkey, account), manifest: networkCreationManifest(origin, did),
+      autoCreateSpace: false, sessionExpirationMs: 10 * 60000,
+    });
+    try {
+      await setup.signIn();
+      if (setup.did.toLowerCase() !== did.toLowerCase()) throw Error('Choose the same OpenKey account to set up encrypted storage.');
+      await setup.ensureEncryptionNetwork();
+    } finally { setup.cleanup(); }
+  }
+  return { owner, initializeNetwork, sign: async message => (await openkey.signMessage({ message, keyId: account.keyId })).signature };
+}
+
+export async function grantRouterStorage(owner, router) {
+  if (!owner.spaceId) throw Error('Open your Router storage before approving access.');
+  const permission = { service: 'tinycloud.kv', space: owner.spaceId, path: router.folder, actions: router.actions };
+  const { delegation } = await owner.delegateTo(router.did, [permission], { expiry: 365 * DAY, requireActivation: true });
+  return delegation;
 }
 
 export async function openNetworkRecovery(owner, network, origin) {
@@ -51,25 +83,19 @@ export async function openNetworkRecovery(owner, network, origin) {
     return secret;
   } finally { bytes.fill(0); }
 }
-async function ensureRecoveryKey(owner, path, onProgress) {
-  // New OpenKey accounts can finish sign-in while their encryption network is still being created.
-  const retryDelays = [1000, 2000, 4000, 8000, 15000];
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await owner.keys.ensureKey(path);
-      return;
-    } catch (error) {
-      if (error?.code !== 'NETWORK_NOT_FOUND') throw error;
-      if (attempt === retryDelays.length) {
-        throw new Error('OpenKey is still setting up encrypted storage for this account. Try connecting again in a moment.', { cause: error });
-      }
-      if (attempt === 0) onProgress?.('Waiting for OpenKey to finish setting up your encrypted storage…');
-      await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+async function ensureRecoveryKey(owner, path, { onProgress, initializeNetwork }) {
+  try { await owner.keys.ensureKey(path); }
+  catch (error) {
+    if (error?.code !== 'NETWORK_NOT_FOUND' || !initializeNetwork) throw error;
+    if (!await owner.getEncryptionNetwork()) {
+      onProgress?.('Approve creating encrypted storage for this OpenKey account.');
+      await initializeNetwork();
     }
+    await owner.keys.ensureKey(path);
   }
 }
 
-export async function prepareNetworkRecovery(owner, origin, existing, onProgress) {
+export async function prepareNetworkRecovery(owner, origin, existing, setup = {}) {
   let network = existing;
   const pendingKey = 'router/openkey-recovery';
   if (!network) {
@@ -79,7 +105,7 @@ export async function prepareNetworkRecovery(owner, origin, existing, onProgress
   }
   if (!network) {
     const path = recoveryKeyPath(origin);
-    await ensureRecoveryKey(owner, path, onProgress);
+    await ensureRecoveryKey(owner, path, setup);
     const local = Wallet.createRandom();
     const secret = getBytes(local.privateKey);
     try {

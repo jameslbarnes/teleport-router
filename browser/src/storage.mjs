@@ -61,7 +61,7 @@ export async function connectStorage({ privateKey, routerKey, request, onProgres
     if (open) {
       const existing = await readRecovery(owner);
       if (existing && !existing.networkRecovery) throw Error('This space already uses a self-held recovery key. Choose its original setup.');
-      const prepared = await open.prepareNetworkRecovery(owner, location.origin, existing?.networkRecovery, onProgress);
+      const prepared = await open.prepareNetworkRecovery(owner, location.origin, existing?.networkRecovery, { onProgress, initializeNetwork: selected.initializeNetwork });
       network = prepared.network;
       privateKey = prepared.privateKey;
     }
@@ -71,7 +71,8 @@ export async function connectStorage({ privateKey, routerKey, request, onProgres
       if (prior.expiry.getTime() > Date.now() + 86400000) grant = prior;
     }
     if (!grant) {
-      grant = await owner.createDelegation({ delegateDID: router.did, path: router.folder, actions: router.actions, includePublicSpace: false, expiryMs: 365 * 86400000 });
+      grant = open ? await open.grantRouterStorage(owner, router)
+        : await owner.createDelegation({ delegateDID: router.did, path: router.folder, actions: router.actions, includePublicSpace: false, expiryMs: 365 * 86400000 });
       // Retain the same grant across interrupted attempts. This is scoped to the Router, never an owner key.
       saveReceipt({ ownerDid: owner.did, routerDid: router.did, delegation: serializeDelegation(grant), cid: grant.cid });
     }

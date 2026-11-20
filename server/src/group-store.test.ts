@@ -89,7 +89,7 @@ describe('Groups stored in the owner\'s store', () => {
 });
 
 describe('TinyCloud adapter (SDK results to a group store)', () => {
-  const ok = (data: unknown) => ({ ok: true as const, data });
+  const ok = <T>(data: T) => ({ ok: true as const, data });
   const fail = (code: string, message: string) => ({ ok: false as const, error: { code, message } });
 
   function fakeAccess(keyPrefix = '', override: Partial<DelegatedKv['kv']> = {}): DelegatedKv {
@@ -112,6 +112,16 @@ describe('TinyCloud adapter (SDK results to a group store)', () => {
     expect(await store.list('posts/')).toEqual(['posts/a']);
     await store.delete('posts/a');
     expect(await store.list('posts/')).toEqual([]);
+  });
+
+  it('lists the exact granted folder, including all pages, before a notebook move', async () => {
+    const list = vi.fn<DelegatedKv['kv']['list']>().mockResolvedValueOnce(ok({ keys: ['router/posts/a'], truncated: true, nextCursor: 'next' }))
+      .mockResolvedValueOnce(ok({ keys: ['router/recovery-v1'] }));
+    const store = groupStoreFromAccess(fakeAccess('', {list}), 'router/');
+    expect(await store.list('')).toEqual(['posts/a', 'recovery-v1']);
+    expect(list.mock.calls.map(([o]) => [o.prefix, o.path, o.cursor])).toEqual([['router/', '', undefined], ['router/', '', 'next']]);
+    list.mockResolvedValue(ok({keys: [], truncated: true}));
+    await expect(store.list('')).rejects.toThrow('incomplete');
   });
 
   it('returns null for a missing key', async () => {
