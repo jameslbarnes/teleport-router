@@ -32,6 +32,27 @@ async function fixture() {
 }
 
 describe('Each author owns their published records',()=>{
+  it('serves unlinked records while locked and keeps legacy copies of linked records out of every read', async () => {
+    const f = await fixture();
+    const linked = await f.base.addEntry(post('alice', 'research from linked storage'));
+    await f.layer.link(f.users[0], binding('alice'));
+    const visible = await f.base.addEntry(post('bob', 'available research'));
+    // A copied note might still exist under the handle or only the earlier pseudonym.
+    await f.base.addEntry({ ...linked, content: 'stale research copy' });
+    await f.base.addEntry({ ...post('alice', 'research from old pseudonym'), handle: undefined });
+    const locked = authorStorage(f.base, null, null);
+    expect((await locked.storage.getEntries()).map(e => e.id)).toEqual([visible.id]);
+    expect((await locked.storage.searchEntries('research')).map(e => e.id)).toEqual([visible.id]);
+    expect(await locked.storage.getEntry(linked.id)).toBeNull();
+    expect(await locked.status('alice')).toMatchObject({ linked: true, available: false });
+    await expect(locked.storage.addEntry(post('alice'))).rejects.toThrow('unavailable');
+    await expect(locked.storage.addEntry(post('bob'))).rejects.toThrow('unavailable');
+    await expect(locked.storage.deleteEntry(visible.id)).rejects.toThrow('unavailable');
+    await expect(locked.assetStore(binding('alice'))).rejects.toThrow('unavailable');
+    expect(await f.base.getEntry(visible.id)).toEqual(visible);
+    expect((await f.layer.storage.getEntry(linked.id))?.content).toBe(linked.content);
+  });
+
   it('copies and verifies legacy records before switching, preserves IDs, and resumes after an empty index restart',async()=>{
     const f=await fixture();
     const original=await f.base.addEntry(post('alice'));

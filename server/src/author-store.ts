@@ -80,8 +80,8 @@ async function parallel<T>(items: T[], fn: (item: T) => Promise<void>, concurren
   if (failure) throw failure.reason;
 }
 
-export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
-  codec: ReturnType<typeof recordCodec>, { leaseMs = 60000, now = Date.now } = {}) {
+export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver | null,
+  codec: ReturnType<typeof recordCodec> | null, { leaseMs = 60000, now = Date.now } = {}) {
   const extra = base as Storage & Record<string, any>;
   const entries = new Map<string, JournalEntry>();
   const conversations = new Map<string, Conversation>();
@@ -110,6 +110,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     for (const [date, summary] of daily) if (summary.pseudonyms.some(p => belongs({pseudonym:p},user))) daily.delete(date);
   }
   async function readAuthor(state: AuthorState, opened?: GroupStore) {
+    if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     const binding = state.user.tinycloud;
     const store = opened || await resolveStore(binding);
     const loaded: { kind: Kind; value: RecordValue }[] = [];
@@ -131,6 +132,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     return loaded;
   }
   async function loadAuthor(state: AuthorState) {
+    if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     const binding = state.user.tinycloud;
     if (binding.minRecordVersion === 2) {
       const recovery = await (await resolveStore(binding)).get(RECOVERY_KEY);
@@ -145,6 +147,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     state.expires = now() + leaseMs;
   }
   async function check(state: AuthorState, reload = false) {
+    if (!resolveStore || !codec) return; // Locked authors stay out of every published index.
     if (state.activationPending) return; // uncertain metadata commit: only a verified re-link can resume
     if (!reload && state.available && state.expires > now()) return;
     if (!reload && !state.available && (state.retryAt || 0) > now()) return;
@@ -225,6 +228,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     return values.slice(offset, offset + limit);
   };
   async function write(kind: Kind, value: NewRecord): Promise<any> {
+    if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     await init();
     const lockHandle = ('handle' in value && typeof value.handle === 'string' && value.handle)
       || handlesByPseudonym.get(value.pseudonym) || '__legacy';
@@ -252,6 +256,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     return exclusive(lockHandle, save);
   }
   async function remove(kind: Kind, id: string) {
+    if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     await ready();
     const value = index(kind).get(id);
     if (!value) return;
@@ -329,6 +334,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
   function linkAccount(user: User, binding: AuthorBinding, progress: (message: string) => void, due: () => void,
     callTimeoutMs: number, onStep: (step: LinkStep) => void, migrateFrom?: string) {
     return exclusive(user.handle, async () => {
+      if (!resolveStore || !codec) throw new Error('Author storage keys are unavailable');
       due();
       onStep('checking');
       const all = await base.getAllUsers();
@@ -458,6 +464,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
     });
   }
   async function assetStore(binding: AuthorBinding): Promise<GroupStore> {
+    if (!resolveStore || !codec) throw new Error('Author storage keys are unavailable');
     await init();
     const raw = await resolveStore(binding);
     const write = (fn: () => Promise<void>) => exclusive(`assets:${binding.pseudonym}`, async () => {

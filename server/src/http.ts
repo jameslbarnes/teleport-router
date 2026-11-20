@@ -43,7 +43,8 @@ import { parsePostingRules, postingRulesSchema, postingIntentSchema, postingRule
 import { resolveOnboardingGroup, groupOnboardingView, inviteForms, agentInviteText, discordInvite, joinDiscordNote, GroupOnboardingError, inviteLimits, checkMemberRemoval } from './group-onboarding.js';
 import { sharingReceipt, formatSharingReceipt } from './sharing-receipt.js';
 import { SharingNoticeError, noticeRecorded } from './sharing-notice.js';
-import { tinyCloudIdentity } from './tinycloud-identity.js';
+import { tinyCloudIdentity, TinyCloudKeyMismatch } from './tinycloud-identity.js';
+import { recoveryAllowsRequest, recoveryAllowsTool, KEY_RECOVERY_MESSAGE } from './key-recovery.js';
 import { insightsRelease, checkUpgradePolicy, type UpgradePolicy, type EnclaveClient, type EnclaveInfo } from './insights-release.js';
 import { insightsEnclave } from './insights-enclave.js';
 import { hasPublicAudience, isPublicNotebookEntry, channelView } from './public-views.js';
@@ -1263,17 +1264,23 @@ async function checkGroupGrant(wire: string | undefined, prefix: string): Promis
 }
 const useAuthors = process.env.TINYCLOUD_AUTHORS === 'tinycloud';
 if (useAuthors && groups) throw new Error('Enable per-author storage without the legacy TINYCLOUD_GROUPS prototype.');
-const authorIdentity = useAuthors ? await tinyCloudIdentity() : null;
+const authorIdentity = useAuthors ? await tinyCloudIdentity().catch(error => {
+  if (!(error instanceof TinyCloudKeyMismatch)) throw error;
+  console.error(`[TinyCloud] ${error.message}. Starting read-only Router.`);
+  return null;
+}) : null;
+const keyRecovery = useAuthors && !authorIdentity;
 const authorCloud = authorIdentity ? (await import('./tinycloud-group-store.js')).tinyCloudGroups({
   privateKey: authorIdentity.privateKey, host: process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz',
 }) : null;
 const baseStorage: Storage = useFirestore ? new FirestoreStorage() : new MemoryStorage();
 const authorCodec = authorIdentity ? recordCodec(authorIdentity.recordKey, authorIdentity.encryptionKey) : null;
-const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
-  binding => authorCloud.accessFor(binding.delegation), authorCodec!,
+const authorLayer = useAuthors ? authorStorage(baseStorage,
+  authorCloud ? binding => authorCloud.accessFor(binding.delegation) : null, authorCodec,
   {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
 const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
+if (keyRecovery) storage.stop();
 const handleTraceAccess = traceAccess({
   store: traceRequestStore(useFirestore ? getFirestore() : undefined),
   getUser: keyHash => storage.getUserByKeyHash(keyHash),
@@ -1316,7 +1323,7 @@ async function setEntryLabels(entry: JournalEntry, labels: { repo?: string | nul
 const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string; recoveryConfig: string; previous?: { did: string; message: string }; recovery?: string}>();
 const authorJobs = new Map<string, LinkJob>();
 const STATIC_DIR = join(process.cwd(), '..');
-const discordGroupService = authorLayer ? discordGroups(storage, publishedStorage,
+const discordGroupService = !keyRecovery && authorLayer ? discordGroups(storage, publishedStorage,
   handle => authorLayer.status(handle), {baseUrl: BASE_URL.replace(/\/$/, ''), audience: discordAudience(process.env.DISCORD_BOT_TOKEN),
     history: discordHistory(process.env.DISCORD_BOT_TOKEN), send: discordSender(process.env.DISCORD_BOT_TOKEN)}) : null;
 /** Posts new group notes to groups' Discord feed channels. Never throws; a failed pass is tried again. */
@@ -1379,7 +1386,7 @@ function resolveTokenSecret(): string {
       const saved = readFileSync(file, 'utf8').trim();
       if (saved.length >= 32) return saved;
     }
-    if (existsSync('/data')) {
+    if (!keyRecovery && existsSync('/data')) {
       const created = randomBytes(48).toString('base64url');
       writeFileSync(file, created, { mode: 0o600, flag: 'wx' });
       return created;
@@ -1406,7 +1413,7 @@ function resolveRecoveryPath(): string {
 const RECOVERY_FILE = resolveRecoveryPath();
 
 // On startup: restore pending entries from recovery file if it exists
-if (storage instanceof StagedStorage && existsSync(RECOVERY_FILE)) {
+if (!keyRecovery && storage instanceof StagedStorage && existsSync(RECOVERY_FILE)) {
   try {
     const data = readFileSync(RECOVERY_FILE, 'utf-8');
     const state = JSON.parse(data);
@@ -1419,7 +1426,7 @@ if (storage instanceof StagedStorage && existsSync(RECOVERY_FILE)) {
 }
 
 // Check /data volume status on startup
-if (storage instanceof StagedStorage) {
+if (!keyRecovery && storage instanceof StagedStorage) {
   const usingDataVolume = RECOVERY_FILE.startsWith('/data');
   const dataDir = dirname(RECOVERY_FILE);
 
@@ -1564,7 +1571,7 @@ const notificationService: NotificationService = createNotificationService({
 
 // Start daily digest job (runs hourly, sends at 14:00 UTC)
 const DIGEST_HOUR_UTC = 14;
-setInterval(async () => {
+if (!keyRecovery) setInterval(async () => {
   const now = new Date();
   if (now.getUTCHours() === DIGEST_HOUR_UTC && now.getUTCMinutes() === 0) {
     console.log('[Digest] Starting daily digest job...');
@@ -2301,8 +2308,8 @@ async function createMCPServer(secretKey: string) {
   };
   // Server instructions reach the agent at the start of a session even when it loads tool descriptions lazily.
   // A slow or failed lookup must not hold up the connection: the session then starts without the list.
-  const atStart = await within(SKILL_LOOKUP_MS, skillsForList());
-  const skillInstructions = atStart ? renderSkillIndex(atStart.items, atStart.mutes) || undefined : undefined;
+  const atStart = keyRecovery ? null : await within(SKILL_LOOKUP_MS, skillsForList());
+  const skillInstructions = keyRecovery ? KEY_RECOVERY_MESSAGE : atStart ? renderSkillIndex(atStart.items, atStart.mutes) || undefined : undefined;
 
   // Lazy lookup of handle - only computed when tools are listed/called
   async function getHandle(): Promise<string | null> {
@@ -2320,6 +2327,11 @@ async function createMCPServer(secretKey: string) {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    if (keyRecovery) {
+      return { tools: SYSTEM_SKILLS.filter(skill => recoveryAllowsTool(skill.name))
+        .map(skill => ({ name: skill.name, inputSchema: skill.inputSchema,
+          description: `${KEY_RECOVERY_MESSAGE} ${skill.name === 'router_posting_rules' ? 'Read saved posting rules with action get.' : skill.description}` })) };
+    }
     const visibleNow = await within(SKILL_LOOKUP_MS, skillsForList());
     const skillIndexText = visibleNow
       ? [renderSkillIndex(visibleNow.items, visibleNow.mutes), renderSkillHint(visibleNow.waiting)].filter(Boolean).join('\n\n')
@@ -2505,6 +2517,9 @@ async function createMCPServer(secretKey: string) {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    if (keyRecovery && !recoveryAllowsTool(name, args)) {
+      return { isError: true, content: [{ type: 'text' as const, text: KEY_RECOVERY_MESSAGE }] };
+    }
     const parseToolSince = (sinceRaw?: string): number | undefined => {
       const raw = sinceRaw?.trim();
       if (!raw) return undefined;
@@ -3346,11 +3361,12 @@ async function createMCPServer(secretKey: string) {
         const date = new Date(entry.timestamp).toISOString().split('T')[0];
         const type = entry.skill ? `skill ("${entry.skill.name}": ${oneLine(entry.skill.whenToUse)})` : entry.isReflection ? 'reflection' : 'note';
         const author = entry.handle ? `@${entry.handle}` : entry.pseudonym;
+        const traceHelp = keyRecovery ? 'requests are paused during key recovery' : 'request with router_trace_access';
 
         return {
           content: [{
             type: 'text' as const,
-            text: `[${date}] ${author} posted a ${type}:\n\n${entry.content}\n\nPrivate trace: ${BASE_URL}${tracePointer(entry.id)} (request with router_trace_access)`,
+            text: `[${date}] ${author} posted a ${type}:\n\n${entry.content}\n\nPrivate trace: ${BASE_URL}${tracePointer(entry.id)} (${traceHelp})`,
           }],
           structuredContent: { entry_id: entry.id, content: entry.content, trace_url: BASE_URL + tracePointer(entry.id), ...(isAuthor ? { receipt: sharingReceipt(entry, BASE_URL, storage.isPending(entry.id)) } : {}) },
         };
@@ -3392,7 +3408,7 @@ async function createMCPServer(secretKey: string) {
       const sinceRaw = (args as { since?: string })?.since?.trim();
       const since = parseToolSince(sinceRaw);
       const roomId = (args as { room_id?: string })?.room_id?.trim();
-      const includeMatrix = !groupId && (args as { include_matrix?: boolean })?.include_matrix !== false;
+      const includeMatrix = !keyRecovery && !groupId && (args as { include_matrix?: boolean })?.include_matrix !== false;
 
       if (!query && !handleFilter && !since && !roomId && !groupId) {
         return {
@@ -6027,6 +6043,16 @@ const server = createServer(async (req, res) => {
     res.setHeader(key, value);
   });
 
+  if (keyRecovery) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Router-Mode', 'read-only');
+    if (!recoveryAllowsRequest(req.method, url.pathname)) {
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': '60' });
+      res.end(JSON.stringify({ status: 'degraded', service: 'teleport-router', mode: 'read-only', reason: 'storage_key_mismatch', error: KEY_RECOVERY_MESSAGE }));
+      return;
+    }
+  }
+
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/mcp/')) {
     // The Router key belongs in the Authorization header, where it stays out of addresses, history and logs.
     // Older routes read it from ?key= or ?secret_key=; a header key is presented to them under both names,
@@ -6163,7 +6189,7 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({
         ...visibleEntry,
         contentHtml: entryHtml(visibleEntry.content),
-        canDelete: isAuthor,
+        canDelete: !keyRecovery && isAuthor,
         ...(isAuthor ? { sharingReceipt: sharingReceipt(entry, BASE_URL, storage instanceof StagedStorage && storage.isPending(entry.id)) } : {}),
       }));
       return;
@@ -6258,7 +6284,7 @@ const server = createServer(async (req, res) => {
         image_digest: imageDigest,
         source_code: 'https://github.com/jameslbarnes/teleport-router',
         trust_center: `https://trust.phala.com/app/${appId}`,
-        tee_metadata: `https://${appId}-8090.dstack-pha-prod9.phala.network/`,
+        tee_metadata: `https://${appId}-8090.dstack-pha1-prod9.phala.network/`,
         env_vars: envStatus,
         env_vars_note: 'Values are injected via Phala dashboard encrypted storage. The docker-compose template (in source) uses bare variable names — no secrets are baked into the compose file or exposed in TEE metadata.',
         verification_steps: [
@@ -9864,7 +9890,7 @@ You pick a handle, and you're known by what you write.`;
 
 Present this as what lets them share freely, but don't overstate it: if they ask where a guarantee ends, say exactly where.`;
 
-          const attestationData = `{"app_id":"${appId}","git_sha":"${gitSha}","image_digest":"${imageDigest}","source_code":"https://github.com/jameslbarnes/teleport-router","trust_center":"https://trust.phala.com/app/${appId}","tee_metadata":"https://${appId}-8090.dstack-pha-prod9.phala.network/"}`;
+          const attestationData = `{"app_id":"${appId}","git_sha":"${gitSha}","image_digest":"${imageDigest}","source_code":"https://github.com/jameslbarnes/teleport-router","trust_center":"https://trust.phala.com/app/${appId}","tee_metadata":"https://${appId}-8090.dstack-pha1-prod9.phala.network/"}`;
 
           const activitySection = recentActivity
             ? `## What's been happening\n\n${recentActivity}`
@@ -9903,7 +9929,7 @@ cd /tmp/teleport-router-audit
 git checkout ${gitSha}
 
 1. What's running. Fetch the TEE's own report, which dstack serves, not the app:
-   curl -s https://${appId}-8090.dstack-pha-prod9.phala.network/
+   curl -s https://${appId}-8090.dstack-pha1-prod9.phala.network/
    GIT_SHA should be ${gitSha}, the image digest ${imageDigest}, and secrets in the compose file bare variable names. If that URL doesn't answer (Phala has closed it before), use the Trust Center (https://trust.phala.com/app/${appId}) and the report CI archived after the deploy (git grep -l ${gitSha} origin/master -- evidences/), and say which you used. Archived evidence shows a past deploy, so give its date and say the current deployment isn't verified.
 2. How it was built. Dockerfile and .github/workflows/build.yml should build this commit with no manual steps. Find the CI run for this commit (https://github.com/jameslbarnes/teleport-router/actions) and check that the image digest it built matches the one in the TEE's report; a commit label alone doesn't prove the image came from that commit.
 3. Each claim. For every bullet under "How you're protected", find the code that makes it true (file and line) and mark it holds, partly holds, or contradicted. Include every container in the compose file, not just the Router server; some share its data volume. Look hardest for anything that logs, sends or stores keys, waiting posts or emails, and for anything the operator or a moderator can call that the claims don't mention.
@@ -9995,7 +10021,7 @@ Attestation data the running server reports about itself (check it rather than t
 
 If they want to verify, the source is at https://github.com/jameslbarnes/teleport-router (commit ${gitSha}). They can also check the TEE metadata — ask them to open this URL and paste the result:
 
-https://${appId}-8090.dstack-pha-prod9.phala.network/
+https://${appId}-8090.dstack-pha1-prod9.phala.network/
 
 This comes from dstack infrastructure, not the app — it can't be faked. Verify GIT_SHA matches ${gitSha}, image digest matches ${imageDigest}, and secrets are bare variable names. If that page doesn't load (Phala has closed it before), use the Trust Center instead: https://trust.phala.com/app/${appId}
 
@@ -10311,8 +10337,10 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
           res.setHeader('Referrer-Policy', 'no-referrer');
           res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; frame-src https://openkey.so; connect-src 'self' https://openkey.so https://api.openkey.so ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
         }
-        res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
-        res.end(content);
+        res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': keyRecovery ? 'no-store' : cacheControl });
+        res.end(keyRecovery && ext === '.html'
+          ? content.toString('utf8').replace(/<body\b[^>]*>/i, body => `${body}<aside role="status">${KEY_RECOVERY_MESSAGE}</aside>`)
+          : content);
         return;
       } catch {
         // Fall through to 404
@@ -10415,6 +10443,7 @@ async function seedDefaultChannels() {
 // LISTEN_HOST (optional) binds one interface, e.g. 127.0.0.1 or a tailnet IP for local demos; unset = all
 server.listen(Number(PORT), process.env.LISTEN_HOST || undefined, async () => {
   console.log(`Router server running on port ${PORT}`);
+  if (keyRecovery) return;
   seedDefaultChannels();
 
   // ── Hook System ──────────────────────────────────────────
@@ -10487,7 +10516,7 @@ server.listen(Number(PORT), process.env.LISTEN_HOST || undefined, async () => {
 process.on('SIGTERM', () => {
   console.log('[Shutdown] SIGTERM received, saving pending state...');
 
-  if (storage instanceof StagedStorage) {
+  if (!keyRecovery && storage instanceof StagedStorage) {
     try {
       const state = storage.getPendingState();
       const entryCount = state.entries.length;

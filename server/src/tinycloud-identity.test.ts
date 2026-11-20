@@ -1,5 +1,5 @@
 import {it,expect,vi} from 'vitest';
-import {mkdtemp,writeFile,unlink,rmdir} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,unlink,rmdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {tinyCloudIdentity} from './tinycloud-identity.js';
@@ -18,6 +18,10 @@ it('pins the derived identity and refuses a changed identity instead of orphanin
     expect(first.encryptionKey).toEqual(second.encryptionKey);expect(first.encryptionKey).not.toEqual(first.recordKey);
     await writeFile(pin+'.encryption-v1','changed-key\n');
     await expect(tinyCloudIdentity(env)).rejects.toThrow('pinned key');
+    await unlink(pin);
+    await expect(tinyCloudIdentity(env)).rejects.toThrow('pinned key');
+    await expect(readFile(pin)).rejects.toMatchObject({code:'ENOENT'});
+    expect(await readFile(pin+'.encryption-v1', 'utf8')).toBe('changed-key\n');
     await unlink(pin+'.encryption-v1');
     await writeFile(pin,'did:pkh:eip155:1:0x0000000000000000000000000000000000000001\n');
     await expect(tinyCloudIdentity(env)).rejects.toThrow('pinned');

@@ -20,7 +20,7 @@ Linking copies each record with its original ID and reads it back before switchi
 
 ## OpenKey owners
 
-Open **Settings → Manage TinyCloud storage and OpenKey**. Choose OpenKey to link a new account, move an existing account, or approve another year of access. Keep a copy of your Router account key for signing in to Router on another device.
+Open **Settings → Manage TinyCloud storage and OpenKey**. Choose OpenKey to link a new account, move an existing account, or approve another year of access. In OpenKey, choose a managed account or a linked browser wallet. Either can authorize the same TinyCloud request. With a linked wallet, you sign in the wallet itself. Keep a copy of your Router account key for signing in to Router on another device.
 
 OpenKey signs a one-time Ethereum sign-in message that names the Router origin, grant and recovery record. The browser creates a separate recovery key and seals it to the owner's named TinyCloud encryption key at `apps/<reversed-site-name>/recovery`. TinyCloud can release that record to the owner after they approve decrypt access. Router's storage grant covers its own folder. OpenKey keeps the wallet signing key.
 
