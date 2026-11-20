@@ -63,6 +63,12 @@
         <p>Connect storage and allow Router to read, save and delete records in its folder for one year. Existing published Router records will move there after verification. Your storage key stays on this device.</p>
         <button id="connect-storage" class="r-btn r-btn--primary" disabled>Set up my note storage</button>
       </div>
+      <details id="openkey-choice"><summary>Use an OpenKey account</summary>
+        <p>Approve access to your Router folder with your passkey. TinyCloud holds the key that opens your recovery record. Keep a separate copy of your Router account key to sign in here again.</p>
+        <div id="previous-storage" hidden><label for="previous-file">Current Router recovery file (if it is on another device)</label><input id="previous-file" type="file" accept=".json"><label for="previous-password">Recovery file password</label><input id="previous-password" type="password" class="r-input" autocomplete="current-password"></div>
+        <button id="openkey-storage" class="r-btn">Connect with OpenKey</button>
+        <p id="openkey-capture" hidden></p>
+      </details>
       <button id="check-storage" class="r-btn">Check connection again</button>
       <div class="gs-skip"><button id="skip-storage" class="r-btn r-btn--plain">Skip storage for now</button>
         <p id="skip-note" class="r-notice r-notice--warning">If you skip this, your Router key is kept only in this browser. Clearing the browser’s data would lose your account.</p></div>

@@ -17,6 +17,8 @@ function receipt(result: any) {
   expect(result.content[0].text).toContain('immediately show the person');
   expect(notice.notification_evidence).toBeNull();
   expect(notice.review_url).not.toContain(ownerKey);
+  expect(notice.trace_url).toBe(base + '/trace-access?entry=' + notice.entry_id);
+  expect(result.content[0].text).toContain(notice.trace_url);
   return notice;
 }
 
@@ -71,6 +73,15 @@ describe('Write, review and delete across the publication boundary', () => {
     expect(mine.sharingReceipt).toMatchObject({ state: 'published', publish_at: null, review_url: notice.review_url });
     const publicView = await api(`/api/entry/${notice.entry_id}`).then(r => r.json());
     expect(publicView.canDelete).toBe(false);
+    expect(publicView.trace_url).toBe('/trace-access?entry=' + notice.entry_id);
+    const readerKeyHex = '0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
+    const asked = await api('/api/trace-access', readerKey, 'POST', {action:'request', entry_id:notice.entry_id, reader_public_key:readerKeyHex});
+    expect(asked.status).toBe(200);
+    const traceRequest = await asked.json();
+    expect(traceRequest).toMatchObject({owner:'@'+owner,state:'pending'});
+    const inbox:any = await client.callTool({name:'router_trace_access',arguments:{action:'inbox'}});
+    expect(inbox.isError).not.toBe(true);
+    expect(inbox.structuredContent.requests.some((r:any)=>r.request_id===traceRequest.request_id)).toBe(true);
     expect(publicView.sharingReceipt).toBeUndefined();
     expect(publicView.sharingNotice).toBeUndefined();
     expect((await api(`/api/entries/${notice.entry_id}`, ownerKey, 'DELETE')).ok).toBe(true);

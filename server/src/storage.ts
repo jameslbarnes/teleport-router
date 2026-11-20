@@ -7,6 +7,7 @@
 
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { tracePointer } from './trace-pointer.js';
 import type { AuthorBinding } from './author-store.js';
 import { nextPostingRules, type PostingRules, type PostingRulesDraft } from './posting-rules.js';
 import { prepareNotice, noticeDestinations, noticeRecorded, recordNotice, SharingNoticeError, type SharingNotice } from './sharing-notice.js';
@@ -15,6 +16,7 @@ import { prepareNotice, noticeDestinations, noticeRecorded, recordNotice, Sharin
 export type EntryVisibility = 'public' | 'private' | 'ai-only';
 
 export interface JournalEntry {
+  trace_url?: string; // Stable pointer to the private trace associated with this post ID.
   id: string;
   pseudonym: string;         // Legacy: "Quiet Feather#79c30b" (always present for display fallback)
   handle?: string;           // New: "james" (without @) if user has claimed a handle
@@ -498,6 +500,7 @@ export class MemoryStorage implements Storage {
       ...entry,
       id: (entry as JournalEntry).id || String(this.nextId++),
     };
+    newEntry.trace_url = tracePointer(newEntry.id);
     this.entries = this.entries.filter(e => e.id !== newEntry.id);
     this.entries.unshift(newEntry); // Idempotent when retrying a staged record.
     return newEntry;
@@ -932,14 +935,14 @@ export class FirestoreStorage implements Storage {
   async addEntry(entry: Omit<JournalEntry, 'id'>, _stagingDelayMs?: number): Promise<JournalEntry> {
     const id = (entry as JournalEntry).id || generateEntryId();
     const keywords = tokenize(entry.content);
-    const newEntry: JournalEntry = { ...entry, id, keywords };
+    const newEntry: JournalEntry = { ...entry, id, keywords, trace_url: tracePointer(id) };
 
     const docData: Record<string, any> = {
       pseudonym: newEntry.pseudonym,
       client: newEntry.client,
       content: newEntry.content,
       timestamp: newEntry.timestamp,
-      keywords,
+      keywords, trace_url: newEntry.trace_url,
     };
 
     if (newEntry.handle) {
@@ -1895,6 +1898,7 @@ export class StagedStorage implements Storage {
     const newEntry: JournalEntry = {
       ...entry,
       id,
+      trace_url: tracePointer(id),
       publishAt: Date.now() + delay,
     };
     // All public entry writers using this server share the same publication gate.

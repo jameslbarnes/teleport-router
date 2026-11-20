@@ -40,7 +40,7 @@ import { readFile, writeFile, readdir, stat, mkdir, rename, rm } from 'node:fs/p
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
-import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, mentionsRouterWrite, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
 
 // The extraction copy must fit the enclave's limit on what it opens (400 KiB of ciphertext).
 const EXTRACTION_MAX_BYTES = 380 * 1024;
@@ -157,7 +157,7 @@ try {
     for await (const log of logs(root)) {
       if (log.bytes > MAX_LOG_BYTES) { totals.logs_too_large++; continue; }
       const text = await readFile(log.path, 'utf8');
-      const mentionsPost = text.includes('router_write_entry') || text.includes('write_to_shared_notebook');
+      const mentionsPost = mentionsRouterWrite(text);
       const full = mentionsPost || mentionsNeverUpload(text, neverUpload);
       // Every log's ancestry is recorded, also when it holds no post: it may sit between two that do.
       const head = full ? null : text.slice(0, 2_000_000).split('\n');

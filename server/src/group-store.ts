@@ -104,7 +104,7 @@ function unwrap<T>(result: SdkResult<T>, what: string): T {
 }
 
 /** Adapt delegated TinyCloud access (one group's grant) to a GroupStore. */
-export function groupStoreFromAccess(access: DelegatedKv): GroupStore {
+export function groupStoreFromAccess(access: DelegatedKv, grantPath = ''): GroupStore {
   async function read(key: string) {
     const result = await access.kv.get(key, { source: 'network' });
     if (!result.ok && /not.?found|404/i.test(`${result.error?.code} ${result.error?.message}`)) return null;
@@ -131,6 +131,7 @@ export function groupStoreFromAccess(access: DelegatedKv): GroupStore {
       const data = unwrap(await access.kv.list({ path }), 'list') as { keys?: unknown };
       const keys = Array.isArray(data?.keys) ? (data.keys as string[]) : [];
       // Accept keys relative to the grant, to the path, or to the space root
+      if (!path) return keys.map(k => grantPath && k.startsWith(grantPath) ? k.slice(grantPath.length) : k);
       return keys.map(k => { const at = k.lastIndexOf(path); return at >= 0 ? k.slice(at) : path + k; });
     },
     async delete(key) {

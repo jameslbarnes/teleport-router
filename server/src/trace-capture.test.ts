@@ -24,6 +24,14 @@ const receipt = (id: string) => JSON.stringify({ receipt: { version: 1, entry_id
 const KEY = 'k'.repeat(43);
 const NEVER = { neverUpload: ['mcp__diary__'] };
 
+it('recognizes submitted Router group and skill results while keeping unrelated tools out of the trace index', () => {
+  const events = [use('read','mcp__plugin_teleport-router_router__skill_observe',{}),result('read',receipt('prompt')),
+    use('other','mcp__other__skill_similar',{result:'value'}),result('other',receipt('other')),
+    use('group','mcp__plugin_teleport-router_router__channel_research_observe',{result:'value'}),result('group',receipt('group-note')),
+    use('skill','mcp__router__skill_observe',{result:'value'}),result('skill',receipt('skill-note'))];
+  expect(findPosts(events).posts.map((r:any)=>r.entryId)).toEqual(['group-note','skill-note']);
+});
+
 const twoPosts = () => [
   rec('session-owner', undefined, { accountUuid: 'account-1' }),
   user('find out why the nightly job is slow'),

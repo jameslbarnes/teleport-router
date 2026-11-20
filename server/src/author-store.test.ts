@@ -47,6 +47,41 @@ describe('Each author owns their published records',()=>{
     expect(await f.base.getEntry('waiting-id')).toBeNull();
   });
 
+  it('moves a linked account only after both owners approve, with recoverable notes and the existing private trace', async () => {
+    const f = await fixture(), before = binding('alice');
+    const after = { ...binding('bob'), space:'new-owner-space', pseudonym:before.pseudonym };
+    f.data.set(after.space, new Map());
+    await f.layer.link(f.users[0], before);
+    const entry = await f.layer.storage.addEntry(post('alice'));
+    const source = await f.resolve(before), target = await f.resolve(after);
+    const { sealPart, openPart } = await import('./trace-envelope.js');
+    // @ts-expect-error Browser WebCrypto is the production implementation the owner uses.
+    const { rewrapTraceKey } = await import('../../browser/src/trace-keys.mjs');
+    const context = {ownerDid:before.ownerDid, entryId:entry.id}, old = testWallet('alice'), next = testWallet('bob');
+    const part = sealPart(Buffer.from('synthetic private trace'), context, 'full', {owner:old.signingKey.compressedPublicKey});
+    const record = {v:1, ...context, full:{...part.meta,chunks:1}};
+    await source.put('traces/'+entry.id+'/meta',JSON.stringify(record));
+    await source.put('traces/'+entry.id+'/full-000',part.ciphertext.toString('base64'));
+    await source.put('insights/consent','a synthetic historical policy');
+    const options = {migrateFrom:before.ownerDid};
+    await expect(f.layer.link(f.users[0],after)).rejects.toThrow('explicit migration');
+    await expect(f.layer.link(f.users[0],after,undefined,options)).rejects.toThrow('Prepare');
+    expect((await f.layer.status('alice')).ownerDid).toBe(before.ownerDid);
+    const wrap = await rewrapTraceKey(part.meta,before.ownerDid,entry.id,old.privateKey,next.signingKey.compressedPublicKey,'full','owner',next.privateKey);
+    await target.put('owner-move/'+old.address.toLowerCase()+'/'+entry.id, JSON.stringify({
+      source:before.ownerDid,target:next.signingKey.compressedPublicKey,hashes:{full:part.meta.sha256},wraps:{full:wrap}}));
+    await f.layer.link(f.users[0],after,undefined,options);
+    expect((await f.layer.status('alice')).ownerDid).toBe(after.ownerDid);
+    expect((await f.layer.storage.getEntry(entry.id))?.content).toBe(entry.content);
+    const copied = JSON.parse((await target.get('traces/'+entry.id+'/meta'))!);
+    expect(copied.ownerDid).toBe(after.ownerDid); expect(copied.sealedOwnerDid).toBe(before.ownerDid);
+    expect(openPart(copied.full,part.ciphertext,context,'full','owner',next.privateKey).toString()).toBe('synthetic private trace');
+    expect(await target.get('insights/consent')).toBeNull();
+    expect(await target.get('previous-owners/'+old.address.toLowerCase()+'/insights/consent')).toContain('historical');
+    expect(await source.get('posts/'+entry.id)).toBeTruthy();
+    await expect((await f.layer.assetStore(before)).put('traces/late/meta','late')).rejects.toThrow('ownership changed');
+  });
+
   it('keeps a skill note’s fields through encryption and a fresh load, and out of the older database',async()=>{
     const f=await fixture();
     await f.layer.link(f.users[0],binding('alice'));

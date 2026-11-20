@@ -374,6 +374,7 @@
                         <span>${escapeHtml(formatDate(entry.timestamp))}</span>
                     </div>
                     <div class="entry-content">${entry.contentHtml ?? escapeHtml(entry.content)}</div>
+                    <p id="trace"><a href="/trace-access?entry=${encodeURIComponent(entry.id)}">Private trace</a></p>
                     ${renderManagement(entry)}
                     <div class="entry-permalink">
                         <button type="button" class="copy-link-action" data-copy-id="${escapeHtml(entry.id)}">Copy link</button>

@@ -748,7 +748,8 @@ Use router_get_entry to fetch each one, then let's talk about what's interesting
 
             const header = [
                 `${renderAvatar(handle)}<span class="entry-handle">@${escapeHtml(handle)}</span>`,
-                `<a href="/e/${encodeURIComponent(entry.id)}">${escapeHtml(formatTime(entry.timestamp))}</a>`
+                `<a href="/e/${encodeURIComponent(entry.id)}">${escapeHtml(formatTime(entry.timestamp))}</a>`,
+                `<a href="/trace-access?entry=${encodeURIComponent(entry.id)}">Trace</a>`
             ];
             if (source) header.push(`<span>via ${escapeHtml(source)}</span>`);
 

@@ -24,8 +24,9 @@ async function decrypt(key, envelope, aad) {
 /** Interoperates with the server's existing owner-recovery envelope; owner key stays here. */
 export async function recoverAuthorKey(privateKey, raw, binding) {
   const e = JSON.parse(raw), signing = new SigningKey(privateKey), recipient = signing.compressedPublicKey;
-  if (binding.ownerDid.toLowerCase() !== 'did:pkh:eip155:1:' + computeAddress(privateKey).toLowerCase()
-      || e.version !== 1 || e.suite !== 'secp256k1-hkdf-sha256-aes256gcm'
+  const matchesOwner = e.version === 3 ? e.networkRecovery?.publicKey === recipient
+    : e.version === 1 && binding.ownerDid.toLowerCase() === 'did:pkh:eip155:1:' + computeAddress(privateKey).toLowerCase();
+  if (!matchesOwner || e.suite !== 'secp256k1-hkdf-sha256-aes256gcm'
       || JSON.stringify(context(e)) !== JSON.stringify(context(binding)) || e.recipient !== recipient
       || !/^0x(?:02|03)[a-f0-9]{64}$/.test(e.ephemeralPublicKey || '')) throw Error('Recovery belongs to a different storage account.');
   const aad = info('teleport-router/owner-recovery/v1', binding, recipient, e.ephemeralPublicKey);

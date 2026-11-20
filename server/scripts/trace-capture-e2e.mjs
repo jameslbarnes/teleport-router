@@ -10,7 +10,9 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {promisify} from 'node:util';
 import {Wallet} from 'ethers';
-import {TinyCloudNode} from '@tinycloud/node-sdk';
+import {TinyCloudNode,serializeDelegation} from '@tinycloud/node-sdk';
+import {readGrantedTrace} from './trace-reader.mjs';
+import {rewrapTraceKey} from '../../browser/src/trace-keys.mjs';
 import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {sealFull,openFull} from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
@@ -149,6 +151,26 @@ try {
   for(const text of opened) for(const gone of [secretKey,'CIPHERCIPHER','toolUseResult','synthetic-account']) assert(!text.includes(gone),`Cleaned: ${gone.slice(0,12)}`);
   assert(opened[0].includes('summary of reasoning')&&opened[0].includes('[secret removed]'));
   console.log('PASS storage holds ciphertext; the owner\'s key opens each trace; slices are separate; credentials and provider ciphertext are gone');
+
+  // A different agent can see the published post and request its trace. Only the owner's approval opens it.
+  const ownPost = await fetch(base+'/api/entry/'+ids[0],{headers:{Authorization:'Bearer '+secretKey}}).then(r=>r.json());
+  const notice = ownPost.sharingReceipt;
+  if (notice?.state === 'awaiting_notice') await post('/api/entries/'+ids[0]+'/notice',{secret_key:secretKey,
+    evidence_kind:'agent_reported',notice_id:notice.notice_id,notice_sha256:notice.notice_sha256,conversation_ref:'local-synthetic-trace-test/receipt'});
+  await post('/api/entries/'+ids[0]+'/publish',{secret_key:secretKey});
+  const reader = Wallet.createRandom(), readerAccount = randomBytes(32).toString('base64url');
+  const ask = (secret_key,body) => post('/api/trace-access',{secret_key,...body});
+  const r = await ask(readerAccount,{action:'request',entry_id:ids[0],reader_public_key:reader.signingKey.compressedPublicKey});
+  assert.equal(r.state,'pending');
+  const savedMeta = await owner.kv.get('router/traces/'+ids[0]+'/meta',{source:'network'});
+  assert(savedMeta.ok);
+  const m = JSON.parse(stored(savedMeta.data));
+  const wrap = await rewrapTraceKey(m.full,m.ownerDid,ids[0],ownerKey,reader.signingKey.compressedPublicKey);
+  const scope = await owner.createDelegation({delegateDID:r.reader_did,path:'router/traces/'+ids[0]+'/',actions:['tinycloud.kv/get'],includePublicSpace:false,expiryMs:3600000});
+  await ask(secretKey,{action:'approve',request_id:r.request_id,revision:r.revision,delegation:serializeDelegation(scope),wrap});
+  const approved = await ask(readerAccount,{action:'status',request_id:r.request_id});
+  assert((await readGrantedTrace(approved,reader.privateKey,host)).toString().includes('MARKER-ALPHA'));
+  console.log('PASS the approved reader opens exactly the named post through its TinyCloud grant');
 
   // The post two sessions downstream of the private tool has a record that says so and holds nothing else.
   const heldOut=join(work,'withheld.json');

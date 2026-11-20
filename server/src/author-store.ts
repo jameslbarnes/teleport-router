@@ -4,6 +4,7 @@
  */
 import { tokenize, encodePageCursor, generateEntryId, type Storage, type User,
   type JournalEntry, type Conversation, type Summary, type DailySummary, type OwnRecords } from './storage.js';
+import { moveAuthorFolder } from './author-move.js';
 import type { GroupStore } from './group-store.js';
 import { isPublicNotebookEntry } from './public-views.js';
 import { recordCodec, canonical, RECOVERY_KEY, ownerPublicKey } from './author-records.js';
@@ -18,6 +19,7 @@ export interface AuthorBinding {
   linkedAt: number;
   /** Recovered from a verified owner link signature. Never the private key. */
   ownerPublicKey?: string;
+  networkRecovery?: import('./openkey-recovery.js').NetworkRecovery;
   /** Durable downgrade barrier, committed only after migration readback. */
   minRecordVersion?: 2;
 }
@@ -37,6 +39,8 @@ export type LinkStep = 'waiting' | 'checking' | 'encrypting' | 'finding' | 'copy
 export interface LinkOptions {
   /** Time (ms since the epoch) after which the link stops before switching anything, time spent waiting to start included. */
   deadline?: number;
+  /** Validated signatures from the current and incoming owners. */
+  migrateFrom?: string;
   /** Longest wait for any one storage read or listing. Writes are never cut short. */
   callTimeoutMs?: number;
   onStep?: (step: LinkStep) => void;
@@ -306,7 +310,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
    * Existing TinyCloud records are authoritative. Never restore them from a stale
    * cache/Firestore copy, and never replace an owner edit/deletion without its ETag. */
   async function link(user: User, binding: AuthorBinding, progress: (message: string) => void = () => {},
-    { deadline = Infinity, callTimeoutMs = LINK_CALL_TIMEOUT_MS, onStep = () => {} }: LinkOptions = {}) {
+    { deadline = Infinity, callTimeoutMs = LINK_CALL_TIMEOUT_MS, onStep = () => {}, migrateFrom }: LinkOptions = {}) {
     const due = () => { if (now() > deadline) throw new LinkTimeoutError('The link ran out of time before switching storage.'); };
     onStep('waiting');
     linking.set(user.handle, (linking.get(user.handle) || 0) + 1);
@@ -315,14 +319,15 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       handlesByPseudonym.set(binding.pseudonym,user.handle);
       // One link at a time per storage identity, so two accounts cannot both claim it, and per account.
       // Links for other accounts and other storage run alongside.
-      return await exclusive(`did:${binding.ownerDid.toLowerCase()}`, () => linkAccount(user, binding, progress, due, callTimeoutMs, onStep));
+      return await exclusive(`did:${binding.ownerDid.toLowerCase()}`, () => exclusive(`assets:${binding.pseudonym}`,
+        () => linkAccount(user, binding, progress, due, callTimeoutMs, onStep, migrateFrom)));
     } finally {
       const left = (linking.get(user.handle) || 1) - 1;
       if (left) linking.set(user.handle, left); else linking.delete(user.handle);
     }
   }
   function linkAccount(user: User, binding: AuthorBinding, progress: (message: string) => void, due: () => void,
-    callTimeoutMs: number, onStep: (step: LinkStep) => void) {
+    callTimeoutMs: number, onStep: (step: LinkStep) => void, migrateFrom?: string) {
     return exclusive(user.handle, async () => {
       due();
       onStep('checking');
@@ -332,12 +337,15 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       const previous = authors.get(user.handle);
       const durableBinding = all.find(u=>u.handle===user.handle)?.tinycloud;
       const knownBinding = durableBinding || previous?.user.tinycloud;
-      if (knownBinding && knownBinding.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
+      const moving = !!migrateFrom && knownBinding?.ownerDid === migrateFrom && migrateFrom.toLowerCase() !== binding.ownerDid.toLowerCase();
+      if (migrateFrom && !moving) throw new Error('The current storage owner changed. Start the move again.');
+      if (!moving && knownBinding && knownBinding.ownerDid.toLowerCase() !== binding.ownerDid.toLowerCase())
         throw new Error('Changing an existing TinyCloud identity requires an explicit migration.');
-      if (knownBinding && (knownBinding.space !== binding.space || knownBinding.prefix !== binding.prefix))
+      if (!moving && knownBinding && (knownBinding.space !== binding.space || knownBinding.prefix !== binding.prefix))
         throw new Error('Changing an existing TinyCloud space requires an explicit migration.');
+      if (!moving && knownBinding && canonical(knownBinding.networkRecovery) !== canonical(binding.networkRecovery)) throw new Error('Renew using the same recovery record.');
       if (!binding.ownerPublicKey) throw new Error('A fresh owner signature is required for encrypted storage and recovery.');
-      binding = { ...binding, ownerDid: knownBinding?.ownerDid || binding.ownerDid,
+      binding = { ...binding, ownerDid: moving ? binding.ownerDid : knownBinding?.ownerDid || binding.ownerDid,
         ownerPublicKey: ownerPublicKey(binding, binding.ownerPublicKey),
         minRecordVersion: durableBinding?.minRecordVersion || previous?.user.tinycloud.minRecordVersion };
       const linked = { ...user, tinycloud: binding } as BindingUser;
@@ -353,6 +361,9 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       if (await store.get(RECOVERY_KEY) !== recovery) throw new Error('Owner recovery readback failed');
       let encrypted = 0;
       onStep('encrypting');
+      const verifyMove = moving && knownBinding ? await moveAuthorFolder(
+        readsWithin(await within(resolveStore(knownBinding), callTimeoutMs, 'opening the current owner grant'), callTimeoutMs), store,
+        knownBinding, binding, codec, value => belongs(value, linked) && (!('handle' in value) || !value.handle || value.handle === user.handle), due) : undefined;
       // Migrate the current node contents first, with conditional writes. Partial
       // completion is safe to resume while the durable minimum remains v1.
       for (const kind of ['posts','conversations','summaries'] as Kind[]) {
@@ -412,6 +423,7 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       onStep('reading');
       const state: AuthorState={user:linked,expires:now()+leaseMs,available:true};
       const verified = await readAuthor(state, store);
+      await verifyMove?.();
       due(); // the last point at which the link stops: after this it switches and finishes
       onStep('saving');
       try {
@@ -445,9 +457,20 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver,
       return {copied,encrypted,legacyCleanupPending:failed.length};
     });
   }
-  return { storage, ready, link, refresh: async (handle:string) => { await init(); const state=authors.get(handle); if(state)await check(state,true); return state?.available??false; },
+  async function assetStore(binding: AuthorBinding): Promise<GroupStore> {
+    await init();
+    const raw = await resolveStore(binding);
+    const write = (fn: () => Promise<void>) => exclusive(`assets:${binding.pseudonym}`, async () => {
+      const current = authors.get(handlesByPseudonym.get(binding.pseudonym) || '')?.user.tinycloud;
+      if (!current || current.ownerDid !== binding.ownerDid || current.space !== binding.space) throw new Error('Storage ownership changed. Refresh the account.');
+      await fn();
+    });
+    return { ...raw, put: (k, v, condition) => write(() => raw.put(k, v, condition)), delete: k => write(() => raw.delete(k)) };
+  }
+  return { storage, ready, link, assetStore, refresh: async (handle:string) => { await init(); const state=authors.get(handle); if(state)await check(state,true); return state?.available??false; },
     status: async (handle:string) => { await init(); const s=authors.get(handle);
       if(s&&!locks.has(handle))await check(s);
       return s ? {linked:true,available:s.available&&s.expires>now(),space:s.user.tinycloud.space,ownerDid:s.user.tinycloud.ownerDid,
+        recoveryMode:s.user.tinycloud.networkRecovery ? 'openkey' : 'self-held',
         encryption:{version:s.user.tinycloud.minRecordVersion || 1,setupRequired:s.user.tinycloud.minRecordVersion !== 2 || !!s.activationPending}} : {linked:false}; } };
 }

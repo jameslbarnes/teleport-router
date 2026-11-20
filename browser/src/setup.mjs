@@ -1,3 +1,4 @@
+import { unlockOldStorage } from './unlock-backup.mjs';
 import { Wallet } from 'ethers';
 import { b64, encryptBackup, decryptBackup } from './recovery.mjs';
 
@@ -100,7 +101,7 @@ async function load() {
     }
     // Signed in already, for example straight after restoring a recovery file on a new device.
     await checkStorage();
-    if (storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running') await showRules();
+    if (params.get('storage') !== '1' && storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running') await showRules();
     return;
   }
   context = await groupContext(); showGroup();
@@ -126,6 +127,9 @@ async function checkStorage() {
   catch (error) { if (error.status === 404) throw Error('Personal storage is not turned on for this Router yet. ' + (solo() ? 'Your account is saved. You can skip this step.' : 'Your account and group membership are saved. Come back when it has been turned on.')); throw error; }
   let saved; try { saved = JSON.parse(localStorage.getItem(backupName())); } catch { throw Error('The saved recovery file could not be read. Restore your downloaded file before continuing.'); }
   envelope ||= saved;
+  $('openkey-storage').textContent = storage.recoveryMode === 'openkey' ? 'Renew OpenKey storage access' : storage.linked ? 'Move storage to OpenKey' : 'Connect with OpenKey';
+  $('openkey-choice').hidden = storage.job?.status === 'running';
+  $('previous-storage').hidden = !storage.linked || storage.recoveryMode === 'openkey';
   const ready = storage.linked && storage.available && storage.encryption?.version === 2;
   $('storage-ready').hidden = !ready; $('storage-new').hidden = ready || !!envelope || !!backup;
   $('storage-unlock').hidden = ready || !envelope || !!backup;
@@ -308,6 +312,25 @@ $('connect-storage').onclick = () => act(async () => {
   let receipt; try { receipt = JSON.parse(localStorage.getItem(receiptName())); } catch {}
   storage = await connectStorage({ privateKey: backup.tinycloudKey, routerKey: key, request, onProgress: message, receipt, saveReceipt: value => localStorage.setItem(receiptName(), JSON.stringify(value)) });
   backup = undefined; await checkStorage();
+});
+$('openkey-storage').onclick = () => act(async () => {
+  const { connectStorage } = await import('./storage.mjs');
+  const migrating = storage?.linked && storage.recoveryMode !== 'openkey';
+  let migrateFrom;
+  if (migrating) {
+    const recovered = await unlockOldStorage(identity.handle, key, $('previous-file').files[0], $('previous-password').value);
+    $('previous-password').value = '';
+    const signer = new Wallet(recovered.tinycloudKey);
+    if (storage.ownerDid.toLowerCase() !== ('did:pkh:eip155:1:' + signer.address).toLowerCase()) throw Error('Use the recovery file for the current storage owner.');
+    migrateFrom = { did: storage.ownerDid, privateKey: signer.privateKey, sign: message => signer.signMessage(message) };
+  }
+  const linked = await connectStorage({ useOpenKey: true, migrateFrom, expectedDid: !migrating && storage?.ownerDid, routerKey: key, request,
+    onProgress: message, saveReceipt: value => localStorage.setItem(receiptName(), JSON.stringify(value)) });
+  await checkStorage();
+  $('openkey-choice').open = true;
+  $('openkey-capture').hidden = false;
+  $('openkey-capture').textContent = 'Your trace capture public key (safe to copy): ' + linked.tracePublicKey;
+  message('Connected. Keep your Router key to sign in on another device.');
 });
 $('check-storage').onclick = () => act(checkStorage); $('storage-next').onclick = () => act(() => showDiscord());
 $('skip-storage').onclick = () => act(showRules);

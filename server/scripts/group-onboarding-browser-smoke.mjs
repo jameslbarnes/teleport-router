@@ -269,9 +269,33 @@ try {
   // Coming back signed in goes on from the storage step, not to a dead end.
   await soloPage.goto(base + '/group-setup');
   await soloPage.locator('#storage-unlock').waitFor();
+  const created = await api('/api/entries', { secret_key:ownerKey, posting_intent:'user-requested', content:'Synthetic trace request walkthrough.', to:[] });
+  const receipt = created.receipt || created;
+  if (receipt.state === 'awaiting_notice') {
+    const notice = await fetch(base+'/api/entries/'+receipt.entry_id+'/notice',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+ownerKey},
+      body:JSON.stringify({evidence_kind:'agent_reported',notice_id:receipt.notice_id,notice_sha256:receipt.notice_sha256,conversation_ref:'local-browser-fixture/receipt'})});
+    assert.equal(notice.status,200);
+  }
+  const published = await fetch(base + '/api/entries/' + receipt.entry_id + '/publish', {method:'POST', headers:{Authorization:'Bearer '+ownerKey}});
+  assert.equal(published.status,200);
+  await soloPage.goto(base + '/e/' + receipt.entry_id);
+  await soloPage.locator('#trace a').click();
+  assert.equal(soloPage.url(),receipt.trace_url);
+  await soloPage.locator('#public-key').fill('0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798');
+  await soloPage.getByRole('button',{name:'Request access'}).click();
+  await soloPage.locator('#status').filter({hasText:'is pending'}).waitFor();
+  const ownerContext = await newContext({viewport:{width:390,height:844}});
+  await ownerContext.addInitScript(k=>localStorage.setItem('router_key',k),ownerKey);
+  const inboxPage = await ownerContext.newPage();
+  await inboxPage.goto(base + '/trace-access');
+  await inboxPage.getByRole('button',{name:'Allow',exact:true}).waitFor();
+  assert.equal(await inboxPage.evaluate(()=>document.documentElement.scrollWidth > innerWidth),false);
+  await inboxPage.getByRole('button',{name:'Decline',exact:true}).click();
+  await inboxPage.locator('#status').filter({hasText:'declined'}).waitFor();
+  await ownerContext.close();
   await soloContext.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
+  console.log('PASS: setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry; a published note’s trace link, reader request and owner decline. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
 } finally {
   await browser?.close();
   child.kill();

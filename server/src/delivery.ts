@@ -8,6 +8,7 @@
  * - Webhook URLs (e.g., "https://webhook.example.com")
  */
 
+import { tracePointer } from './trace-pointer.js';
 import type { Storage, JournalEntry, User, Channel } from './storage.js';
 import type { NotificationService, EmailClient } from './notifications.js';
 import { canSendEmailTo } from './notifications.js';
@@ -474,7 +475,7 @@ export function getDefaultVisibility(
  * - `visibility: 'private'` with `to` → keeps `to` as-is (already correct)
  */
 export function normalizeEntry(entry: JournalEntry): JournalEntry {
-  const normalized = { ...entry };
+  const normalized = { ...entry, trace_url: tracePointer(entry.id) };
   let to = normalized.to ? [...normalized.to] : [];
 
   // Migrate channel field to #channel in `to`

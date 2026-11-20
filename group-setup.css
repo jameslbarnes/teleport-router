@@ -47,6 +47,10 @@ body[data-permission] #discord > :not(#discord-confirm) { display: none; }
 body[data-permission] #discord { border-top: 0; padding-top: 0; }
 .gs .r-perm-actions .r-btn { margin: 0; }
 
+.trace-requests { overflow-wrap: anywhere; }
+.trace-requests article { margin-block: var(--s-4); }
+.trace-requests form, .trace-requests #credentials { margin-block: var(--s-3); }
+
 @media (max-width: 480px) {
   .gs-steps { font-size: var(--t-xs); gap: var(--s-1); }
   .gs .r-btn:not(.r-btn--plain) { width: 100%; margin-right: 0; }

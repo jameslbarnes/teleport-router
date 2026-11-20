@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Private traces · Router</title><meta name="description" content="Request access to a Router post’s private trace or review requests for your own traces.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/router.css?v=1"><link rel="stylesheet" href="/group-setup.css">
+</head><body><main class="r-page gs trace-requests"><header class="r-header"><a class="r-brand brand" href="/">Router</a></header>
+<h1 class="r-h1" id="heading">Trace access requests</h1>
+<p id="status" role="status" aria-live="polite"></p>
+<form id="signin" hidden><label for="key">Router account key</label><input class="r-input" id="key" type="password" required><button class="r-btn" type="submit">Sign in</button></form>
+<p id="note" hidden><a id="note-link">Read the note</a></p>
+<form id="ask" hidden><p>Ask the owner for a 24-hour TinyCloud read grant. Your agent needs the matching private key to open the trace.</p><label for="public-key">Reader’s compressed public key</label>
+<input id="public-key" class="r-input" required pattern="0x(02|03)[a-fA-F0-9]{64}"><button class="r-btn" type="submit">Request access</button></form>
+<div id="credentials" hidden><label for="backup">Router recovery file (if it is on another device)</label><input id="backup" type="file" accept=".json">
+<label for="password">Recovery file password</label><input class="r-input" id="password" type="password" autocomplete="current-password"></div>
+<section id="requests"></section>
+<p><a href="/trace-access" id="inbox-link" hidden>All requests to me</a></p>
+</main><script type="module" src="/onboarding-assets/trace-access.js"></script></body></html>

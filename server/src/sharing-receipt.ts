@@ -1,3 +1,4 @@
+import { tracePointer } from './trace-pointer.js';
 import type { JournalEntry } from './storage.js';
 import { noticeDestinations, noticeRecorded, type NoticeEvidence } from './sharing-notice.js';
 
@@ -5,6 +6,7 @@ import { noticeDestinations, noticeRecorded, type NoticeEvidence } from './shari
 export interface SharingReceipt {
   version: 1;
   entry_id: string;
+  trace_url: string;
   state: 'awaiting_notice' | 'pending' | 'held' | 'published' | 'removed';
   audience: string;
   destinations: string[];
@@ -30,6 +32,7 @@ export function sharingReceipt(entry: JournalEntry, baseUrl: string, pending: bo
   return {
     version: 1,
     entry_id: entry.id,
+    trace_url: baseUrl.replace(/\/$/, '') + tracePointer(entry.id),
     state: removed ? 'removed' : held ? 'held' : waiting ? 'awaiting_notice' : pending ? 'pending' : 'published',
     audience: destinations.length ? `Only: ${destinations.join(', ')}`
       : entry.visibility === 'private' ? 'Only you — private post' : 'Public Router — anyone on the internet',
@@ -50,7 +53,7 @@ export function formatVisibleSharingNotice(receipt: SharingReceipt): string {
     : receipt.state === 'pending' ? 'Pending; only you can see it until it publishes.'
     : 'Published.';
   const schedule = receipt.publish_at === null ? '' : `\nScheduled publication: ${new Date(receipt.publish_at).toISOString()} (UTC; display in the person’s timezone).`;
-  return `Router sharing receipt\nAudience: ${receipt.audience}\nStatus: ${status}${schedule}\n\n${receipt.content.split('\n').map(line => `> ${line}`).join('\n')}\n\n[Review or delete](${receipt.review_url})\nEntry ID: ${receipt.entry_id}`;
+  return `Router sharing receipt\nAudience: ${receipt.audience}\nStatus: ${status}${schedule}\n\n${receipt.content.split('\n').map(line => `> ${line}`).join('\n')}\n\n[Review or delete](${receipt.review_url})\nEntry ID: ${receipt.entry_id}\nPrivate trace: ${receipt.trace_url}`;
 }
 
 export function formatSharingReceipt(receipt: SharingReceipt): string {

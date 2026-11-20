@@ -64,8 +64,8 @@ export function tinyCloudGroups(config: TinyCloudRouterConfig) {
     if (cached) return cached;
     const node = await signedIn();
     let access: unknown;
+    const delegation = deserializeDelegation(wire);
     try {
-      const delegation = deserializeDelegation(wire);
       if (delegation.host && new URL(delegation.host).origin !== new URL(config.host).origin)
         throw new Error('The TinyCloud grant uses a different host.');
       const expiry = sessionExpiryFor(delegation.expiry);
@@ -74,7 +74,7 @@ export function tinyCloudGroups(config: TinyCloudRouterConfig) {
       if (isRevokedGrant((err as Error)?.message)) throw new GroupStoreRevokedError();
       throw err;
     }
-    const store = groupStoreFromAccess(access as DelegatedKv);
+    const store = groupStoreFromAccess(access as DelegatedKv, delegation.path);
     storeByGrant.set(wire, store);
     return store;
   };

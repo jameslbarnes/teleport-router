@@ -1,10 +1,11 @@
 import { createCipheriv, createDecipheriv, createECDH, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 import { computeAddress, SigningKey } from 'ethers';
+import type { NetworkRecovery } from './openkey-recovery.js';
 import type { JournalEntry, Conversation, Summary } from './storage.js';
 
 export type RecordKind = 'posts' | 'conversations' | 'summaries';
 export type RecordValue = JournalEntry | Conversation | Summary;
-export interface RecordContext { ownerDid: string; space: string; prefix: string }
+export interface RecordContext { ownerDid: string; space: string; prefix: string; networkRecovery?: NetworkRecovery }
 export const RECOVERY_KEY = 'recovery-v1';
 export const canonical = (v: unknown): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
   ? Object.fromEntries(Object.entries(value).filter(([, x]) => x !== undefined).sort(([a], [b]) => a.localeCompare(b))) : value);
@@ -76,7 +77,8 @@ export function recordCodec(integrityKey: Uint8Array, encryptionRoot: Uint8Array
       return value;
     },
     createRecovery(b: RecordContext, publicKey: string): string {
-      const recipient = ownerPublicKey(b, publicKey);
+      const signer = ownerPublicKey(b, publicKey);
+      const recipient = b.networkRecovery?.publicKey || signer;
       const ephemeral = createECDH('secp256k1'); ephemeral.generateKeys();
       const ephemeralPublicKey = '0x' + ephemeral.getPublicKey('hex', 'compressed');
       const aad = recoveryAAD(b, recipient, ephemeralPublicKey);
@@ -84,14 +86,17 @@ export function recordCodec(integrityKey: Uint8Array, encryptionRoot: Uint8Array
       const payload = authorKey(b).toString('base64url');
       const sealed = seal(wrappingKey, payload, aad);
       if (open(wrappingKey, sealed, aad) !== payload) throw new Error('Owner recovery self-check failed');
-      const envelope = { version: 1, suite: 'secp256k1-hkdf-sha256-aes256gcm', ownerDid: b.ownerDid, space: b.space,
+      const envelope = { version: b.networkRecovery ? 3 : 1, suite: 'secp256k1-hkdf-sha256-aes256gcm', ownerDid: b.ownerDid, space: b.space,
+        ...(b.networkRecovery ? { networkRecovery: b.networkRecovery } : {}),
         prefix: b.prefix, recipient, ephemeralPublicKey, ...sealed };
       return canonical({ ...envelope, mac: recoveryMac(b, envelope) });
     },
     verifyRecovery(raw: string, b: RecordContext, publicKey: string) {
       const { mac: actual, ...envelope } = JSON.parse(raw);
-      if (envelope.version !== 1 || envelope.suite !== 'secp256k1-hkdf-sha256-aes256gcm'
-        || canonical(context(envelope)) !== canonical(context(b)) || envelope.recipient !== ownerPublicKey(b, publicKey))
+      const signer = ownerPublicKey(b, publicKey);
+      if (envelope.version !== (b.networkRecovery ? 3 : 1) || canonical(envelope.networkRecovery) !== canonical(b.networkRecovery)
+        || envelope.suite !== 'secp256k1-hkdf-sha256-aes256gcm' || canonical(context(envelope)) !== canonical(context(b))
+        || envelope.recipient !== (b.networkRecovery?.publicKey || signer))
         throw new Error('Owner recovery context mismatch');
       checkMac(actual, recoveryMac(b, envelope));
     },
@@ -106,8 +111,12 @@ export function recordCodec(integrityKey: Uint8Array, encryptionRoot: Uint8Array
  * is intentionally not verifiable here. An export is not an authorship receipt. */
 export function recoverAuthorKey(privateKey: string, raw: string, b: RecordContext): Buffer {
   const envelope = JSON.parse(raw);
-  const recipient = ownerPublicKey(b, SigningKey.computePublicKey(privateKey, true));
-  if (envelope.version !== 1 || envelope.suite !== 'secp256k1-hkdf-sha256-aes256gcm'
+  const recipient = SigningKey.computePublicKey(privateKey, true);
+  if (envelope.version === 3) {
+    if (!b.networkRecovery || canonical(envelope.networkRecovery) !== canonical(b.networkRecovery) || b.networkRecovery.publicKey !== recipient)
+      throw new Error('Owner recovery context mismatch');
+  } else { ownerPublicKey(b, recipient); }
+  if (![1, 3].includes(envelope.version) || envelope.suite !== 'secp256k1-hkdf-sha256-aes256gcm'
     || canonical(context(envelope)) !== canonical(context(b)) || envelope.recipient !== recipient
     || !/^0x(?:02|03)[\da-f]{64}$/.test(envelope.ephemeralPublicKey || '')) throw new Error('Owner recovery context mismatch');
   const ecdh = createECDH('secp256k1'); ecdh.setPrivateKey(Buffer.from(privateKey.replace(/^0x/, ''), 'hex'));

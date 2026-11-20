@@ -9,6 +9,11 @@
  */
 
 import 'dotenv/config';
+import { getFirestore } from 'firebase-admin/firestore';
+import { canonical } from './author-records.js';
+import { linkMessage, networkRecovery } from './openkey-recovery.js';
+import { tracePointer } from './trace-pointer.js';
+import { traceAccess, traceRequestStore, TraceRequestError } from './trace-access.js';
 import { createServer } from 'http';
 import { randomUUID, createHash, randomBytes, createHmac } from 'crypto';
 import { readFile } from 'fs/promises';
@@ -582,6 +587,15 @@ export const SYSTEM_SKILLS: Skill[] = [
     createdAt: 0,
   },
   {
+    id: 'system_router_trace_access', name: 'router_trace_access', handlerType: 'builtin', instructions: '', createdAt: 0,
+    description: 'Ask the owner to share the private trace behind a note you can read. Supply a compressed secp256k1 reader public key from your own device. The owner receives the request in their private inbox and can approve it with TinyCloud. Use inbox for requests to you, status to collect a decision. A pointer alone grants no access.',
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['request', 'inbox', 'status', 'decline'] },
+      entry_id: { type: 'string' }, reader_public_key: { type: 'string', description: '0x02 or 0x03 followed by 64 hex digits. Keep the private key on the reader device.' },
+      request_id: { type: 'string' }, revision: { type: 'string', description: 'Required when declining.' },
+    }, required: ['action'] },
+  },
+  {
     id: 'system_router_get_entry',
     name: 'router_get_entry',
     description: 'Read one note or imported conversation in full, for example after a search. For your own notes it also returns the sharing receipt.',
@@ -1135,7 +1149,7 @@ export const SYSTEM_SKILLS: Skill[] = [
 ];
 
 /** Reported to MCP clients. Kept in step with the plugin manifests by tool-surface.test.ts. */
-export const ROUTER_MCP_VERSION = '0.4.0';
+export const ROUTER_MCP_VERSION = '0.5.0';
 
 // What each built-in tool does to the world, for clients that show or gate tools by effect.
 // read: changes nothing. write: changes Router state and can be undone. destructive: removes something.
@@ -1148,6 +1162,7 @@ export const TOOL_EFFECTS: Record<string, [title: string, effect: ToolEffect]> =
   router_search: ['Search the notebook', 'read'],
   router_search_matrix: ['Search Matrix rooms', 'read'],
   router_get_entry: ['Read a note', 'read'],
+  router_trace_access: ['Request a private trace or check requests', 'write'],
   router_use_skill: ['Read, rate, mute or turn on shared skills', 'write'],
   router_benchmarks: ['Read benchmark leaderboards and points', 'read'],
   router_map: ['Read a group research map', 'read'],
@@ -1259,6 +1274,18 @@ const authorLayer = authorCloud && authorIdentity ? authorStorage(baseStorage,
   {leaseMs: process.env.NODE_ENV === 'production' ? 60000 : Number(process.env.TINYCLOUD_LEASE_MS || 60000)}) : null;
 const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
+const handleTraceAccess = traceAccess({
+  store: traceRequestStore(useFirestore ? getFirestore() : undefined),
+  getUser: keyHash => storage.getUserByKeyHash(keyHash),
+  host: authorCloud?.host || 'https://tee.node.tinycloud.xyz',
+  async visible(id, actor) {
+    const entry = await storage.getEntry(id);
+    if (!entry) return null;
+    const author = isEntryAuthor(entry, actor.pseudonym, actor.user?.handle);
+    if (isHiddenWhilePending(id, author)) return null;
+    return await canView(normalizeEntry(entry), actor.user?.handle, verifiedEmail(actor.user), author, storage, new Map()) ? entry : null;
+  },
+});
 
 type LabelPatch = { repo?: unknown; tags?: unknown };
 /** Checks a label change. A field absent from the patch is left alone; null or empty clears it. */
@@ -1286,7 +1313,7 @@ async function setEntryLabels(entry: JournalEntry, labels: { repo?: string | nul
   if (storage.isPending(entry.id)) return apply(entry);
   return publishedStorage.addEntry(apply({ ...entry })); // same id: replaces the stored record
 }
-const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string; recovery?: string}>();
+const authorChallenges = new Map<string, {message: string; expires: number; grantHash: string; recoveryConfig: string; previous?: { did: string; message: string }; recovery?: string}>();
 const authorJobs = new Map<string, LinkJob>();
 const STATIC_DIR = join(process.cwd(), '..');
 const discordGroupService = authorLayer ? discordGroups(storage, publishedStorage,
@@ -1508,7 +1535,7 @@ const insights = authorIdentity && authorCloud && process.env.TRACE_STORAGE !== 
       getUser: handle => storage.getUser(handle),
       updateUser: (handle, updates) => storage.updateUser(handle, updates as any),
       getEntry: id => storage.getEntry(id),
-      storeFor: binding => authorCloud.accessFor(binding.delegation),
+      storeFor: binding => authorLayer!.assetStore(binding),
     })
   : null;
 // Requests whose deadline passes start (if enough people agreed) or close, within a minute.
@@ -2585,7 +2612,7 @@ async function createMCPServer(secretKey: string) {
         ...entryResults.map(e => ({
           id: e.id,
           timestamp: e.timestamp,
-          text: `[${new Date(e.timestamp).toISOString().split('T')[0]}] ${e.handle ? '@' + e.handle : e.pseudonym}${groupId ? ` (group #${groupId})` : ''}: ${e.content}`,
+          text: `[${new Date(e.timestamp).toISOString().split('T')[0]}] ${e.handle ? '@' + e.handle : e.pseudonym}${groupId ? ` (group #${groupId})` : ''}: ${e.content}\nPrivate trace: ${BASE_URL}${tracePointer(e.id)}`,
           followed: !!(e.handle && followedHandles.has(e.handle)),
         })),
         ...conversationResults.map(c => ({
@@ -2732,6 +2759,14 @@ async function createMCPServer(secretKey: string) {
       } catch (err) {
         return { content: [{ type: 'text' as const, text: err instanceof SharingNoticeError ? err.message : 'Could not record notice delivery.' }], isError: true };
       }
+    }
+
+    if (name === 'router_trace_access') {
+      try {
+        if (args?.action === 'approve') throw new TraceRequestError('Approve from the owner review page with TinyCloud.');
+        const result = await handleTraceAccess({ user: await getToolUser(), pseudonym, keyHash }, args || {});
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
+      } catch (err) { return { content: [{ type: 'text' as const, text: err instanceof TraceRequestError ? err.message : 'Trace request unavailable.' }], isError: true }; }
     }
 
     if (name === 'router_posting_rules') {
@@ -3315,9 +3350,9 @@ async function createMCPServer(secretKey: string) {
         return {
           content: [{
             type: 'text' as const,
-            text: `[${date}] ${author} posted a ${type}:\n\n${entry.content}`,
+            text: `[${date}] ${author} posted a ${type}:\n\n${entry.content}\n\nPrivate trace: ${BASE_URL}${tracePointer(entry.id)} (request with router_trace_access)`,
           }],
-          ...(isAuthor ? { structuredContent: { receipt: sharingReceipt(entry, BASE_URL, storage.isPending(entry.id)) } } : {}),
+          structuredContent: { entry_id: entry.id, content: entry.content, trace_url: BASE_URL + tracePointer(entry.id), ...(isAuthor ? { receipt: sharingReceipt(entry, BASE_URL, storage.isPending(entry.id)) } : {}) },
         };
       }
 
@@ -8034,21 +8069,39 @@ const server = createServer(async (req, res) => {
           || !grant.expiry || !Number.isFinite(grant.expiry.getTime()) || grant.expiry.getTime() <= Date.now())
           throw new Error('The grant must cover router/ with exactly get, put, list and del for this Router, and must be unexpired.');
         const grantHash = createHash('sha256').update(wire).digest('hex');
+        const network = parsed.network_recovery === undefined ? undefined : networkRecovery(parsed.network_recovery, ownerDid, BASE_URL);
+        if (network) {
+          const { signedFolderGrant } = await import('./tinycloud-grant-scope.js');
+          signedFolderGrant(wire, {space:grant.spaceId,ownerDid,delegateDid:authorIdentity.did,path:'router/',
+            actions:GROUP_GRANT_ACTIONS,host:authorCloud.host,maxMs:365 * 86400000}, Date.now());
+        }
+        const recoveryConfig = canonical(network || null);
         if (url.pathname === '/api/tinycloud/challenge') {
           for(const [handle,c] of authorChallenges) if(c.expires<Date.now()) authorChallenges.delete(handle);
           const expires=Date.now()+10*60*1000;
-          const message=`Link TinyCloud to Teleport Router\nEncrypt published records in my space and enable recovery with my TinyCloud key.\nServer: ${BASE_URL}\nRouter identity: ${authorIdentity.did}\nRouter account: ${user.handle}\nOwner: ${ownerDid}\nGrant SHA-256: ${grantHash}\nNonce: ${randomUUID()}\nExpires: ${new Date(expires).toISOString()}`;
-          authorChallenges.set(user.handle,{message,expires,grantHash});
-          res.writeHead(200); res.end(JSON.stringify({message,expires})); return;
+          const issued = Date.now(), nonce = randomBytes(16).toString('hex');
+          const from = parsed.migrate_from;
+          if (from !== undefined && (typeof from !== 'string' || !user.tinycloud || from !== user.tinycloud.ownerDid || from.toLowerCase() === ownerDid.toLowerCase()))
+            throw new Error('The source must be the current storage owner and the destination must be different.');
+          if (user.tinycloud && user.tinycloud.ownerDid.toLowerCase() !== ownerDid.toLowerCase() && !from)
+            throw new Error('Changing storage owners requires both owners to approve the move.');
+          const move = from ? { from, to: ownerDid } : undefined;
+          const message = linkMessage(BASE_URL, match[1], user.handle, grantHash, network, nonce, issued, expires, move);
+          const previous = from ? { did: from, message: linkMessage(BASE_URL, from.split(':').at(-1), user.handle, grantHash, network, nonce, issued, expires, move) } : undefined;
+          authorChallenges.set(user.handle,{message,expires,grantHash,recoveryConfig,previous});
+          res.writeHead(200); res.end(JSON.stringify({message,expires,...(previous ? {previous_message:previous.message} : {})})); return;
         }
         const challenge=authorChallenges.get(user.handle);
-        if(!challenge||challenge.expires<Date.now()||challenge.grantHash!==grantHash) throw new Error('Request a fresh linking challenge.');
+        if(!challenge||challenge.expires<Date.now()||challenge.grantHash!==grantHash||challenge.recoveryConfig!==recoveryConfig||challenge.previous?.did!==parsed.migrate_from) throw new Error('Request a fresh linking challenge.');
         const {verifyMessage,SigningKey,hashMessage}=await import('ethers');
         if(typeof parsed.signature!=='string'||verifyMessage(challenge.message,parsed.signature).toLowerCase()!==match[1].toLowerCase())
           throw new Error('The TinyCloud owner signature does not match this grant.');
+        if (challenge.previous && (user.tinycloud?.ownerDid !== challenge.previous.did || typeof parsed.previous_signature !== 'string'
+            || verifyMessage(challenge.previous.message, parsed.previous_signature).toLowerCase() !== challenge.previous.did.split(':').at(-1)!.toLowerCase()))
+          throw new Error('The current storage owner must sign this move.');
         if(authorJobs.get(user.handle)?.status==='running') { res.writeHead(409); res.end(JSON.stringify({error:'Your migration is already running.'})); return; }
         const binding={ownerDid,space:grant.spaceId,prefix:grant.path,delegation:wire,pseudonym:derivePseudonym(parsed.secret_key),linkedAt:Date.now(),
-          ownerPublicKey:SigningKey.recoverPublicKey(hashMessage(challenge.message),parsed.signature)};
+          ownerPublicKey:SigningKey.recoverPublicKey(hashMessage(challenge.message),parsed.signature), ...(network ? { networkRecovery: network } : {})};
         if (url.pathname === '/api/tinycloud/recovery') {
           challenge.recovery ??= authorCodec.createRecovery(binding,binding.ownerPublicKey);
           res.writeHead(200); res.end(JSON.stringify({recovery:challenge.recovery,message:challenge.message,
@@ -8059,14 +8112,35 @@ const server = createServer(async (req, res) => {
         authorChallenges.delete(user.handle);
         // Links for different accounts run side by side. link() takes one at a time per account and per
         // TinyCloud identity, which keeps one identity to one Router account.
-        authorJobs.set(user.handle,startLinkJob(({deadline,onStep,progress})=>authorLayer.link(user,binding,progress,{deadline,onStep})));
+        authorJobs.set(user.handle,startLinkJob(({deadline,onStep,progress})=>authorLayer.link(user,binding,progress,{deadline,onStep,migrateFrom:challenge.previous?.did})));
         res.writeHead(202); res.end(JSON.stringify({status:'running',handle:user.handle})); return;
       } catch(err) {
         res.writeHead(400); res.end(JSON.stringify({error:err instanceof Error ? err.message : 'Invalid TinyCloud linking request.'})); return;
       }
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/trace-access') {
+      res.setHeader('Cache-Control', 'no-store');
+      const key = req.headers.authorization?.replace(/^Bearer /i, '');
+      if (!key || !isValidSecretKey(key)) { res.writeHead(401); res.end(JSON.stringify({error: 'Sign in to Router.'})); return; }
+      try {
+        const input = JSON.parse(await readBody(req, 100000));
+        const result = await handleTraceAccess({ user: await storage.getUserByKeyHash(hashSecretKey(key)), pseudonym: derivePseudonym(key), keyHash: hashSecretKey(key) }, input);
+        res.writeHead(200); res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(err instanceof TraceRequestError ? err.status : 400);
+        res.end(JSON.stringify({ error: err instanceof TraceRequestError ? err.message : 'Trace request unavailable.' }));
+      }
+      return;
+    }
+
     // Insights: private traces behind posts, the owner's signed consent, and runs over consented traces.
+    if (req.method === 'GET' && url.pathname === '/.well-known/openkey-manifest.json') {
+      const app_id = new URL(BASE_URL).hostname.split('.').reverse().join('.');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ name: 'Router', app_id, keys: [{ path: 'apps/' + app_id + '/recovery', abilities: ['key.create', 'decrypt'] }] }));
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/insights/release') {
       if (!insights?.releaseEnabled) { res.writeHead(404); res.end(JSON.stringify({ error: 'Insights runs are not enabled on this server.' })); return; }
       res.writeHead(200, { 'Cache-Control': 'no-store' }); res.end(JSON.stringify(insights.info())); return;
@@ -8079,7 +8153,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && (url.pathname.startsWith('/api/insights/') || url.pathname.startsWith('/api/traces'))) {
       let releaseUpload = () => {};
       // Storing and returning an owner-only trace needs no release key. Everything else does.
-      const ownerOnly = ['/api/traces', '/api/traces/get', '/api/traces/list', '/api/traces/owner'].includes(url.pathname);
+      const ownerOnly = ['/api/traces', '/api/traces/get', '/api/traces/list', '/api/traces/owner', '/api/traces/metadata'].includes(url.pathname);
       if (!insights || (!insights.releaseEnabled && !ownerOnly)) {
         res.writeHead(404); res.end(JSON.stringify({ error: ownerOnly ? 'Private traces are not enabled on this server.' : 'Insights runs are not enabled on this server.' })); return;
       }
@@ -8118,6 +8192,7 @@ const server = createServer(async (req, res) => {
           case '/api/insights/consent/status': result = insights.consentStatus(user); break;
           case '/api/traces/owner': result = insights.ownerKey(user); break;
           case '/api/traces': result = await insights.putTrace(user, body); break;
+          case '/api/traces/metadata': result = await insights.traceMetadata(user, body.entry_id); break;
           case '/api/traces/get': result = await insights.getTrace(user, body.entry_id, body.part); break;
           case '/api/traces/list': result = { entry_ids: await insights.listTraces(user) }; break;
           case '/api/insights/requests': result = await insights.createRequest(user, body); break;
@@ -10199,7 +10274,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         filePath = '/group-setup.html';
       } else if (filePath === '/setup/cli') {
         filePath = '/join.html';
-      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe', '/map'].includes(filePath)) {
+      } else if (['/setup', '/prompt', '/dashboard', '/join', '/settings', '/connect', '/posting-rules', '/docs', '/release', '/verify-email', '/unsubscribe', '/map', '/trace-access'].includes(filePath)) {
         filePath = `${filePath}.html`;
       }
 
@@ -10232,9 +10307,9 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
           res.setHeader('Referrer-Policy', 'no-referrer');
           res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
         }
-        if (filePath === '/group-setup.html') {
+        if (filePath === '/group-setup.html' || filePath === '/trace-access.html') {
           res.setHeader('Referrer-Policy', 'no-referrer');
-          res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+          res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; frame-src https://openkey.so; connect-src 'self' https://openkey.so https://api.openkey.so ${new URL(process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz').origin}; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
         }
         res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
         res.end(content);

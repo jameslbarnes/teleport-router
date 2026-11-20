@@ -90,7 +90,13 @@ export function openFull(meta, ciphertext, context, ownerPrivateKey) {
 // ── Finding posts in a session log ──────────────────────────────────────────────────────
 
 const WRITE_TOOL = /(?:^|__)(?:router_write_entry|write_to_shared_notebook)$/;
-const WRITE_HINTS = ['router_write_entry', 'write_to_shared_notebook'];
+const WRITE_HINTS = ['router_write_entry', 'write_to_shared_notebook', 'channel_', 'skill_'];
+export const mentionsRouterWrite = text => WRITE_HINTS.some(h => text.includes(h));
+// Router's generated skills create a post only when the agent submits a result.
+function isWrite(name, args) {
+  return WRITE_TOOL.test(name) || /^(?:mcp__[\w-]*(?:router|teleport)[\w-]*__)?(?:skill_|channel_)[\w-]+$/i.test(name)
+    && typeof args?.result === 'string' && args.result.length > 0;
+}
 /**
  * Tools whose results are never uploaded, even encrypted: each owner lists their own, as tool-name
  * prefixes such as "mcp__diary__". Matched anywhere in the tool name. None by default.
@@ -144,7 +150,7 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
   const never = name => { const hit = neverUpload.find(p => name.includes(p)); if (hit) { calledNeverUpload = true; withheld ||= `the session called ${hit}, whose results are never uploaded`; } };
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
-    const mentionsWrite = WRITE_HINTS.some(h => raw.includes(h));
+    const mentionsWrite = mentionsRouterWrite(raw);
     const mentionsNever = !calledNeverUpload && neverUpload.some(p => mentionsTool(raw, p));
     let mentionsPending = false;
     if (pending.size) for (const id of pending.keys()) if (raw.includes(id)) { mentionsPending = true; break; }
@@ -154,7 +160,7 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
     if (call) {
       const name = `mcp__${call.server}__${call.tool}`;
       never(name);
-      if (WRITE_TOOL.test(name)) {
+      if (isWrite(name, typeof call.arguments === 'string' ? parse(call.arguments) : call.arguments)) {
         const text = (Array.isArray(call.result?.content) ? call.result.content : []).map(c => (c && typeof c.text === 'string') ? c.text : '').join('');
         const bad = call.status !== 'completed' || call.error || call.result?.isError || call.result?.is_error;
         const entryId = bad ? null : entryIdFrom(text, call.result?.structuredContent);
@@ -168,7 +174,7 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
     for (const block of blocksOf(record)) {
       if (block.type === 'tool_use' && typeof block.name === 'string') {
         never(block.name);
-        if (WRITE_TOOL.test(block.name) && typeof block.id === 'string') pending.set(block.id, { line: i });
+        if (isWrite(block.name, block.input) && typeof block.id === 'string') pending.set(block.id, { line: i });
       } else if (block.type === 'tool_result' && pending.has(block.tool_use_id)) {
         pending.delete(block.tool_use_id);
         const entryId = block.is_error ? null : entryIdFrom(resultText(block), record.mcpMeta?.structuredContent ?? record.toolUseResult?.structuredContent);

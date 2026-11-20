@@ -170,7 +170,7 @@ export interface EnclaveClient {
 type ConsentUser = User & { insightsConsent?: InsightsConsentRecord };
 type StoredPart = PartMeta & { chunks: number };
 /** `upload` names the chunk set this record points to. Records written before it existed keep their chunks directly under the post. */
-interface TraceRecord { v: 1; entryId: string; ownerDid: string; createdAt: number; upload?: string; full: StoredPart; derived?: StoredPart & { policyId: string } }
+interface TraceRecord { v: 1; entryId: string; ownerDid: string; sealedOwnerDid?: string; createdAt: number; upload?: string; full: StoredPart; derived?: StoredPart & { policyId: string } }
 const chunkKey = (entryId: string, upload: string | undefined, part: string, i: number) =>
   `traces/${entryId}/${upload ? upload + '/' : ''}${part}-${String(i).padStart(3, '0')}`;
 type RequestStatus = 'open' | 'started' | 'not_enough_people' | 'expired' | 'failed';
@@ -378,7 +378,7 @@ export function insightsRelease(deps: ReleaseDeps) {
     /** What a capture client needs to encrypt a trace for its owner alone. Both values are public. */
     ownerKey(user: User) {
       const b = binding(user);
-      return { handle: user.handle, owner_did: b.ownerDid, owner_public_key: compressPublicKey(b.ownerPublicKey), full_max_bytes: FULL_MAX };
+      return { handle: user.handle, owner_did: b.ownerDid, owner_public_key: compressPublicKey(b.networkRecovery?.publicKey || b.ownerPublicKey), full_max_bytes: FULL_MAX };
     },
 
     /** Public: the program and the enclave as it described itself, attestation included. Owners' clients check it themselves. */
@@ -516,6 +516,13 @@ export function insightsRelease(deps: ReleaseDeps) {
       return { entry_id: entryId, stored: true, full_sha256: full.meta.sha256, derived_sha256: derived?.meta.sha256 || null };
     },
 
+    async traceMetadata(user: User, id: unknown) {
+      const b = binding(user);
+      if (!validId(id)) throw new Error('entry_id is required');
+      const record = await traceRecord(await deps.storeFor(b), id);
+      return record?.ownerDid === b.ownerDid ? record : null;
+    },
+
     /** The owner's own trace, still encrypted. Router never opens the full part. */
     async getTrace(user: User, entryId: unknown, which: unknown) {
       const b = binding(user);
@@ -526,7 +533,7 @@ export function insightsRelease(deps: ReleaseDeps) {
       if (!record || record.ownerDid !== b.ownerDid) return null;
       const meta = record[part];
       if (!meta) return null;
-      return { entry_id: entryId, owner_did: record.ownerDid, created_at: record.createdAt, part, meta,
+      return { entry_id: entryId, owner_did: record.sealedOwnerDid || record.ownerDid, created_at: record.createdAt, part, meta,
         has_derived: !!record.derived, data: (await readPart(store, entryId, part, meta, record.upload)).toString('base64') };
     },
 

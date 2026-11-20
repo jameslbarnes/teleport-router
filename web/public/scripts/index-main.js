@@ -1212,7 +1212,7 @@
             // Under the note: [time] [state] [who can read it] [actions]
             const id = escapeHtml(entry.id);
             let meta = [];
-            meta.push(`<a href="/e/${id}" class="permalink">${formatTime(entry.timestamp)}</a>`);
+            meta.push(`<a href="/e/${id}" class="permalink">${formatTime(entry.timestamp)}</a>`, `<a href="/trace-access?entry=${encodeURIComponent(entry.id)}">Trace</a>`);
             meta.push(renderStatusBadges(entry));
             meta.push(renderAudienceBadges(entry));
             // Check ownership by pseudonym OR handle

@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { generateSecretKey } from './identity.js';
 
-const port = 30000 + Math.floor(Math.random() * 4000), base = `http://127.0.0.1:${port}`;
+let base: string;
 const ownerKey = generateSecretKey(), newKey = generateSecretKey(), outsiderKey = generateSecretKey();
 const group = 'reading-club', otherGroup = 'another-group';
 let child: ChildProcess, newcomer: Client, owner: Client, outsider: Client;
@@ -33,6 +34,11 @@ async function publish(client: Client, key: string, content: string, to?: string
 
 describe('A new member joins, chooses group rules, reads and shares', () => {
   beforeAll(async () => {
+    const reservation = createServer();
+    await new Promise<void>((resolve, reject) => reservation.once('error', reject).listen(0, '127.0.0.1', resolve));
+    const { port } = reservation.address() as AddressInfo;
+    base = `http://127.0.0.1:${port}`;
+    await new Promise<void>(resolve => reservation.close(() => resolve()));
     child = spawn(process.execPath, ['--import', 'tsx', 'src/http.ts'], { cwd: process.cwd(), env: { ...process.env, PORT: String(port), BASE_URL: base, STAGED_STORAGE: 'memory', STAGING_DELAY_MS: '3600000', TINYCLOUD_GROUPS: '', TINYCLOUD_AUTHORS: '', MODERATOR_URL: '', TELEGRAM_BOT_TOKEN: '', MATRIX_HOMESERVER_URL: '', ANTHROPIC_API_KEY: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; child.stderr?.on('data', d => { output = (output + d).slice(-2000); }); child.stdout?.resume();
     let ready = false;

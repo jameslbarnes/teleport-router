@@ -16,6 +16,7 @@ import {
 
 import { derivePseudonym, isValidSecretKey } from './identity.js';
 import { MemoryStorage, generateEntryId, type Storage } from './storage.js';
+import { tracePointer } from './trace-pointer.js';
 
 // Initialize storage (swap for production implementation)
 const storage: Storage = new MemoryStorage();
@@ -186,6 +187,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 Your voice appears as: ${pseudonym}
 Entry ID: ${entry.id}
+Private trace: ${entry.trace_url}
 
 Your words are now part of the journal at router.teleport.computer`,
           },
@@ -223,7 +225,7 @@ Your words are now part of the journal at router.teleport.computer`,
 
       const formatted = entries.map((e, i) => {
         const date = new Date(e.timestamp).toISOString();
-        return `[${i + 1}] ${date}\n${e.content}`;
+        return `[${i + 1}] ${date}\n${e.content}\nPrivate trace: ${tracePointer(e.id)}`;
       }).join('\n\n---\n\n');
 
       return {
