@@ -61,7 +61,7 @@ export async function connectStorage({ privateKey, routerKey, request, onProgres
     if (open) {
       const existing = await readRecovery(owner);
       if (existing && !existing.networkRecovery) throw Error('This space already uses a self-held recovery key. Choose its original setup.');
-      const prepared = await open.prepareNetworkRecovery(owner, location.origin, existing?.networkRecovery);
+      const prepared = await open.prepareNetworkRecovery(owner, location.origin, existing?.networkRecovery, onProgress);
       network = prepared.network;
       privateKey = prepared.privateKey;
     }

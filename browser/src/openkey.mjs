@@ -51,7 +51,25 @@ export async function openNetworkRecovery(owner, network, origin) {
     return secret;
   } finally { bytes.fill(0); }
 }
-export async function prepareNetworkRecovery(owner, origin, existing) {
+async function ensureRecoveryKey(owner, path, onProgress) {
+  // New OpenKey accounts can finish sign-in while their encryption network is still being created.
+  const retryDelays = [1000, 2000, 4000, 8000, 15000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await owner.keys.ensureKey(path);
+      return;
+    } catch (error) {
+      if (error?.code !== 'NETWORK_NOT_FOUND') throw error;
+      if (attempt === retryDelays.length) {
+        throw new Error('OpenKey is still setting up encrypted storage for this account. Try connecting again in a moment.', { cause: error });
+      }
+      if (attempt === 0) onProgress?.('Waiting for OpenKey to finish setting up your encrypted storage…');
+      await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+    }
+  }
+}
+
+export async function prepareNetworkRecovery(owner, origin, existing, onProgress) {
   let network = existing;
   const pendingKey = 'router/openkey-recovery';
   if (!network) {
@@ -61,7 +79,7 @@ export async function prepareNetworkRecovery(owner, origin, existing) {
   }
   if (!network) {
     const path = recoveryKeyPath(origin);
-    await owner.keys.ensureKey(path);
+    await ensureRecoveryKey(owner, path, onProgress);
     const local = Wallet.createRandom();
     const secret = getBytes(local.privateKey);
     try {
