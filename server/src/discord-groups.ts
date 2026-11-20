@@ -7,6 +7,7 @@ import type { DiscordAudienceReader } from './discord-audience.js';
 import type { DiscordChatMessage, DiscordHistoryReader } from './discord-history.js';
 import type { DiscordSender } from './discord-send.js';
 import type { PostingRules } from './posting-rules.js';
+import { isPublicNotebookEntry } from './public-views.js';
 
 export interface DiscordGroupBinding {
   guildId: string;
@@ -254,7 +255,7 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
    * than the bot, is a current group member with a connected account. When they may, the answer carries
    * the members' connected Discord accounts, so a post can tag its author; otherwise it says why not.
    */
-  async function feedAudience(group: Channel, channelId: string): Promise<{blocked: string} | {linked: Map<string, string>}> {
+  async function feedAudience(group: Channel, channelId: string): Promise<{blocked: string} | {linked: Map<string, string>; audienceVersion: string}> {
     if (!audience || !send || !group.discord) return {blocked: 'Router cannot reach Discord for this group.'};
     let viewers;
     try { viewers = await audience(group.discord.guildId, channelId); }
@@ -263,7 +264,34 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
     const linked = await linkedMembers(group);
     if (viewers.viewerIds.some(id => id !== viewers.botId && !linked.has(id)))
       return {blocked: 'Someone who can see this channel has not linked their account and joined the Router group.'};
-    return {linked};
+    return {linked, audienceVersion: digest(JSON.stringify([group.discord.version, channelId,
+      viewers.botId, [...viewers.viewerIds].sort(), [...linked].sort()]))};
+  }
+
+  /** Scheduled digests use the group's bot identity, not a person's account or a retained chat transcript. */
+  async function digestAccess(bot: User, body: Body) {
+    const group = await groupFor(body.groupId), binding = group.discord;
+    if (!binding || binding.botHandle !== bot.handle || !member(group, bot.handle)
+      || body.guildId !== binding.guildId || !snowflake(body.channelId)
+      || !(binding.conversationChannelIds?.includes(body.channelId) || binding.feed?.channelId === body.channelId)
+      || (binding.scope !== 'guild' && binding.channelId !== body.channelId))
+      return fail(403, 'This bot cannot prepare a digest for this channel.');
+    const check = await feedAudience(group, body.channelId);
+    if ('blocked' in check) return fail(403, check.blocked);
+    const current = await groupFor(group.id);
+    if (!current.discord || !sameBinding(binding, current.discord) || !member(current, bot.handle)
+      || JSON.stringify(current.subscribers) !== JSON.stringify(group.subscribers)
+      || !(current.discord.conversationChannelIds?.includes(body.channelId) || current.discord.feed?.channelId === body.channelId))
+      return fail(409, 'The group connection changed. Please try again.');
+    return {group: current, audienceVersion: check.audienceVersion};
+  }
+  function digestVisible(entry: JournalEntry, groupId: string) {
+    return entry.humanVisible !== false && !entry.aiOnly && entry.visibility !== 'ai-only'
+      && (entry.to?.includes(`#${groupId}`) || isPublicNotebookEntry(entry));
+  }
+  function digestView(entry: JournalEntry, groupId: string) {
+    const note = {...view(entry), audience: entry.to?.includes(`#${groupId}`) ? 'group' : 'public'};
+    return {...note, version: digest(JSON.stringify(note))};
   }
 
   /**
@@ -365,6 +393,41 @@ export function discordGroups(storage: Storage, published: Storage, authorStatus
   async function serve(path: string, authorization: string | undefined, body: Body): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail(400, 'JSON object required.');
     const user = await caller(authorization);
+    if (path === '/api/discord/digest') {
+      const {group, audienceVersion} = await digestAccess(user, body);
+      if (body.action === 'read') {
+        const {since, until} = body;
+        if (typeof since !== 'number' || typeof until !== 'number' || !Number.isSafeInteger(since)
+          || !Number.isSafeInteger(until) || since < 0 || since >= until || until > now()
+          || until - since > 14 * 86400_000) return fail(400, 'Choose a past period of at most 14 days.');
+        // Inspect a bounded published index, not waiting notes or old Discord copies. Never silently
+        // truncate a period: the caller must report unavailable coverage instead of inventing a quiet day.
+        const scanned = await published.getEntries(10001);
+        if (scanned.length > 10000 && scanned[10000].timestamp >= since)
+          return fail(413, 'Too much activity for this period. Choose a shorter period.');
+        const entries = scanned.filter(e => e.timestamp >= since && e.timestamp < until && digestVisible(e, group.id));
+        if (entries.length > 200) return fail(413, 'Too many notes for one digest. Choose a shorter period.');
+        const final = await digestAccess(user, body);
+        if (final.audienceVersion !== audienceVersion) return fail(409, 'The Discord audience changed. Please try again.');
+        return {groupId: group.id, audienceVersion, since, until, entries: entries.map(e => digestView(e, group.id))};
+      }
+      if (body.action === 'verify') {
+        if (body.audienceVersion !== audienceVersion) return fail(409, 'The Discord audience changed. Rebuild the digest.');
+        const refs = body.sources;
+        if (!Array.isArray(refs) || refs.length > 200 || refs.some(r => !r || typeof r.id !== 'string'
+          || !/^[\w-]{1,160}$/.test(r.id) || typeof r.version !== 'string' || !/^[a-f0-9]{64}$/.test(r.version)))
+          return fail(400, 'Valid digest source references are required.');
+        for (const ref of refs) {
+          const entry = await published.getEntry(ref.id);
+          if (!entry || !digestVisible(entry, group.id) || digestView(entry, group.id).version !== ref.version)
+            return fail(409, 'A digest source changed or is unavailable. Rebuild the digest.');
+        }
+        const final = await digestAccess(user, body);
+        if (final.audienceVersion !== audienceVersion) return fail(409, 'The Discord audience changed. Rebuild the digest.');
+        return {verified: true, audienceVersion};
+      }
+      return fail(400, 'Use read or verify for a digest.');
+    }
     if (path === '/api/discord/conversation/configure') {
       return exclusive('links', async () => {
         const group = await groupFor(body.groupId);

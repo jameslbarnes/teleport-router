@@ -60,6 +60,9 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Test Router activity digests
+        run: python3 -m unittest discover -s agent/discord-digest -p 'test_*.py'
+
       - name: Test private Discord commands
         run: |
           python3 -m venv "$RUNNER_TEMP/router-discord-tests"
