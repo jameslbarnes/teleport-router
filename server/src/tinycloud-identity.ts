@@ -2,6 +2,9 @@ import { createHmac } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+/** The enclave returned valid keys that disagree with a previously trusted value. */
+export class TinyCloudKeyMismatch extends Error {}
+
 /** Never fall back to a random key in production: that would orphan every grant. */
 export async function tinyCloudIdentity(env = process.env) {
   let privateKey: string;
@@ -29,25 +32,34 @@ export async function tinyCloudIdentity(env = process.env) {
   const { computeAddress } = await import('ethers');
   const did = `did:pkh:eip155:1:${computeAddress(privateKey)}`;
   const expected = env.TINYCLOUD_EXPECTED_DID;
-  if (expected && expected.toLowerCase() !== did.toLowerCase()) throw new Error('TinyCloud Router identity changed; refusing to use existing grants');
+  if (expected && expected.toLowerCase() !== did.toLowerCase()) throw new TinyCloudKeyMismatch('TinyCloud Router identity changed; refusing to use existing grants');
   if (source === 'dstack') {
     const pin = env.TINYCLOUD_IDENTITY_PIN || '/data/tinycloud-router-did';
-    await mkdir(dirname(pin),{recursive:true});
-    try {
-      const saved = (await readFile(pin,'utf8')).trim();
-      if (saved.toLowerCase() !== did.toLowerCase()) throw new Error('TinyCloud identity does not match the pinned Router identity');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      await writeFile(pin,did+'\n',{flag:'wx',mode:0o600});
-    }
     const encryptionPin = env.TINYCLOUD_ENCRYPTION_PIN || pin + '.encryption-v1';
     const checkValue = createHmac('sha256', encryptionKey).update('teleport-router/encryption-pin/v1').digest('hex');
-    try {
-      if ((await readFile(encryptionPin, 'utf8')).trim() !== checkValue) throw new Error('Record encryption key does not match the pinned key');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      await mkdir(dirname(encryptionPin), {recursive:true});
-      await writeFile(encryptionPin, checkValue + '\n', {flag:'wx', mode:0o600});
+    const pins = [
+      { path: pin, value: did, matches: (value: string) => value.toLowerCase() === did.toLowerCase(), error: 'TinyCloud identity does not match the pinned Router identity' },
+      { path: encryptionPin, value: checkValue, matches: (value: string) => value === checkValue, error: 'Record encryption key does not match the pinned key' },
+    ];
+    const verify = async (entry: typeof pins[number]) => {
+      if (!entry.matches((await readFile(entry.path, 'utf8')).trim())) throw new TinyCloudKeyMismatch(entry.error);
+    };
+    // Verify every surviving pin before creating a missing one, including after an interrupted first boot.
+    const missing: typeof pins = [];
+    for (const entry of pins) {
+      try { await verify(entry); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        missing.push(entry);
+      }
+    }
+    for (const entry of missing) {
+      await mkdir(dirname(entry.path), { recursive: true });
+      try { await writeFile(entry.path, entry.value + '\n', { flag: 'wx', mode: 0o600 }); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        await verify(entry);
+      }
     }
   }
   const recordKey = createHmac('sha256',Buffer.from(privateKey.slice(2),'hex')).update('teleport-router/record-integrity/v1').digest();

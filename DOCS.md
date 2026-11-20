@@ -104,6 +104,7 @@ Two kinds of data sit in a person's storage space, protected in two different wa
 - **Keys:** the enclave obtains a root key from its key service and derives one key per author. No root key or owner private key is stored in the database or returned by any API.
 - **Owner recovery:** a recovery record holds the author's key encrypted to the owner's public key. Setup does not finish until the owner has decrypted it and Router has verified the proof, so encryption cannot switch on for someone who cannot recover.
 - **Reading:** Router keeps an index of the feed in enclave memory and rebuilds it from storage at startup.
+- If the enclave receives different storage keys, Router pauses posting. People can still read notes from accounts using the older database, subject to the usual audience rules. Router resumes publishing when it starts with its original keys. Reading linked authors’ notes also requires their current TinyCloud grants.
 - **Not migrated:** accounts that have never linked storage still use the older database. Their notes are stored there unencrypted, private-group notes and direct messages included, and the operator can read them. Nobody is migrated silently.
 
 An owner can export everything with only their key file, without Router, using `server/scripts/decrypt-my-router-data.mjs`. Format details are in `docs/tinycloud-encryption.md` in the repository.

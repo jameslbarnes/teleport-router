@@ -92,7 +92,7 @@ services:
       - DOMAIN=router.teleport.computer
       - DNS_PROVIDER=cloudflare
       - CLOUDFLARE_API_TOKEN
-      - GATEWAY_DOMAIN=_.dstack-pha-prod9.phala.network
+      - GATEWAY_DOMAIN=_.dstack-pha1-prod9.phala.network
       - CERTBOT_EMAIL=james@generalsemantics.nyc
       - SET_CAA=true
       - TARGET_ENDPOINT=http://router:3000
@@ -111,7 +111,7 @@ services:
       - DOMAIN=hermes.teleport.computer
       - DNS_PROVIDER=cloudflare
       - CLOUDFLARE_API_TOKEN
-      - GATEWAY_DOMAIN=_.dstack-pha-prod9.phala.network
+      - GATEWAY_DOMAIN=_.dstack-pha1-prod9.phala.network
       - CERTBOT_EMAIL=james@generalsemantics.nyc
       - SET_CAA=true
       - TARGET_ENDPOINT=http://router:3000

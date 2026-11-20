@@ -7,7 +7,7 @@ set -euo pipefail
 
 : "${PHALA_APP_ID:?PHALA_APP_ID is required}"
 
-TEE_HOST="${TEE_HOST:-${PHALA_APP_ID}-8090.dstack-pha-prod9.phala.network}"
+TEE_HOST="${TEE_HOST:-${PHALA_APP_ID}-8090.dstack-pha1-prod9.phala.network}"
 DATE=$(date -u +%Y-%m-%d)
 DIR="evidences/$DATE"
 mkdir -p "$DIR"

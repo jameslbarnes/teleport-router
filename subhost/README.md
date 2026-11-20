@@ -15,7 +15,7 @@ hash in the quote's report data.
 - **Router's keys.** Router no longer mounts dstack's socket. `subhost` gives it a
   socket that answers exactly two requests: the two keys Router has always used,
   at the same paths, so Router's TinyCloud identity and record key do not change.
-  Router refuses to start if its identity changes (`server/src/tinycloud-identity.ts`).
+  If either key disagrees with its saved pin, Router starts read-only. Linked authors’ records stay locked and the waiting queue stays on disk (`server/src/tinycloud-identity.ts`).
 - **One sub-container** (`probe.mjs` on a pinned Router image, to reuse Router's
   TinyCloud client). Its code hash is the SHA-256 of its spec: image digest,
   command, working directory, settings. It makes a key that exists only in its
@@ -50,7 +50,7 @@ asks the container to read a file. `--revoke` then shows the read failing.
 
 ```
 cd server
-node scripts/subhost-grant.mjs --url https://<app-id>-8091.dstack-pha-prod9.phala.network --new-owner --revoke
+node scripts/subhost-grant.mjs --url https://<app-id>-8091.dstack-pha1-prod9.phala.network --new-owner --revoke
 ```
 
 `--new-owner` uses a throwaway TinyCloud account. `--check-only` stops before the grant.

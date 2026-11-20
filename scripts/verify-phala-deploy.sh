@@ -7,7 +7,7 @@ set -euo pipefail
 : "${EXPECTED_AGENT_IMAGE_DIGEST:?EXPECTED_AGENT_IMAGE_DIGEST is required}"
 : "${EXPECTED_DISCORD_IMAGE_DIGEST:?EXPECTED_DISCORD_IMAGE_DIGEST is required}"
 
-TEE_HOST="${TEE_HOST:-${PHALA_APP_ID}-8090.dstack-pha-prod9.phala.network}"
+TEE_HOST="${TEE_HOST:-${PHALA_APP_ID}-8090.dstack-pha1-prod9.phala.network}"
 ROUTER_HEALTH_URL="${ROUTER_HEALTH_URL:-https://router.teleport.computer/health}"
 HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-https://hermes.teleport.computer/health}"
 VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS:-900}"

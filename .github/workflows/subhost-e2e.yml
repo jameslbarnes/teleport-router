@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       cvm_url:
-        description: 'Deployed host to check, e.g. https://<app-id>-8091.dstack-pha-prod9.phala.network (empty: local run)'
+        description: 'Deployed host to check, e.g. https://<app-id>-8091.dstack-pha1-prod9.phala.network (empty: local run)'
         required: false
         default: ''
 

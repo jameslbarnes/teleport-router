@@ -1,6 +1,6 @@
 # Router deployment verification report
 
-Last revised November 10, 2026. This report says how to check which code the live Router is running, and what that check does and does not prove. Who can read what is described in [DOCS.md](DOCS.md), under "Trust model".
+Last revised November 20, 2026. This report says how to check which code the live Router is running, and what that check does and does not prove. Who can read what is described in [DOCS.md](DOCS.md), under "Trust model".
 
 Router runs in an enclave (a trusted execution environment, Intel TDX on Phala Cloud via dstack).
 
@@ -10,7 +10,7 @@ Router runs in an enclave (a trusted execution environment, Intel TDX on Phala C
 |-------|-------|
 | App ID | `db82f581256a3c9244c4d7129a67336990d08cdf` |
 | Trust Center | https://trust.phala.com/app/db82f581256a3c9244c4d7129a67336990d08cdf |
-| Enclave report | https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha-prod9.phala.network/ (see step 1; it may be closed) |
+| Enclave report | https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha1-prod9.phala.network/ (see step 1; it may be closed) |
 | Production URL | https://router.teleport.computer |
 | Source code | https://github.com/jameslbarnes/teleport-router |
 | Docker images | `docker.io/generalsemantics/teleport-router`, `teleport-router-agent`, `teleport-router-discord` |
@@ -23,7 +23,7 @@ Router runs in an enclave (a trusted execution environment, Intel TDX on Phala C
 The enclave reports what it is running: the compose file it was started with, a `compose-hash`, the OS image hash and the TDX measurements.
 
 ```bash
-curl -s https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha-prod9.phala.network/
+curl -s https://db82f581256a3c9244c4d7129a67336990d08cdf-8090.dstack-pha1-prod9.phala.network/
 ```
 
 This public address may not answer. The deploy scripts note that Phala closed public port 8090 on enclaves still running unpatched OS images after an incident in October 2026, and they fall back to Phala's attestation API, which needs the operator's API key (`scripts/verify-phala-deploy.sh`, `scripts/archive-tee-evidence.sh`). The copy archived on November 10, 2026 came from that API. Whether an outside reader can fetch the report today is not established from this repository. The Trust Center link above is Phala's own page for this app.

@@ -9,7 +9,7 @@
 //    answers with the file's size and SHA-256, never its contents.
 // 3. With --revoke, revokes the grant and shows the container can no longer read.
 //
-//   node scripts/subhost-grant.mjs --url https://<app-id>-8091.dstack-pha-prod9.phala.network --new-owner
+//   node scripts/subhost-grant.mjs --url https://<app-id>-8091.dstack-pha1-prod9.phala.network --new-owner
 //   node scripts/subhost-grant.mjs --url ... --owner-key-file <file holding a 0x key> [--prefix subhost-test]
 //     [--folder subhost/] [--file hello.txt] [--minutes 30] [--check-only] [--revoke] [--simulated]
 //
