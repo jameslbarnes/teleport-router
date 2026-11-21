@@ -9,6 +9,7 @@ on:
       - 'server/src/trace-*.ts'
       - 'server/src/insights-*.ts'
       - 'server/scripts/*e2e.mjs'
+      - 'server/scripts/trace-app-owner.mjs'
       - 'plugins/teleport-router/scripts/**'
       - 'server/scripts/*tinycloud*'
       - 'server/scripts/decrypt-my-router-data.mjs'

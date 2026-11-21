@@ -86,11 +86,11 @@ checkRunResult(answered.answer.sealed, answered.answer.signature, prepared.descr
 const result = openResult(answered.answer.sealed, answered.answer.description, owner.privateKey);
 say('owner', `opens the answer: ${JSON.stringify(result)}`);
 const release = sealForRequester(result.answer, answered.answer.description, requesterKey.signingKey.compressedPublicKey);
-await router(author, { action: 'release', request_id: shown.request_id, revision: shown.revision, run_id: answered.answer.run_id, ...release });
+await router(author, { action: 'release', request_id: shown.request_id, revision: shown.revision, run_id: answered.answer.run_id, sealed: release.sealed });
 
 // 5. The requester opens what was released.
 const released = await router(agent, { action: 'status', request_id: shown.request_id });
-say('requester', `state "${released.state}"; opens the answer: ${openReleased(released.answer, released.run, requesterKey.privateKey, released.answer_sha256)}`);
+say('requester', `state "${released.state}"; opens the answer: ${openReleased(released.answer, released.run, requesterKey.privateKey, released.sealed_sha256)}`);
 console.log(`\nThe requester never received the trace. Its last line held a secret ("sk-demo-secret"); it appears nowhere in what Router or the requester saw: ${!JSON.stringify([asked, status, released, answered]).includes('sk-demo-secret')}.`);
 
 async function grant(recipient) {
