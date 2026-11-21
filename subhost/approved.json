@@ -1,5 +1,5 @@
 {
-  "about": "What the grant check accepts besides the container code: Router's CVM, its deploy manifest, OS and pre-launch script, as measured on Nov 9-11, 2026 (evidences/); later manifests add INSIGHTS_LINK_SECRET and INSIGHTS_ENCLAVE_URL (PR 60, insights enclave); the second manifest adds INSIGHTS_LINK_SECRET (PR 60). A change to any of them makes the check refuse until someone reviews the new values and adds them here. allowed_envs names the secrets the operator may inject at boot; review new names before approving them.",
+  "about": "What the grant check accepts besides the container code: Router's CVM, its deploy manifest, OS and pre-launch script, as measured on Nov 9-11, 2026 (evidences/); later manifests add INSIGHTS_LINK_SECRET and INSIGHTS_ENCLAVE_URL (PR 60, insights enclave); the second manifest adds INSIGHTS_LINK_SECRET (PR 60). The second OS entry is dstack-0.5.15, which the CVM has reported since Nov 20, read from a live quote on Nov 21 and not compared with values published by dstack. A change to any of them makes the check refuse until someone reviews the new values and adds them here. allowed_envs names the secrets the operator may inject at boot; review new names before approving them.",
   "app_ids": [
     "db82f581256a3c9244c4d7129a67336990d08cdf"
   ],
@@ -66,6 +66,13 @@
       "rtmr0": "027b610ab0555482f8a3868524093bdf3cdbe2539f81dfeeb886864654cb2fe3422f7fc36d4bab6fa46683aad11d1ba7",
       "rtmr1": "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
       "rtmr2": "764489f277a8540189761e72b4238ba36d4d647e11bd958d8ab5522af2a4867b0ff63e06b0c4967f1857236244040a5d"
+    },
+    {
+      "os_image_hash": "4597735f1a38ad8ec9f781356b88737fc052062deb7c9aaa4be89bf1b35643ca",
+      "mrtd": "20038376b145055508e1a8538a864857e8180f989ea8aac4954d432c494872aa48e6946b381fe6bb28d8b9e703ed65d3",
+      "rtmr0": "027b610ab0555482f8a3868524093bdf3cdbe2539f81dfeeb886864654cb2fe3422f7fc36d4bab6fa46683aad11d1ba7",
+      "rtmr1": "786417fa26b5d90d1289025506055e511ff09fd608f4727bb3cf159279a52af23117b6248024d0b186aceabebf6f86ec",
+      "rtmr2": "255b32bf5ea23ac7f1d2b94926a500abb532d6f640d26dd5c07eff7011bac2f271420a433a4c0041cad889009296ffae"
     }
   ]
 }

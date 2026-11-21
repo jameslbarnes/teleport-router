@@ -1,6 +1,6 @@
 {
   "name": "trace-runner",
-  "image": "PENDING: the Router image built from the merge that adds trace apps, pinned by digest",
+  "image": "docker.io/generalsemantics/teleport-router@sha256:3602bc042da702bb65bdd8e9ae600d05757baf24def9d8b6a0a4a4ddc277d799",
   "workdir": "/app/server",
   "env": {
     "NODE_ENV": "production",

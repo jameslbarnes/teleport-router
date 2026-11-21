@@ -98,11 +98,12 @@ not remove is retried. Owners check runs with
 `server/scripts/trace-app-owner.mjs`, which uses `verifyRunBundle` here and
 Phala's verifier before granting anything.
 
-`runner.base.json` and `sandbox.base.json` say PENDING until a Router image that
-carries the trace app code exists to pin; until then `embed.mjs` leaves both specs
-out and runs stay off. Turning them on: pin that image's digest in both files, run
-`node subhost/embed.mjs`, approve the new template, and set `TRACE_APPS=subhost`
-on Router.
+`runner.base.json` and `sandbox.base.json` pin the Router image built from the
+merge that added trace apps (PR 81). A spec whose image says PENDING is left out
+of the compose file and runs stay off. To move the runner to a newer Router image,
+pin its digest in both files and run `node subhost/embed.mjs`; owners' tools then
+accept the new runner only from a checkout that has the same pins. Router uses the
+runner when `TRACE_APPS=subhost`.
 
 The apps share the CVM's kernel with Router, as the probe does. The WebAssembly
 sandbox and the sandbox container's missing network are what stand between a
