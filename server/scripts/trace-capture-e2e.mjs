@@ -15,6 +15,7 @@ import {rewrapTraceKey} from '../../browser/src/trace-keys.mjs';
 import {grantTraceRead,traceReadSession} from '../../browser/src/trace-permission.mjs';
 import {checkRunBundle,checkRunResult,openReleased,openResult,sealForRequester} from '../dist/trace-run.js';
 import {readerDid} from '../dist/trace-access.js';
+import {APP_RUNTIME,appHash} from '../dist/trace-app.js';
 import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {sealFull,openFull} from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
@@ -192,12 +193,34 @@ try {
   const outcome = openResult(answered.answer.sealed,prepared.description,ownerKey);
   assert.deepEqual(outcome,{ok:true,answer:'the marker is there'});
   assert.equal((await ask(readerAccount,{action:'status',request_id:r.request_id})).state,'pending','Nothing reaches the requester before release');
-  const {sealed,answer_sha256} = sealForRequester(outcome.answer,prepared.description,answerKey);
-  await ask(secretKey,{action:'release',request_id:r.request_id,revision:r.revision,run_id:prepared.description.run_id,sealed,answer_sha256});
+  const {sealed} = sealForRequester(outcome.answer,prepared.description,answerKey);
+  await ask(secretKey,{action:'release',request_id:r.request_id,revision:r.revision,run_id:prepared.description.run_id,sealed});
   const released = await ask(readerAccount,{action:'status',request_id:r.request_id});
-  assert.equal(openReleased(released.answer,released.run,requester.privateKey,released.answer_sha256),'the marker is there');
+  assert.equal(openReleased(released.answer,released.run,requester.privateKey,released.sealed_sha256),'the marker is there');
   for (const fromTrace of ['find out why the nightly job is slow','the polling loop runs every second']) assert(!JSON.stringify(released).includes(fromTrace),'The requester never sees the trace');
   console.log('PASS an app the owner approved reads the named post\'s trace from real storage with its own run key; the requester gets only the released answer');
+
+  // The owner's own tool, run the way an owner or their agent runs it, against this server and real storage:
+  // show prints a pin, run refuses any other version of the request, release sends the answer that was read.
+  const ownerTool=resolve('scripts/trace-app-owner.mjs');
+  const ownerCli=(...args)=>run(process.execPath,[ownerTool,...args,'--router',base,'--router-key-file',keyFile,'--owner-key-file',ownerKeyFile,
+    '--tinycloud-host',host,'--space','router-test','--records',join(work,'trace-apps'),'--simulated'],{timeout:240000});
+  const erinKey=randomBytes(32).toString('base64url'), erin=Wallet.createRandom();
+  await post('/api/identity/register',{secret_key:erinKey,handle:`erin${suffix}`});
+  const YES={code:"function analyze(trace) { return trace.includes('MARKER-ALPHA') ? 'yes' : 'no' }",purpose:'Say whether the marker is mentioned'};
+  const reqE=await ask(erinKey,{action:'request',entry_id:ids[0],app:YES,answer_public_key:erin.signingKey.compressedPublicKey});
+  const shownE=(await ownerCli('show',reqE.request_id)).stdout;
+  const pinE=shownE.match(/--pin ([a-f0-9]{64})/)?.[1];
+  assert(pinE&&shownE.includes(appHash({code:YES.code,runtime:APP_RUNTIME})),'show prints the code hash computed on this machine and a pin');
+  const wrongPin=await ownerCli('run',reqE.request_id,'--pin','f'.repeat(64)).then(()=>null,e=>e);
+  assert(wrongPin&&/not the one with the pin given/.test(wrongPin.stderr),'run refuses a request that is not the one shown');
+  const ranE=(await ownerCli('run',reqE.request_id,'--pin',pinE)).stdout;
+  assert(ranE.includes('  > yes'),'The owner tool runs the app against real storage and shows the answer');
+  assert.equal((await ask(erinKey,{action:'status',request_id:reqE.request_id})).state,'pending','Nothing reaches the requester before release');
+  await ownerCli('release',reqE.request_id);
+  const releasedE=await ask(erinKey,{action:'status',request_id:reqE.request_id});
+  assert.equal(openReleased(releasedE.answer,releasedE.run,erin.privateKey,releasedE.sealed_sha256),'yes');
+  console.log('PASS the owner tool runs exactly the request it showed against real storage, and releases the answer that was read');
 
   // The post two sessions downstream of the private tool has a record that says so and holds nothing else.
   const heldOut=join(work,'withheld.json');

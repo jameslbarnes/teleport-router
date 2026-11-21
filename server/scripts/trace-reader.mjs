@@ -77,7 +77,7 @@ async function main() {
   if (!r.ok) throw Error(request.error || 'Router did not accept the request.');
   if (action === 'read') {
     if (request.state !== 'released') throw Error('The trace request is ' + request.state + '.');
-    await writeFile(v.out, openReleased(request.answer, request.run, privateKey, request.answer_sha256), { flag:'wx', mode:0o600 });
+    await writeFile(v.out, openReleased(request.answer, request.run, privateKey, request.sealed_sha256), { flag:'wx', mode:0o600 });
   }
   console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, app_hash:request.app?.hash}));
 }

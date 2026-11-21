@@ -161,16 +161,19 @@ export function openResult(sealed: SealedAnswer, d: RunDescription, ownerPrivate
   if (r?.ok === false && typeof r.error === 'string') return { ok: false, error: r.error };
   throw new RunError('The sealed result is malformed.');
 }
-/** On the owner's side, at release: seal exactly the answer the owner read to the requester's key. */
-export function sealForRequester(answer: string, d: RunDescription, requesterPublicKey: string): { sealed: SealedAnswer; answer_sha256: string } {
-  const bytes = Buffer.from(answer, 'utf8');
-  const { meta, ciphertext } = sealPart(bytes, answerContext(d), 'answer', { reader: compressPublicKey(requesterPublicKey) });
-  return { sealed: { meta, data: ciphertext.toString('base64') }, answer_sha256: sha256Hex(bytes) };
+/**
+ * On the owner's side, at release: seal exactly the answer the owner read to the requester's key. The receipt is the
+ * sealed answer's own hash, of its ciphertext, which says nothing about the answer. No hash of the plain answer is
+ * ever sent: Router could test guesses against it, and a yes, a no or a small count is easy to guess.
+ */
+export function sealForRequester(answer: string, d: RunDescription, requesterPublicKey: string): { sealed: SealedAnswer; sealed_sha256: string } {
+  const { meta, ciphertext } = sealPart(Buffer.from(answer, 'utf8'), answerContext(d), 'answer', { reader: compressPublicKey(requesterPublicKey) });
+  return { sealed: { meta, data: ciphertext.toString('base64') }, sealed_sha256: meta.sha256 };
 }
-export function openReleased(sealed: SealedAnswer, d: RunDescription, requesterPrivateKey: string, answerSha256: string): string {
-  const bytes = openPart(sealed.meta, Buffer.from(sealed.data, 'base64'), answerContext(d), 'answer', 'reader', requesterPrivateKey);
-  if (sha256Hex(bytes) !== answerSha256) throw new RunError('The released answer does not match the one the owner released.');
-  return bytes.toString('utf8');
+/** On the requester's side. `sealedSha256` is the receipt Router recorded at release; opening checks the ciphertext against it. */
+export function openReleased(sealed: SealedAnswer, d: RunDescription, requesterPrivateKey: string, sealedSha256: string): string {
+  if (!sealed?.meta || sealed.meta.sha256 !== sealedSha256) throw new RunError('The released answer does not match the one the owner released.');
+  return openPart(sealed.meta, Buffer.from(sealed.data, 'base64'), answerContext(d), 'answer', 'reader', requesterPrivateKey).toString('utf8');
 }
 
 // --- The runner ----------------------------------------------------------------------------

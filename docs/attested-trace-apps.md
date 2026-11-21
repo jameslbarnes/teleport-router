@@ -17,7 +17,7 @@ With this change, every request carries a small app, and the requester never get
 
 An answer can contain parts of the trace; that is the owner's call when releasing. What the design guarantees is narrower: no direct access to the trace, and nothing leaves except what the owner released.
 
-Later, the owner's agent could approve requests on the owner's behalf under rules the owner sets. The answer step stays, so a person can always see what left.
+The owner can also set their own agent to do this for them, under whatever conditions they give it. Router does not decide either way. The agent uses the same owner tool on the owner's machine, so every check below still applies.
 
 ## The app
 
@@ -64,9 +64,9 @@ When it runs, the runner refuses a trace whose ciphertext hash differs from the 
 
 The runner seals the result, answer or error, to the owner with the same envelope as traces (`trace-envelope.ts`, part `answer`). Router stores only that ciphertext, so the operator cannot read it and Router cannot release it on its own. App errors and stack traces can quote the trace, so they are sealed too. Neither the runner nor Router logs them.
 
-The owner's tool remembers the run, the answer's hash and the requester's key it reviewed, and `release` refuses unless all three are unchanged. It shows code, purposes and answers with control and text-direction characters escaped, so a stranger's text cannot hide or rewrite what the terminal shows.
+The owner's tool remembers the run, the answer's hash and the requester's key it reviewed, and `release` refuses unless all three are unchanged. `show` prints a pin covering the request as read: its version, requester, note, purpose, the code's hash computed on the owner's machine, and the requester's key. `run` refuses without that pin or if any of it changed, so Router cannot swap the request between reading and running. It shows code, purposes and answers with control and text-direction characters escaped, so a stranger's text cannot hide or rewrite what the terminal shows.
 
-The requester sees only `pending`, `released`, `declined` or `withdrawn`, with no timing or failure detail before release. Asking again gets the same reply before and after the app has run, and changing the app means withdrawing the request first, so neither can reveal when it ran. Errors from the runner reach the owner only as fixed sentences. Release is the owner's side opening the sealed answer and sealing those exact bytes to the requester's key. Router records the release with the answer's hash in one transaction and checks again that the requester can still read the note. Withholding shows the requester `declined`.
+The requester sees only `pending`, `released`, `declined` or `withdrawn`, with no timing or failure detail before release. Asking again gets the same reply before and after the app has run, and changing the app means withdrawing the request first, so neither can reveal when it ran. Errors from the runner reach the owner only as fixed sentences. Release is the owner's side opening the sealed answer and sealing those exact bytes to the requester's key. Router records the release in one transaction, with the sealed answer's own hash as the receipt, and checks again that the requester can still read the note. No hash of the plain answer is sent: Router could test guesses against it, and a yes, a no or a small count is easy to guess. Withholding shows the requester `declined`.
 
 ## Who has to be trusted
 
@@ -92,7 +92,7 @@ Turning it on takes two deploys, each with the owner's approval: the first ships
 
 ## Not in this round
 
-- The owner's agent approving on its own. It needs a limited key that can only grant short reads of traces to attested runs, the same question as the open proposal on delegating insights runs while the owner is offline.
+- A limited approval key. An agent that approves for its owner works with the owner's storage key today. A key that can only grant short reads of traces to attested runs would let it approve with less, and while the owner's machine is off. This is the same question as the open proposal on delegating insights runs while the owner is offline.
 - AI model calls from an app. With no network an app cannot ask a model to read the trace. Allowing one would send the trace to that provider, and the owner would have to be told which.
 - The browser approval page.
 
@@ -114,7 +114,7 @@ Found while testing: this QuickJS build shares storage between concatenated stri
 
 ## Reviews
 
-Two independent reviews by another model, Nov 21. The first, of the design, led to sealing answers to the owner, binding the run description into the attestation, single-use runs, fixed requester states, and checking approvals outside the Router-served page. It also recommended a separate enclave for runs. The second, of the code, found that a finished run could overwrite a request declined or replaced meanwhile, that re-sending a request revealed when the app had run, that the local server path skipped the worker's hard stop, that runner errors could pass through, and that the bundle check could be mistaken for verifying attestation. All five are fixed and tested. A third, of the in-enclave code, asked to hold activation until results were signed by the run's key and release was pinned to what the owner reviewed, real attestations fit the reply limit, the owner's tool read the trace version from the owner's own storage, stalled reads and orphaned sandboxes could not exhaust the runner, and a runner failure could not take the host (and Router's keys) down. All five are fixed; the host's own test of runs needs Linux and has not run yet.
+Four independent reviews by another model, Nov 21. The first, of the design, led to sealing answers to the owner, binding the run description into the attestation, single-use runs, fixed requester states, and checking approvals outside the Router-served page. It also recommended a separate enclave for runs. The second, of the code, found that a finished run could overwrite a request declined or replaced meanwhile, that re-sending a request revealed when the app had run, that the local server path skipped the worker's hard stop, that runner errors could pass through, and that the bundle check could be mistaken for verifying attestation. All five are fixed and tested. A third, of the in-enclave code, asked to hold activation until results were signed by the run's key and release was pinned to what the owner reviewed, real attestations fit the reply limit, the owner's tool read the trace version from the owner's own storage, stalled reads and orphaned sandboxes could not exhaust the runner, and a runner failure could not take the host (and Router's keys) down. All five are fixed; the host's own test of runs needs Linux and has not run yet. A fourth, of the owner tool, found that Router was sent a hash of each plain answer and that `run` was not pinned to the request the owner had read; both are fixed. Running the owner tool against real storage then showed that Router refused the read grant it made. It now makes the grant the way the tested path does, and the hosted-storage check runs the tool itself.
 
 ## Next
 
