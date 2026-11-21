@@ -11,9 +11,10 @@ import {join,resolve} from 'node:path';
 import {promisify} from 'node:util';
 import {Wallet} from 'ethers';
 import {TinyCloudNode,serializeDelegation} from '@tinycloud/node-sdk';
-import {readGrantedTrace} from './trace-reader.mjs';
 import {rewrapTraceKey} from '../../browser/src/trace-keys.mjs';
 import {grantTraceRead,traceReadSession} from '../../browser/src/trace-permission.mjs';
+import {checkRunBundle,checkRunResult,openReleased,openResult,sealForRequester} from '../dist/trace-run.js';
+import {readerDid} from '../dist/trace-access.js';
 import {linkOwner,request,confirmOwnerRecovery} from './tinycloud-link-lib.mjs';
 import {sealFull,openFull} from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 
@@ -28,7 +29,7 @@ const server=spawn(process.execPath,['dist/http.js'],{cwd:process.cwd(),shell:fa
   FIREBASE_SERVICE_ACCOUNT:'',FIREBASE_SERVICE_ACCOUNT_BASE64:'',GOOGLE_APPLICATION_CREDENTIALS:'',
   MODERATOR_URL:'',MODERATOR_API_KEY:'',TINYCLOUD_GROUPS:'',TINYCLOUD_AUTHORS:'tinycloud',TINYCLOUD_KEY_SOURCE:'test-key',
   TINYCLOUD_ROUTER_KEY:privateKey(),TINYCLOUD_HOST:host,TINYCLOUD_LEASE_MS:'5000',STAGED_STORAGE:'memory',STAGING_DELAY_MS:'3600000',
-  RECOVERY_FILE:join(work,'pending.json'),
+  RECOVERY_FILE:join(work,'pending.json'),TRACE_APPS:'local-simulated',
 }});
 let logs=''; for(const stream of [server.stdout,server.stderr])stream.on('data',d=>{logs=(logs+String(d)).slice(-6000);});
 const stop=()=>{if(!server.killed)server.kill();}; process.on('exit',stop);
@@ -153,31 +154,50 @@ try {
   assert(opened[0].includes('summary of reasoning')&&opened[0].includes('[secret removed]'));
   console.log('PASS storage holds ciphertext; the owner\'s key opens each trace; slices are separate; credentials and provider ciphertext are gone');
 
-  // A different agent can see the published post and request its trace. Only the owner's approval opens it.
+  // A different agent can see the published post and asks to run an app on its trace. The owner reads the code,
+  // has it run (this local server's simulated runner reads the trace from real storage with the run's own key),
+  // reads the answer and releases it. The requester never gets the trace.
   const ownPost = await fetch(base+'/api/entry/'+ids[0],{headers:{Authorization:'Bearer '+secretKey}}).then(r=>r.json());
   const notice = ownPost.sharingReceipt;
   if (notice?.state === 'awaiting_notice') await post('/api/entries/'+ids[0]+'/notice',{secret_key:secretKey,
     evidence_kind:'agent_reported',notice_id:notice.notice_id,notice_sha256:notice.notice_sha256,conversation_ref:'local-synthetic-trace-test/receipt'});
   await post('/api/entries/'+ids[0]+'/publish',{secret_key:secretKey});
-  const reader = Wallet.createRandom(), readerAccount = randomBytes(32).toString('base64url');
+  const requester = Wallet.createRandom(), readerAccount = randomBytes(32).toString('base64url');
   const ask = (secret_key,body) => post('/api/trace-access',{secret_key,...body});
-  const r = await ask(readerAccount,{action:'request',entry_id:ids[0],reader_public_key:reader.signingKey.compressedPublicKey});
+  assert.equal(await status('/api/trace-access',{secret_key:readerAccount,action:'request',entry_id:ids[0],reader_public_key:requester.signingKey.compressedPublicKey}),400,
+    'A request without an app is refused');
+  const app = {code:"function analyze(trace) { return trace.includes('MARKER-ALPHA') ? 'the marker is there' : 'no marker' }",purpose:'Check whether this slice mentions the marker'};
+  const answerKey = requester.signingKey.compressedPublicKey;
+  const r = await ask(readerAccount,{action:'request',entry_id:ids[0],app,answer_public_key:answerKey});
   assert.equal(r.state,'pending');
   const savedMeta = await owner.kv.get('router/traces/'+ids[0]+'/meta',{source:'network'});
   assert(savedMeta.ok);
   const m = JSON.parse(stored(savedMeta.data));
-  const wrap = await rewrapTraceKey(m.full,m.ownerDid,ids[0],ownerKey,reader.signingKey.compressedPublicKey);
+  const nonce = randomBytes(32).toString('hex');
+  const prepared = await ask(secretKey,{action:'prepare',request_id:r.request_id,revision:r.revision,nonce});
+  checkRunBundle(prepared.bundle,{description:prepared.description,code:app.code,publicKey:prepared.public_key,nonce,runner:prepared.runner,
+    request:{request_id:r.request_id,revision:r.revision,entry_id:ids[0],answer_key:answerKey},
+    own:{ownerDid:m.ownerDid,ownerPublicKey:wallet.signingKey.compressedPublicKey,ciphertextSha256:m.full.sha256}},{allowSimulated:true});
+  const wrap = await rewrapTraceKey(m.full,m.sealedOwnerDid||m.ownerDid,ids[0],ownerKey,prepared.public_key);
   const readSession = traceReadSession(grant.spaceId, ids[0], base);
   const approvingOwner = new TinyCloudNode({ privateKey:ownerKey, host, ...readSession, autoCreateSpace:false,
     enablePublicSpace:false, autoBootstrapAccount:false, includeAccountRegistryPermissions:false, sessionExpirationMs:2*86400000 });
+  let answered;
   try {
     await approvingOwner.signIn();
-    const scope = await grantTraceRead(approvingOwner, r.reader_did, readSession);
-    await ask(secretKey,{action:'approve',request_id:r.request_id,revision:r.revision,delegation:serializeDelegation(scope),wrap});
+    const scope = await grantTraceRead(approvingOwner, readerDid(prepared.public_key), readSession, 10*60000);
+    answered = await ask(secretKey,{action:'approve',request_id:r.request_id,revision:r.revision,run_id:prepared.description.run_id,delegation:serializeDelegation(scope),wrap});
   } finally { await approvingOwner.signOut(); }
-  const approved = await ask(readerAccount,{action:'status',request_id:r.request_id});
-  assert((await readGrantedTrace(approved,reader.privateKey,host)).toString().includes('MARKER-ALPHA'));
-  console.log('PASS the approved reader opens exactly the named post through its TinyCloud grant');
+  checkRunResult(answered.answer.sealed,answered.answer.signature,prepared.description,prepared.public_key);
+  const outcome = openResult(answered.answer.sealed,prepared.description,ownerKey);
+  assert.deepEqual(outcome,{ok:true,answer:'the marker is there'});
+  assert.equal((await ask(readerAccount,{action:'status',request_id:r.request_id})).state,'pending','Nothing reaches the requester before release');
+  const {sealed,answer_sha256} = sealForRequester(outcome.answer,prepared.description,answerKey);
+  await ask(secretKey,{action:'release',request_id:r.request_id,revision:r.revision,run_id:prepared.description.run_id,sealed,answer_sha256});
+  const released = await ask(readerAccount,{action:'status',request_id:r.request_id});
+  assert.equal(openReleased(released.answer,released.run,requester.privateKey,released.answer_sha256),'the marker is there');
+  for (const fromTrace of ['find out why the nightly job is slow','the polling loop runs every second']) assert(!JSON.stringify(released).includes(fromTrace),'The requester never sees the trace');
+  console.log('PASS an app the owner approved reads the named post\'s trace from real storage with its own run key; the requester gets only the released answer');
 
   // The post two sessions downstream of the private tool has a record that says so and holds nothing else.
   const heldOut=join(work,'withheld.json');

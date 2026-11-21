@@ -49,7 +49,8 @@ body[data-permission] #discord { border-top: 0; padding-top: 0; }
 
 .trace-requests { overflow-wrap: anywhere; }
 .trace-requests article { margin-block: var(--s-4); }
-.trace-requests form, .trace-requests #credentials { margin-block: var(--s-3); }
+.trace-requests form { margin-block: var(--s-3); }
+.trace-requests .trace-app-code { white-space: pre-wrap; max-height: 24rem; overflow: auto; }
 
 @media (max-width: 480px) {
   .gs-steps { font-size: var(--t-xs); gap: var(--s-1); }

@@ -8,7 +8,7 @@
 // image versions may vary, nothing else), and the report data commits to this
 // public key, this container code, this app and the caller's fresh nonce.
 import { createHash } from 'node:crypto';
-import { bindingPreimage, canonicalJson, codeHash, reportDataFor, sha256Hex, validateSpec } from './host.mjs';
+import { bindingPreimage, canonicalJson, codeHash, reportDataFor, runBindingPreimage, runnersCodeHash, sha256Hex, validateSpec } from './host.mjs';
 
 const lf = text => String(text).replace(/\r\n/g, '\n');
 
@@ -121,18 +121,13 @@ export function matchTemplate(template, deployed) {
 }
 
 /**
- * Checks a bundle against what the grantor approved. Throws on the first
- * failure; returns the facts it established.
- *   expected: { nonce, spec, template, approved: { app_ids, manifests, pre_launch_script_sha256, os } }
+ * The checks every bundle shares: the quote and its event log agree, the OS and the compose file
+ * are approved, and so are the deploy manifest and the CVM. Throws on the first failure; returns the
+ * facts it established, including the parsed quote.
+ *   expected: { template, approved: { app_ids, manifests, pre_launch_script_sha256, os } }
  */
-export function verifyBundle(bundle, expected) {
+export function verifyQuoteAndCompose(bundle, expected) {
   if (!bundle || bundle.version !== 1) throw new Error('unsupported bundle version');
-
-  // The container: the spec it runs is the one approved, so its code hash is too.
-  const spec = validateSpec(expected.spec);
-  const hash = codeHash(spec);
-  if (canonicalJson(validateSpec(bundle.spec)) !== canonicalJson(spec)) throw new Error('the container runs a different spec than the approved one');
-  if (bundle.code_hash !== hash) throw new Error(`code hash ${bundle.code_hash} is not the approved ${hash}`);
 
   // The quote and its event log agree.
   const quote = parseQuote(bundle.quote);
@@ -176,13 +171,56 @@ export function verifyBundle(bundle, expected) {
   if (!(expected.approved.manifests || []).some(m => normal(m) === normal(manifest)))
     throw new Error('the deploy manifest (secret names, features, key settings) is not an approved one');
 
-  // The binding: this key, this code, this app, this nonce.
   const appId = onlyEvent(events, 'app-id');
   if (!(expected.approved.app_ids || []).includes(appId)) throw new Error(`app ${appId} is not the approved CVM`);
-  const publicKey = bundle.container?.public_key;
-  const preimage = bindingPreimage({ appId, name: spec.name, codeHash: hash, publicKey, nonce: expected.nonce });
-  if (bundle.preimage !== preimage) throw new Error('the binding text is not what this check expects');
-  if (reportDataFor(preimage) !== quote.reportData) throw new Error('the quote does not carry this binding');
+  return { appId, osImageHash, composeHash: measuredCompose, mrConfigCarriesCompose, preLaunch, routerVersions, quote };
+}
 
-  return { appId, codeHash: hash, publicKey, osImageHash, composeHash: measuredCompose, mrConfigCarriesCompose, preLaunch, routerVersions, runtime: bundle.runtime, quote };
+/**
+ * Checks a probe bundle against what the grantor approved. Throws on the first
+ * failure; returns the facts it established.
+ *   expected: { nonce, spec, template, approved: { app_ids, manifests, pre_launch_script_sha256, os } }
+ */
+export function verifyBundle(bundle, expected) {
+  if (!bundle || bundle.version !== 1) throw new Error('unsupported bundle version');
+
+  // The container: the spec it runs is the one approved, so its code hash is too.
+  const spec = validateSpec(expected.spec);
+  const hash = codeHash(spec);
+  if (canonicalJson(validateSpec(bundle.spec)) !== canonicalJson(spec)) throw new Error('the container runs a different spec than the approved one');
+  if (bundle.code_hash !== hash) throw new Error(`code hash ${bundle.code_hash} is not the approved ${hash}`);
+
+  const facts = verifyQuoteAndCompose(bundle, expected);
+
+  // The binding: this key, this code, this app, this nonce.
+  const publicKey = bundle.container?.public_key;
+  const preimage = bindingPreimage({ appId: facts.appId, name: spec.name, codeHash: hash, publicKey, nonce: expected.nonce });
+  if (bundle.preimage !== preimage) throw new Error('the binding text is not what this check expects');
+  if (reportDataFor(preimage) !== facts.quote.reportData) throw new Error('the quote does not carry this binding');
+
+  return { ...facts, codeHash: hash, publicKey, runtime: bundle.runtime };
+}
+
+/**
+ * Checks a trace run's bundle (docs/attested-trace-apps.md): the shared checks, the runner and
+ * sandbox specs this checkout approves, and a binding to this run, this run's key and this nonce.
+ * Returns the report data the quote carries. The caller still has Phala's verifier check the
+ * quote's signature and that it carries this report data, then calls checkRunBundle
+ * (server/src/trace-run.ts) with it and with the runner identity returned here.
+ *   expected: { nonce, runHash, publicKey, runnerSpec, sandboxSpec, template, approved }
+ */
+export function verifyRunBundle(bundle, expected) {
+  if (!bundle || bundle.version !== 1) throw new Error('unsupported bundle version');
+  const runner = validateSpec(expected.runnerSpec), sandbox = validateSpec(expected.sandboxSpec);
+  if (canonicalJson(validateSpec(bundle.runner_spec)) !== canonicalJson(runner) || canonicalJson(validateSpec(bundle.sandbox_spec)) !== canonicalJson(sandbox))
+    throw new Error('the runner or sandbox runs a different spec than the approved one');
+  const hash = runnersCodeHash(runner, sandbox);
+  if (bundle.code_hash !== hash) throw new Error(`runner code hash ${bundle.code_hash} is not the approved ${hash}`);
+
+  const facts = verifyQuoteAndCompose(bundle, expected);
+
+  const preimage = runBindingPreimage({ appId: facts.appId, name: runner.name, codeHash: hash, runHash: expected.runHash, publicKey: expected.publicKey, nonce: expected.nonce });
+  if (bundle.preimage !== preimage) throw new Error('the run binding is not what this check expects');
+  if (reportDataFor(preimage) !== facts.quote.reportData) throw new Error('the quote does not carry this run binding');
+  return { ...facts, codeHash: hash, reportData: facts.quote.reportData, runner: { appId: facts.appId, name: runner.name, codeHash: hash } };
 }

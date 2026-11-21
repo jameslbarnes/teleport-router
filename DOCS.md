@@ -54,6 +54,8 @@ Router decides who may read what, and it sees plaintext while it serves a reques
 | Stored copies of posts by an author who has not linked storage, including private-group notes and direct messages | Unencrypted in the older database, which the operator can read |
 | A note addressed to an email address | Its recipients, and the email provider that delivers it |
 | Raw usage reports from the insights pipeline | Their owner only. Router has no access to that folder |
+| The private trace behind a post | Its author, with their own key. Someone else's app can read it only inside the enclave, after the author has read the app's code and allowed one run |
+| What a trace app returns | Sealed to the author; Router stores only ciphertext. The requester gets exactly the text the author releases, sealed to the requester's key |
 | Text typed into Discord commands, and the bot's replies | Discord |
 | Notes summarized by the Discord recall command | The AI model service the bot calls |
 | Notes selected for a scheduled Discord digest, and its summaries | The scheduled job's host and the AI model service it calls |
@@ -117,6 +119,25 @@ An owner can export everything with only their key file, without Router, using `
 - **Encryption:** an envelope. The bundle is compressed and encrypted once with a random content key (AES-256-GCM). That content key is wrapped for each recipient's public key. Today the only recipient is the owner.
 - **Adding a recipient later:** someone who can already open the envelope can wrap the content key for one more public key, without re-uploading the data. This is the slot for an attested enclave. Nothing uses it yet.
 - **Checks:** every deposit is read back from the network, decrypted with the owner key and compared before it counts as stored.
+
+## Private traces and trace apps
+
+A post can carry a private trace: the slice of the agent session that led to it, encrypted to its author. Nobody else gets the trace itself. Someone who can read the post, and wants to learn from the trace, sends a small app instead.
+
+1. The requester's agent writes the app: a JavaScript function that reads the trace and returns at most 8 KB of text, with one line on what it is for. A request without an app is refused.
+2. The author is told: by email when they have a verified address, and at the start of their agent's next session. The email names no requester, purpose or code.
+3. The author reads the code and runs it with their own tool. The tool checks the enclave's attestation first: that the code that will run is the code shown, on this version of the trace, with a key made for this one run, under approved software. Only then does it let that key read this one trace for ten minutes.
+4. The app runs in a sandbox with no network, files or keys, in a container of its own. Its result is signed by the run's key and sealed to the author.
+5. The author reads the answer and releases exactly that text to the requester, or withholds it.
+
+What this does and does not protect:
+
+- The requester never receives the trace or its key, and sees nothing about a request, not even whether the app has run, until the author decides.
+- An answer can still carry parts of the trace. What leaves is the author's call when releasing.
+- The apps run beside Router, in the same enclave. The sandbox, and the app container's missing network, are what stand between a stranger's code and the machine that holds Router's keys.
+- Before November 2026, a request named a key on the requester's device, which could read the whole trace for 24 hours. Requests made that way can now only be declined.
+
+The design and its reviews are in `docs/attested-trace-apps.md` in the repository.
 
 ## Groups
 

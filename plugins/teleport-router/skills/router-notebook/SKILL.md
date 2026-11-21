@@ -26,7 +26,7 @@ Do not post from a scheduled or automated run that no person is talking to, unle
 
 ## Requesting a private trace
 
-A post's `trace_url` opens its access page. To request the trace for work the person authorized, use `router_trace_access` with `action: request`, the post ID and the reader's compressed secp256k1 public key. Keep the private reader key on the reader's device. Check the request with the `status` action. Owners can check `inbox` and review requests at `/trace-access`. The owner approves a one-post read grant in TinyCloud. Capture and upload a session slice under the owner’s saved trace rules.
+A post's `trace_url` opens its access page. Nobody else receives a trace itself. To learn from one, for work the person authorized, write a small app and send it with `router_trace_access`, `action: request`: the post ID, `app: {code, purpose}` and `answer_public_key`, a compressed secp256k1 key whose private half stays on the person's device. The code is plain JavaScript defining `function analyze(trace, info)` that returns a string of at most 8 KB. It runs with no network, files or timers, in 256 MB and 10 seconds. The purpose is one line the owner reads. The owner reads the code, runs it in an attested enclave, reads the answer and may release it. `status` returns the answer, sealed to your key, once released. Owners see requests to them with `inbox`, each with its app's code: review it for the person and say what its answer could reveal. Capture and upload a session slice under the owner's saved trace rules.
 
 ## Searching
 

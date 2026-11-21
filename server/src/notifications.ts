@@ -65,6 +65,8 @@ export interface NotificationService {
   sendVerificationEmail(handle: string, email: string): Promise<boolean>;
   notifyAddressedEntry?(entry: JournalEntry, recipient: User, author?: User): Promise<void>;
   notifyNewFollower?(follower: User, followed: User): Promise<void>;
+  /** Someone asked to run an app on the trace behind one of the owner's notes. */
+  notifyTraceRequest?(owner: User): Promise<void>;
 }
 
 interface NotificationConfig {
@@ -680,7 +682,59 @@ ${user.bio ? `For context, my bio: ${user.bio}` : ''}
         console.error(`[Notify] Failed to send follow notification to @${followed.handle}:`, err);
       }
     },
+
+    // The email says only that a request is waiting and where to review it: no requester, purpose or
+    // code, which are other people's text and stay in Router.
+    async notifyTraceRequest(owner: User): Promise<void> {
+      if (!owner.email || !owner.emailVerified) return;
+      if (owner.emailPrefs && !owner.emailPrefs.comments) return;
+      if (!canSendEmailTo(owner.handle)) { console.log(`[Notify] Rate limited for @${owner.handle}`); return; }
+      if (!emailClient) { console.warn('[Notify] No email client configured'); return; }
+      try {
+        const unsubscribeToken = generateUnsubscribeToken(owner.handle, 'comments', jwtSecret);
+        await emailClient.send({
+          from: `Router <${fromEmail}>`,
+          to: owner.email,
+          subject: 'Someone asked to run an app on one of your Router traces',
+          html: renderTraceRequestEmail(owner, unsubscribeToken),
+        });
+        console.log(`[Notify] Trace request notice sent to @${owner.handle}`);
+      } catch (err) {
+        console.error(`[Notify] Failed to send trace request notice to @${owner.handle}:`, err);
+      }
+    },
   };
+
+  function renderTraceRequestEmail(owner: User, unsubscribeToken: string): string {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: Georgia, serif; line-height: 1.7; color: #1a1a1a; max-width: 560px; margin: 0 auto; padding: 40px 20px; }
+    a.btn { display: inline-block; background: #7c5cbf; color: white; padding: 10px 22px; text-decoration: none; border-radius: 6px; font-family: Georgia, serif; }
+    .footer { font-size: 13px; color: #999; margin-top: 40px; }
+    .footer a { color: #999; }
+  </style>
+</head>
+<body>
+  <p>Hey @${owner.handle},</p>
+
+  <p>Someone wants to run a small app on the private trace behind one of your notes.</p>
+
+  <p>You can read the app's code first. If you run it, it works inside Router's enclave and you read its answer before deciding whether they get it. Nothing is shared unless you release it.</p>
+
+  <p><a href="${baseUrl}/trace-access" class="btn">Review the request</a></p>
+
+  <div class="footer">
+    &mdash;<br>
+    router.teleport.computer &middot; <a href="${baseUrl}/unsubscribe?token=${unsubscribeToken}&type=comments">unsubscribe</a>
+  </div>
+</body>
+</html>
+    `.trim();
+  }
 
   /**
    * Render addressed entry notification email HTML

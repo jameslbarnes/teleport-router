@@ -306,21 +306,29 @@ try {
   await soloPage.goto(base + '/e/' + receipt.entry_id);
   await soloPage.locator('#trace a').click();
   assert.equal(soloPage.url(),receipt.trace_url);
-  await soloPage.locator('#public-key').fill('0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798');
-  await soloPage.getByRole('button',{name:'Request access'}).click();
-  await soloPage.locator('#status').filter({hasText:'is pending'}).waitFor();
+  // A reader is told how to ask: their agent sends an app. There is no key form any more.
+  await soloPage.locator('#ask').filter({hasText:'write a small app'}).waitFor();
+  assert.equal(await soloPage.locator('#public-key').count(), 0);
+  const asked = await soloPage.evaluate(async entry => (await fetch('/api/trace-access', { method:'POST',
+    headers:{ 'Content-Type':'application/json', Authorization:'Bearer ' + localStorage.getItem('router_key') },
+    body: JSON.stringify({ action:'request', entry_id:entry, answer_public_key:'0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
+      app:{ code:'function analyze(trace) { return String(trace.length) }', purpose:'Measure the trace <b>loudly</b>' } }) })).json(), receipt.entry_id);
+  assert.equal(asked.state, 'pending');
   const ownerContext = await newContext({viewport:{width:390,height:844}});
   await ownerContext.addInitScript(k=>localStorage.setItem('router_key',k),ownerKey);
   const inboxPage = await ownerContext.newPage();
   await inboxPage.goto(base + '/trace-access');
-  await inboxPage.getByRole('button',{name:'Allow',exact:true}).waitFor();
+  // The owner reads the purpose and code as text; running happens in the owner's own tool.
+  await inboxPage.locator('.trace-app-code').filter({hasText:'function analyze(trace)'}).waitFor();
+  assert.equal(await inboxPage.locator('#requests b').count(), 0, 'the purpose is shown as text, not markup');
+  assert.equal(await inboxPage.getByRole('button',{name:'Allow',exact:true}).count(), 0);
   assert.equal(await inboxPage.evaluate(()=>document.documentElement.scrollWidth > innerWidth),false);
   await inboxPage.getByRole('button',{name:'Decline',exact:true}).click();
   await inboxPage.locator('#status').filter({hasText:'declined'}).waitFor();
   await ownerContext.close();
   await soloContext.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry; a published note’s trace link, reader request and owner decline. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
+  console.log('PASS: setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry; a published note’s trace link, a request carrying an app, its code shown as text, and the owner’s decline. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
 } finally {
   await browser?.close();
   child.kill();

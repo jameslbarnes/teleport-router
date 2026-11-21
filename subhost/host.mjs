@@ -79,6 +79,81 @@ export function validateSpec(input) {
 /** A container's code hash: SHA-256 of its spec as deterministic JSON. */
 export const codeHash = spec => sha256Hex(canonicalJson(validateSpec(spec)));
 
+/** Trace app runs (docs/attested-trace-apps.md): a runner container holds each run's key and reads
+ *  the trace; the app itself runs in a fresh sandbox container with no network. Their identity is
+ *  one hash over both specs. */
+export const RUN_DOMAIN = 'teleport-router/trace-run/v1';
+export const runnersCodeHash = (runnerSpec, sandboxSpec) => sha256Hex(canonicalJson({ runner: codeHash(runnerSpec), sandbox: codeHash(sandboxSpec) }));
+
+/** A run's binding text: the same fields and rule as server/src/trace-run.ts, with its own domain,
+ *  so a probe quote can never pass for a run quote or the reverse. */
+export function runBindingPreimage({ appId, name, codeHash: hash, runHash, publicKey, nonce }) {
+  if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) throw new Error('app id must be 40 lowercase hex characters');
+  if (typeof name !== 'string' || !NAME_RE.test(name)) throw new Error('invalid container name');
+  for (const [label, v] of [['code hash', hash], ['run hash', runHash], ['nonce', nonce]])
+    if (typeof v !== 'string' || !HEX64_RE.test(v)) throw new Error(`${label} must be 64 lowercase hex characters`);
+  if (typeof publicKey !== 'string' || !PUBLIC_KEY_RE.test(publicKey)) throw new Error('public key must be an uncompressed secp256k1 key (0x04 and 128 lowercase hex)');
+  return canonicalJson({ domain: RUN_DOMAIN, app_id: appId, name, code_hash: hash, run_hash: runHash, public_key: publicKey, nonce });
+}
+
+const RUN_ID_RE = /^[\w-]{1,160}$/;
+const SANDBOX_ID_RE = /^[0-9a-f]{32}$/;
+
+/** Checks what Router sends on its runs socket. The runner checks the run description itself. */
+export function runsRequestCheck(path, body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body is not an object';
+  if (path === '/prepare') {
+    if (typeof body.nonce !== 'string' || !HEX64_RE.test(body.nonce)) return 'nonce must be 64 lowercase hex characters';
+    if (!body.description || typeof body.description !== 'object' || Array.isArray(body.description) || !RUN_ID_RE.test(String(body.description.run_id))) return 'invalid run description';
+    if (typeof body.code !== 'string' || !body.code || body.code.length > 65536) return 'invalid code';
+    return null;
+  }
+  if (path === '/run') {
+    if (typeof body.run_id !== 'string' || !RUN_ID_RE.test(body.run_id)) return 'invalid run id';
+    if (typeof body.delegation !== 'string' || body.delegation.length > 90000 || !body.wrap || typeof body.wrap !== 'object' || typeof body.host !== 'string') return 'invalid grant';
+    return null;
+  }
+  return 'not found';
+}
+
+/** Docker create-container body for a run's sandbox: no network at all, no privileges, only its own directory. */
+export function sandboxConfig(spec, { hash, runtime, dirOnHost }) {
+  const env = Object.entries(spec.env).map(([k, v]) => `${k}=${v}`);
+  env.push('SUBHOST_DIR=/run/sandbox', 'HOME=/tmp');
+  return {
+    Image: spec.image, Cmd: spec.cmd, WorkingDir: spec.workdir, User: spec.user, Env: env,
+    Labels: { 'computer.teleport.subhost.name': spec.name, 'computer.teleport.subhost.code-hash': hash },
+    NetworkDisabled: true,
+    HostConfig: {
+      Binds: [`${dirOnHost}:/run/sandbox`],
+      NetworkMode: 'none',
+      Privileged: false,
+      CapDrop: ['ALL'],
+      SecurityOpt: ['no-new-privileges:true'],
+      ReadonlyRootfs: true,
+      Tmpfs: { '/tmp': 'rw,noexec,nosuid,size=16m' },
+      Memory: 768 * 1024 * 1024,
+      MemorySwap: 768 * 1024 * 1024,
+      NanoCpus: 1_000_000_000,
+      PidsLimit: 64,
+      RestartPolicy: { Name: 'no' },
+      // Nothing an app prints is kept.
+      LogConfig: { Type: 'none' },
+      ...(runtime === 'runsc' ? { Runtime: 'runsc' } : {}),
+    },
+  };
+}
+
+/** Docker create-container body for the runner: like the probe, with room for a decrypted trace and a view of the sandboxes' directories. */
+export function runnerConfig(spec, { hash, runtime, dirOnHost, sandboxesOnHost }) {
+  const config = containerConfig(spec, { hash, runtime, probeDirOnHost: dirOnHost });
+  config.Env.push('SUBHOST_SANDBOXES=/run/sandboxes');
+  config.HostConfig.Binds.push(`${sandboxesOnHost}:/run/sandboxes`);
+  config.HostConfig.Memory = config.HostConfig.MemorySwap = 768 * 1024 * 1024;
+  config.HostConfig.LogConfig = { Type: 'none' };
+  return config;
+}
+
 /** The text whose SHA-512 is the quote's report data. Refuses malformed fields. */
 export function bindingPreimage({ appId, name, codeHash: hash, publicKey, nonce }) {
   if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) throw new Error('app id must be 40 lowercase hex characters');
@@ -334,6 +409,155 @@ export async function main(env = process.env) {
       log('supervisor:', state.lastError);
     }
   }
+  // 4. Trace app runs, only when the compose file carries a runner spec and a sandbox spec. The
+  //    runner holds each run's key and reads the trace; each run's app executes in a sandbox
+  //    container of its own, with no network. This host never sees a trace or an answer: only run
+  //    descriptions, app code, grants and sealed results pass through it.
+  const decodeSpec = text => { try { return validateSpec(JSON.parse(Buffer.from(text, 'base64').toString('utf8'))); } catch (err) { log('trace runs off: bad spec:', err.message); return null; } };
+  const runnerSpec = env.SUBHOST_RUNNER_SPEC ? decodeSpec(env.SUBHOST_RUNNER_SPEC) : null;
+  const sandboxSpec = env.SUBHOST_SANDBOX_SPEC ? decodeSpec(env.SUBHOST_SANDBOX_SPEC) : null;
+  let runs = runnerSpec && sandboxSpec ? {
+    hash: runnersCodeHash(runnerSpec, sandboxSpec), runnerHash: codeHash(runnerSpec), sandboxHash: codeHash(sandboxSpec),
+    dir: `${paths.base}/runner`, sandboxes: `${paths.base}/sandboxes`,
+    runnerSource: env.SUBHOST_RUNNER_SOURCE || `${paths.base}/runner`,
+    sandboxesSource: env.SUBHOST_SANDBOXES_SOURCE || `${paths.base}/sandboxes`,
+    name: env.SUBHOST_RUNNER_CONTAINER_NAME || 'subhost-runner',
+    state: { generation: 0, containerId: null, status: 'starting', startedAt: null, lastError: null },
+    // Sandboxes by id. An entry is made before Docker is asked, so two requests cannot both take the last place.
+    live: new Map(), doomed: new Set(), nextStart: 0,
+  } : null;
+  const SANDBOX_LABEL = 'computer.teleport.subhost.name=trace-sandbox';
+  const detectRuntime = async () => {
+    const r = await docker('GET', '/info');
+    return r.status === 200 && JSON.parse(r.text)?.Runtimes?.runsc ? 'runsc' : 'runc';
+  };
+  async function startRunner() {
+    runs.state.generation += 1;
+    Object.assign(runs.state, { status: 'starting', containerId: null });
+    const removed = await docker('DELETE', `/containers/${runs.name}?force=true`);
+    if (removed.status !== 204 && removed.status !== 404) throw new Error(`could not remove the old runner: HTTP ${removed.status}`);
+    rmSync(`${runs.dir}/runner.sock`, { force: true });
+    const stale = await docker('GET', `/containers/json?all=1&filters=${encodeURIComponent(JSON.stringify({ label: [SANDBOX_LABEL] }))}`);
+    if (stale.status === 200) for (const c of JSON.parse(stale.text)) await docker('DELETE', `/containers/${c.Id}?force=true`, undefined, { timeoutMs: 10_000 }).catch(() => {});
+    await ensureImage(runnerSpec.image);
+    await ensureImage(sandboxSpec.image);
+    const create = await docker('POST', `/containers/create?name=${runs.name}`,
+      runnerConfig(runnerSpec, { hash: runs.runnerHash, runtime: await detectRuntime(), dirOnHost: runs.runnerSource, sandboxesOnHost: runs.sandboxesSource }));
+    if (create.status !== 201) throw new Error(`runner create failed: HTTP ${create.status} ${create.text.slice(0, 200)}`);
+    const { Id } = JSON.parse(create.text);
+    Object.assign(runs.state, { containerId: Id, status: 'running', startedAt: new Date().toISOString(), lastError: null });
+    const start = await docker('POST', `/containers/${Id}/start`);
+    if (start.status !== 204 && start.status !== 304) throw new Error(`runner start failed: HTTP ${start.status} ${start.text.slice(0, 200)}`);
+    log(`started the trace runner, generation ${runs.state.generation}`);
+  }
+  async function removeSandbox(id) {
+    const tracked = runs.live.has(id) || runs.doomed.has(id);
+    runs.live.delete(id);
+    // Removed by name, so a sandbox whose create call never answered goes too. One that will not go is retried.
+    const r = await docker('DELETE', `/containers/subhost-sandbox-${id}?force=true`, undefined, { timeoutMs: 10_000 }).catch(() => null);
+    if (tracked && (!r || (r.status !== 204 && r.status !== 404))) runs.doomed.add(id); else runs.doomed.delete(id);
+    rmSync(`${runs.sandboxes}/${id}`, { recursive: true, force: true });
+  }
+  async function startSandbox(id) {
+    if (runs.live.has(id) || runs.doomed.has(id)) throw new Error('that sandbox already exists');
+    if (runs.live.size + runs.doomed.size >= 2) throw new Error('too many sandboxes');
+    runs.live.set(id, { created: Date.now() });
+    try {
+      mkdirSync(`${runs.sandboxes}/${id}`, { recursive: true });
+      chmodSync(`${runs.sandboxes}/${id}`, 0o777);
+      const create = await docker('POST', `/containers/create?name=subhost-sandbox-${id}`,
+        sandboxConfig(sandboxSpec, { hash: runs.sandboxHash, runtime: await detectRuntime(), dirOnHost: `${runs.sandboxesSource}/${id}` }));
+      if (create.status !== 201) throw new Error(`sandbox create failed: HTTP ${create.status}`);
+      const start = await docker('POST', `/containers/${JSON.parse(create.text).Id}/start`);
+      if (start.status !== 204 && start.status !== 304) throw new Error(`sandbox start failed: HTTP ${start.status}`);
+    } catch (err) { await removeSandbox(id); throw err; }
+  }
+  async function superviseRuns() {
+    if (!runs) return;
+    try {
+      for (const [id, s] of [...runs.live]) if (Date.now() - s.created > 120_000) await removeSandbox(id);
+      for (const id of [...runs.doomed]) await removeSandbox(id);
+      if (runs.state.containerId) {
+        const r = await docker('GET', `/containers/${runs.state.containerId}/json`);
+        if (r.status === 200 && JSON.parse(r.text)?.State?.Running === true) return;
+        log(`the trace runner, generation ${runs.state.generation}, stopped`);
+        Object.assign(runs.state, { status: 'stopped', containerId: null });
+      }
+      if (Date.now() < runs.nextStart) return;
+      runs.nextStart = Date.now() + 60_000;
+      await startRunner();
+    } catch (err) {
+      runs.state.lastError = String(err.message).slice(0, 300);
+      if (runs.state.status === 'starting') runs.state.status = 'failed';
+      log('runner supervisor:', runs.state.lastError);
+    }
+  }
+  const runServers = [];
+  if (runs) try {
+    mkdirSync(runs.dir, { recursive: true }); chmodSync(runs.dir, 0o777);
+    mkdirSync(runs.sandboxes, { recursive: true }); chmodSync(runs.sandboxes, 0o777);
+    // The runner asks for a sandbox per run, and drops it after.
+    const sandboxServer = http.createServer(async (req, res) => {
+      try {
+        const m = /^\/sandbox\/([0-9a-f]{32})$/.exec(req.url || '');
+        if (!m || !SANDBOX_ID_RE.test(m[1])) { sendJson(res, 404, { error: 'not found' }); return; }
+        if (req.method === 'POST') { await startSandbox(m[1]); sendJson(res, 200, { ok: true }); return; }
+        if (req.method === 'DELETE') { await removeSandbox(m[1]); sendJson(res, 200, { ok: true }); return; }
+        sendJson(res, 405, { error: 'method not allowed' });
+      } catch (err) { log('sandbox request failed:', err.message); sendJson(res, 503, { error: 'sandbox unavailable' }); }
+    });
+    await listenOnSocket(sandboxServer, `${runs.dir}/host.sock`, 0o666);
+    runServers.push(sandboxServer);
+    // Router's runs socket, in the directory only Router mounts.
+    const prepareLimit = rateLimiter(20, 60_000);
+    const runsServer = http.createServer(async (req, res) => {
+      try {
+        if (req.method !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+        const body = JSON.parse(await readBody(req, 256 * 1024));
+        const problem = runsRequestCheck(req.url, body);
+        if (problem) { sendJson(res, problem === 'not found' ? 404 : 400, { error: problem }); return; }
+        if (runs.state.status !== 'running' || !info?.appId || !info.appCompose) { sendJson(res, 503, { error: 'The trace runner is not running.' }); return; }
+        const runnerSocket = `${runs.dir}/runner.sock`;
+        if (req.url === '/run') {
+          const r = await unixRequest(runnerSocket, 'POST', '/run', body, { timeoutMs: 150_000, maxBytes: 64 * 1024 });
+          res.writeHead(r.status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(r.text), 'Cache-Control': 'no-store' });
+          res.end(r.text);
+          return;
+        }
+        if (!prepareLimit()) { sendJson(res, 429, { error: 'too many requests' }); return; }
+        const runHash = sha256Hex(canonicalJson(body.description));
+        const r = await unixRequest(runnerSocket, 'POST', '/prepare', { description: body.description, code: body.code }, { timeoutMs: 30_000, maxBytes: 64 * 1024 });
+        const prepared = JSON.parse(r.text);
+        if (r.status !== 200) { sendJson(res, r.status === 400 ? 400 : 502, { error: typeof prepared?.error === 'string' ? prepared.error.slice(0, 300) : 'The runner refused.' }); return; }
+        if (prepared.run_id !== body.description.run_id || prepared.run_hash !== runHash || typeof prepared.public_key !== 'string' || !PUBLIC_KEY_RE.test(prepared.public_key)) {
+          sendJson(res, 502, { error: 'The runner prepared a different run.' }); return;
+        }
+        const preimage = runBindingPreimage({ appId: info.appId, name: runnerSpec.name, codeHash: runs.hash, runHash, publicKey: prepared.public_key, nonce: body.nonce });
+        const reportData = reportDataFor(preimage);
+        const quote = await dstack('GetQuote', { report_data: reportData });
+        sendJson(res, 200, {
+          run_id: prepared.run_id, public_key: prepared.public_key, runner: { appId: info.appId, name: runnerSpec.name, codeHash: runs.hash },
+          bundle: {
+            version: 1, simulated: false, preimage, report_data: reportData, quote: String(quote.quote).replace(/^0x/, ''),
+            event_log: typeof quote.event_log === 'string' ? JSON.parse(quote.event_log) : quote.event_log, app_compose: info.appCompose,
+            runner_spec: runnerSpec, sandbox_spec: sandboxSpec, code_hash: runs.hash, runtime: await detectRuntime(),
+          },
+        });
+      } catch (err) {
+        // Nothing here can hold a trace or an answer; the message is still kept to a fixed reply.
+        log('run request failed:', String(err.message).slice(0, 200));
+        sendJson(res, 502, { error: 'The run failed.' });
+      }
+    });
+    await listenOnSocket(runsServer, `${paths.base}/router/runs.sock`, 0o666);
+    runServers.push(runsServer);
+    log(`trace runs enabled; runner code hash ${runs.hash}`);
+  } catch (err) {
+    log('trace runs off: setup failed:', err.message);
+    for (const server of runServers.splice(0)) server.close();
+    runs = null;
+  }
+
   // 3. The public endpoint: status, binding quotes and a way to hand the container a grant.
   const quoteLimit = rateLimiter(10, 60_000);
   const useLimit = rateLimiter(10, 60_000);
@@ -345,6 +569,7 @@ export async function main(env = process.env) {
         sendJson(res, 200, {
           name: spec.name, code_hash: hash, app_id: info?.appId ?? null, runtime: state.runtime,
           container: { status: state.status, generation: state.generation, started_at: state.startedAt, key_registered: !!state.publicKey, last_error: state.lastError },
+          runs: runs ? { status: runs.state.status, generation: runs.state.generation, code_hash: runs.hash, sandboxes: runs.live.size, last_error: runs.state.lastError } : null,
         });
         return;
       }
@@ -395,7 +620,11 @@ export async function main(env = process.env) {
   // The health check (and so Router's start) waits only for the key socket above.
   // The sub-container starts in the background; pulling its image can take minutes.
   let supervising = false;
-  const tick = () => { if (supervising) return; supervising = true; supervise().finally(() => { supervising = false; }); };
+  let supervisingRuns = false;
+  const tick = () => {
+    if (!supervising) { supervising = true; supervise().finally(() => { supervising = false; }); }
+    if (runs && !supervisingRuns) { supervisingRuns = true; superviseRuns().finally(() => { supervisingRuns = false; }); }
+  };
   tick();
   const timer = setInterval(tick, 15_000);
 
@@ -403,9 +632,13 @@ export async function main(env = process.env) {
     clearInterval(timer);
     log('stopping; removing the sub-container');
     await docker('DELETE', `/containers/${containerName}?force=true`, undefined, { timeoutMs: 10_000 }).catch(() => {});
-    await Promise.all([publicServer, hostServer, routerServer].map(s => new Promise(resolve => { s.closeAllConnections?.(); s.close(() => resolve()); })));
+    if (runs) {
+      for (const id of [...runs.live.keys()]) await removeSandbox(id);
+      await docker('DELETE', `/containers/${runs.name}?force=true`, undefined, { timeoutMs: 10_000 }).catch(() => {});
+    }
+    await Promise.all([publicServer, hostServer, routerServer, ...runServers].map(s => new Promise(resolve => { s.closeAllConnections?.(); s.close(() => resolve()); })));
   };
-  return { close, port: publicServer.address().port, state };
+  return { close, port: publicServer.address().port, state, runs };
 }
 
 if (process.env.SUBHOST_MAIN === '1') {
