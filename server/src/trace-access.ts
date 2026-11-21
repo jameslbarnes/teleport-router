@@ -16,8 +16,8 @@ interface AppRecord { runtime: string; code: string; purpose: string; hash: stri
 interface RunRecord { id: string; description: RunDescription; publicKey: string; preparedAt: number }
 /** Sealed to the owner by the runner and signed by the run's key. Router cannot open it. */
 interface AnswerRecord { runId: string; description: RunDescription; sealed: SealedAnswer; signature: string; runPublicKey: string; at: number }
-/** Sealed to the requester by the owner's side, with the hash of the answer the owner read. */
-interface ReleaseRecord { runId: string; description: RunDescription; sealed: SealedAnswer; answerSha256: string; at: number }
+/** Sealed to the requester by the owner's side. Its receipt is the sealed answer's own hash; Router never holds a hash of the plain answer. */
+interface ReleaseRecord { runId: string; description: RunDescription; sealed: SealedAnswer; at: number }
 type State = 'pending' | 'declined' | 'approved' | 'answered' | 'released' | 'withheld' | 'withdrawn';
 interface Request {
   id: string; revision: string; entryId: string; owner: string; requester: string; requesterName: string;
@@ -42,7 +42,7 @@ function checkedWrap(value: any): KeyWrap {
   if (!value || !field(value.nonce, 12) || !field(value.tag, 16) || !field(value.ciphertext, 32)) throw new TraceRequestError('Invalid reader key envelope.');
   return { ephemeralPublicKey: checkedKey(value.ephemeralPublicKey), nonce: value.nonce, tag: value.tag, ciphertext: value.ciphertext };
 }
-/** Shape of an answer the owner's side sealed to the requester. Router cannot check its contents; the requester checks them against answer_sha256. */
+/** Shape of an answer the owner's side sealed to the requester. Router cannot check its contents; it checks the ciphertext against the sealed answer's own hash. */
 function checkedRelease(value: any): SealedAnswer {
   const b64 = (v: unknown, n: number) => typeof v === 'string' && Buffer.from(v, 'base64url').length === n && Buffer.from(v, 'base64url').toString('base64url') === v;
   const m = value?.meta;
@@ -125,12 +125,12 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     const app = { purpose: r.app.purpose, code: r.app.code, hash: r.app.hash, runtime: r.app.runtime };
     if (who === 'requester') {
       return { ...base, app, answer_public_key: r.publicKey, state: requesterState(r),
-        ...(r.state === 'released' && r.released ? { answer: r.released.sealed, answer_sha256: r.released.answerSha256, run: r.released.description, released_at: r.released.at } : {}) };
+        ...(r.state === 'released' && r.released ? { answer: r.released.sealed, sealed_sha256: r.released.sealed.meta.sha256, run: r.released.description, released_at: r.released.at } : {}) };
     }
     return { ...base, app, answer_public_key: r.publicKey, state: r.state,
       ...(r.run ? { run: { run_id: r.run.id, description: r.run.description, public_key: r.run.publicKey, prepared_at: r.run.preparedAt } } : {}),
       ...(r.answer ? { answer: { run_id: r.answer.runId, description: r.answer.description, sealed: r.answer.sealed, signature: r.answer.signature, run_public_key: r.answer.runPublicKey, at: r.answer.at } } : {}),
-      ...(r.released ? { released: { run_id: r.released.runId, answer_sha256: r.released.answerSha256, at: r.released.at } } : {}) };
+      ...(r.released ? { released: { run_id: r.released.runId, sealed_sha256: r.released.sealed.meta.sha256, at: r.released.at } } : {}) };
   }
   const requester = async (r: Request) => ({ keyHash: r.requester, user: await getUser(r.requester), pseudonym: r.requesterName });
   /** Only the runner's own errors, which are fixed sentences, are shown; anything else becomes one fixed message.
@@ -241,13 +241,16 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
   async function release(r: Request, input: Record<string, unknown>) {
     revised(r, input);
     if (r.state !== 'answered' || !r.answer || r.answer.runId !== input.run_id) throw new TraceRequestError('There is no answer from that run to release.', 409);
-    if (typeof input.answer_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(input.answer_sha256)) throw new TraceRequestError('Give answer_sha256: the SHA-256 of the answer you read.');
+    if (input.answer_sha256 !== undefined) throw new TraceRequestError('This release carries a hash of the plain answer, which Router must not hold. Update your owner tool and release again.');
     const sealed = checkedRelease(input.sealed);
+    const ciphertext = Buffer.from(sealed.data, 'base64');
+    if (createHash('sha256').update(ciphertext).digest('hex') !== sealed.meta.sha256 || ciphertext.length !== sealed.meta.bytes)
+      throw new TraceRequestError('The sealed answer does not match its own hash.');
     if (!await visible(r.entryId, await requester(r))) throw new TraceRequestError('The requester can no longer see this post.', 409);
     return view(await store.change(r.id, current => {
       if (!current || current.state !== 'answered' || !current.answer || current.answer.runId !== input.run_id) throw new TraceRequestError('This request changed. Review it again.', 409);
       revised(current, input);
-      return { ...current, state: 'released', released: { runId: current.answer.runId, description: current.answer.description, sealed, answerSha256: input.answer_sha256 as string, at: now() } };
+      return { ...current, state: 'released', released: { runId: current.answer.runId, description: current.answer.description, sealed, at: now() } };
     }), 'owner');
   }
 

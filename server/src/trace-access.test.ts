@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { TCWSessionManager, prepareSession, completeSessionSetup, createDelegation, makeSpaceId } from '@tinycloud/node-sdk-wasm';
@@ -110,12 +110,23 @@ describe('trace requests that carry an app', () => {
     expect(waiting).not.toHaveProperty('answer');
     expect((await f.call(author, { action: 'inbox' })).requests[0].state).toBe('answered');
     const answered = await f.call(author, { action: 'status', request_id: a.request_id });
-    const { sealed, answer_sha256 } = sealForRequester((result as any).answer, answered.answer.description, requesterKey.signingKey.compressedPublicKey);
-    await f.call(author, { action: 'release', request_id: a.request_id, revision: a.revision, run_id: answered.answer.run_id, sealed, answer_sha256 });
+    const { sealed, sealed_sha256 } = sealForRequester((result as any).answer, answered.answer.description, requesterKey.signingKey.compressedPublicKey);
+    const plainHash = createHash('sha256').update((result as any).answer, 'utf8').digest('hex');
+    const releaseInput = { action: 'release', request_id: a.request_id, revision: a.revision, run_id: answered.answer.run_id, sealed };
+    // A hash of the plain answer would let Router test guesses at a short answer, so a release carrying one is refused.
+    await expect(f.call(author, { ...releaseInput, answer_sha256: plainHash })).rejects.toThrow('hash of the plain answer');
+    const tampered = { ...sealed, meta: { ...sealed.meta, sha256: plainHash } };
+    await expect(f.call(author, { ...releaseInput, sealed: tampered })).rejects.toThrow('does not match its own hash');
+    await f.call(author, releaseInput);
     const released = await f.call(agent, { action: 'status', request_id: a.request_id });
     expect(released.state).toBe('released');
-    expect(openReleased(released.answer, released.run, requesterKey.privateKey, released.answer_sha256)).toBe('{"Read":2,"Bash":1}');
-    expect(() => openReleased(released.answer, released.run, testWallet('other').privateKey, released.answer_sha256)).toThrow();
+    expect(released.sealed_sha256).toBe(sealed_sha256);
+    expect(openReleased(released.answer, released.run, requesterKey.privateKey, released.sealed_sha256)).toBe('{"Read":2,"Bash":1}');
+    expect(() => openReleased(released.answer, released.run, testWallet('other').privateKey, released.sealed_sha256)).toThrow();
+    expect(() => openReleased(released.answer, released.run, requesterKey.privateKey, plainHash)).toThrow('does not match');
+    const ownerView = await f.call(author, { action: 'status', request_id: a.request_id });
+    expect(ownerView.released).toMatchObject({ run_id: answered.answer.run_id, sealed_sha256 });
+    for (const view of [released, ownerView]) expect(JSON.stringify(view)).not.toContain(plainHash);
     expect((await f.call(author, { action: 'inbox' })).requests).toHaveLength(0);
   });
 
@@ -226,7 +237,7 @@ describe('trace requests that carry an app', () => {
     const good = sealForRequester('released text', d, requesterKey.signingKey.compressedPublicKey);
     await expect(f.call(author, { ...base, run_id: 'another-run', ...good })).rejects.toThrow('no answer from that run');
     const toOwner = sealForRequester('x', d, owner.signingKey.compressedPublicKey);
-    await expect(f.call(author, { ...base, sealed: { ...toOwner.sealed, meta: { ...toOwner.sealed.meta, wraps: { owner: toOwner.sealed.meta.wraps.reader } } }, answer_sha256: toOwner.answer_sha256 })).rejects.toThrow('requester alone');
+    await expect(f.call(author, { ...base, sealed: { ...toOwner.sealed, meta: { ...toOwner.sealed.meta, wraps: { owner: toOwner.sealed.meta.wraps.reader } } } })).rejects.toThrow('requester alone');
     await expect(f.call(agent, { ...base, ...good })).rejects.toThrow('not found');
     f.restrict();
     await expect(f.call(author, { ...base, ...good })).rejects.toThrow('no longer');
