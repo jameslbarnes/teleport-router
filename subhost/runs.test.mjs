@@ -112,14 +112,17 @@ test('verifyRunBundle accepts a consistent run bundle and refuses each kind of m
   refuse(b => { b.preimage = bindingPreimage({ appId: APP, name: RUNNER.name, codeHash: b.code_hash, publicKey: KEY, nonce }); }, 'probe binding');
 });
 
-test('the runner and sandbox stay out of the compose file until their image is pinned', () => {
-  assert.equal(runnerSpec(ROOT), null, 'runner.base.json is PENDING in this checkout');
-  assert.equal(sandboxSpec(ROOT), null);
-  assert.ok(!subhostBlock(ROOT).includes('SUBHOST_RUNNER_SPEC'));
+test('the runner and sandbox are in the compose file only while their image is pinned', () => {
+  assert.match(runnerSpec(ROOT).image, /@sha256:[0-9a-f]{64}$/, 'this checkout pins the runner image');
+  assert.equal(runnerSpec(ROOT).image, sandboxSpec(ROOT).image);
+  assert.ok(subhostBlock(ROOT).includes('SUBHOST_RUNNER_SPEC') && subhostBlock(ROOT).includes('SUBHOST_SANDBOX_SPEC'));
   const root = mkdtempSync(join(tmpdir(), 'subhost-embed-'));
   try {
     mkdirSync(join(root, 'subhost'));
     for (const f of ['host.mjs', 'probe.mjs', 'probe.base.json', 'runner.mjs', 'sandbox.mjs', 'runner.base.json', 'sandbox.base.json']) cpSync(join(ROOT, 'subhost', f), join(root, 'subhost', f));
+    for (const name of ['runner', 'sandbox']) writeFileSync(join(root, 'subhost', `${name}.base.json`), JSON.stringify({ name: `trace-${name}`, image: 'PENDING', workdir: '/app/server', env: {}, user: 'node' }));
+    assert.equal(runnerSpec(root), null);
+    assert.ok(!subhostBlock(root).includes('SUBHOST_RUNNER_SPEC'));
     for (const name of ['runner', 'sandbox']) writeFileSync(join(root, 'subhost', `${name}.base.json`), JSON.stringify({ name: `trace-${name}`, image, workdir: '/app/server', env: {}, user: 'node' }));
     const block = subhostBlock(root);
     const env = name => JSON.parse(Buffer.from(block.match(new RegExp(`- ${name}=([A-Za-z0-9+/=]+)`))[1], 'base64').toString('utf8'));
