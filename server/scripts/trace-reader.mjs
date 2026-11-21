@@ -1,4 +1,5 @@
-// A read grant can travel through Router. The matching reader key stays on this device.
+// The requester's side of a trace request. Requests carry an app; the owner runs it and may release its answer,
+// sealed to this device's key. readGrantedTrace still opens a trace under a read grant made before apps were required.
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -6,6 +7,7 @@ import { gunzipSync } from 'node:zlib';
 import { Wallet } from 'ethers';
 import { TinyCloudNode, deserializeDelegation } from '@tinycloud/node-sdk';
 import { openPart } from '../dist/trace-envelope.js';
+import { openReleased } from '../dist/trace-run.js';
 import { sessionExpiryFor } from '../dist/tinycloud-group-store.js';
 
 export async function readGrantedTrace(request, privateKey, host) {
@@ -50,7 +52,7 @@ export async function openGrantedTrace(access, grant, id, privateKey) {
 async function main() {
   const { values: v, positionals: [action, id] } = parseArgs({ allowPositionals: true, options: {
     'reader-key-file': {type:'string'}, 'router-key-file':{type:'string'}, router:{type:'string', default:'https://router.teleport.computer'},
-    host:{type:'string', default:'https://tee.node.tinycloud.xyz'}, out:{type:'string'},
+    app:{type:'string'}, purpose:{type:'string'}, out:{type:'string'},
   } });
   const keyFile = v['reader-key-file'];
   if (!keyFile) throw Error('Give --reader-key-file <local key file>.');
@@ -59,21 +61,24 @@ async function main() {
     console.log(wallet.signingKey.compressedPublicKey); return;
   }
   if (!['request','read','status'].includes(action) || !id || !v['router-key-file'])
-    throw Error('Use keygen, request <post-id>, status <request-id>, or read <request-id> --out <new file>.');
-  if (action === 'read' && !v.out) throw Error('Use --out <new file> for the private trace.');
+    throw Error('Use keygen, request <post-id> --app <file.js> --purpose <one line>, status <request-id>, or read <request-id> --out <new file>.');
+  if (action === 'request' && (!v.app || !v.purpose)) throw Error('A request carries an app: give --app <file.js> defining analyze(trace, info), and --purpose <one line>.');
+  if (action === 'read' && !v.out) throw Error('Use --out <new file> for the released answer.');
   const privateKey = (await readFile(keyFile,'utf8')).trim();
   const key = (await readFile(v['router-key-file'],'utf8')).trim();
   const base = new URL(v.router);
   if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost','127.0.0.1'].includes(base.hostname))) throw Error('Use an HTTPS Router.');
+  const body = action === 'request'
+    ? {action, entry_id:id, app:{code:await readFile(v.app,'utf8'), purpose:v.purpose}, answer_public_key:new Wallet(privateKey).signingKey.compressedPublicKey}
+    : {action:'status', request_id:id};
   const r = await fetch(new URL('/api/trace-access',base), {method:'POST',redirect:'error',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
-    body: JSON.stringify(action === 'request' ? {action,entry_id:id,reader_public_key:new Wallet(privateKey).signingKey.compressedPublicKey}
-      : {action:'status',request_id:id})});
+    body: JSON.stringify(body)});
   const request = await r.json();
   if (!r.ok) throw Error(request.error || 'Router did not accept the request.');
   if (action === 'read') {
-    if (!request.grant) throw Error('The trace request is ' + request.state + '.');
-    await writeFile(v.out, await readGrantedTrace(request, privateKey, v.host), { flag:'wx', mode:0o600 });
+    if (request.state !== 'released') throw Error('The trace request is ' + request.state + '.');
+    await writeFile(v.out, openReleased(request.answer, request.run, privateKey, request.answer_sha256), { flag:'wx', mode:0o600 });
   }
-  console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, expires_at:request.expires_at}));
+  console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, app_hash:request.app?.hash}));
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main().catch(e => { console.error(e.message); process.exitCode=1; });

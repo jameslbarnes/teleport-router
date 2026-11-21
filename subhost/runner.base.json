@@ -1,0 +1,10 @@
+{
+  "name": "trace-runner",
+  "image": "PENDING: the Router image built from the merge that adds trace apps, pinned by digest",
+  "workdir": "/app/server",
+  "env": {
+    "NODE_ENV": "production",
+    "TINYCLOUD_HOST": "https://tee.node.tinycloud.xyz"
+  },
+  "user": "node"
+}

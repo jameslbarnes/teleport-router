@@ -14,6 +14,7 @@ import { canonical } from './author-records.js';
 import { linkMessage, networkRecovery } from './openkey-recovery.js';
 import { tracePointer } from './trace-pointer.js';
 import { traceAccess, traceRequestStore, TraceRequestError } from './trace-access.js';
+import { simulatedRunnerClient, subhostRunnerClient, tinyCloudTraceSource, traceRunner, workerExecutor } from './trace-run.js';
 import { createServer } from 'http';
 import { randomUUID, createHash, randomBytes, createHmac } from 'crypto';
 import { readFile } from 'fs/promises';
@@ -589,11 +590,16 @@ export const SYSTEM_SKILLS: Skill[] = [
   },
   {
     id: 'system_router_trace_access', name: 'router_trace_access', handlerType: 'builtin', instructions: '', createdAt: 0,
-    description: 'Ask the owner to share the private trace behind a note you can read. Supply a compressed secp256k1 reader public key from your own device. The owner receives the request in their private inbox and can approve it with TinyCloud. Use inbox for requests to you, status to collect a decision. A pointer alone grants no access.',
+    description: 'Ask to run a small app on the private trace behind a note you can read. You never get the trace: the owner reads your app\'s code, runs it in an attested enclave, reads its answer and decides whether to release that answer to you. The app is JavaScript defining function analyze(trace, info) that returns a string of at most 8 KB; it has no network, files or timers, 256 MB and 10 seconds. Supply answer_public_key, a compressed secp256k1 key from your own device; the released answer is sealed to it. Use status to collect it, and withdraw to take a request back (needed before sending a different app). Use inbox for requests to you (with each app\'s code, so you can review it for your person), decline or withhold to refuse. A pointer alone grants no access.',
     inputSchema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['request', 'inbox', 'status', 'decline'] },
-      entry_id: { type: 'string' }, reader_public_key: { type: 'string', description: '0x02 or 0x03 followed by 64 hex digits. Keep the private key on the reader device.' },
-      request_id: { type: 'string' }, revision: { type: 'string', description: 'Required when declining.' },
+      action: { type: 'string', enum: ['request', 'inbox', 'status', 'withdraw', 'decline', 'withhold'] },
+      entry_id: { type: 'string' },
+      app: { type: 'object', description: 'Required when requesting.', properties: {
+        code: { type: 'string', description: 'JavaScript defining function analyze(trace, info), returning a string. At most 32 KB.' },
+        purpose: { type: 'string', description: 'One line, at most 280 characters: what the app is for. The owner reads it.' },
+      }, required: ['code', 'purpose'] },
+      answer_public_key: { type: 'string', description: '0x02 or 0x03 followed by 64 hex digits. Keep the private key on your device.' },
+      request_id: { type: 'string' }, revision: { type: 'string', description: 'Required when declining or withholding.' },
     }, required: ['action'] },
   },
   {
@@ -1281,8 +1287,17 @@ const authorLayer = useAuthors ? authorStorage(baseStorage,
 const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStorage);
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
 if (keyRecovery) storage.stop();
+const traceRequests = traceRequestStore(useFirestore ? getFirestore() : undefined);
 const handleTraceAccess = traceAccess({
-  store: traceRequestStore(useFirestore ? getFirestore() : undefined),
+  store: traceRequests,
+  // An owner hears of a new request by email, when they have a verified address, and at the start of their next session.
+  onRequest: request => {
+    if (!request.owner.startsWith('@')) return;
+    void (async () => {
+      const owner = await storage.getUser(request.owner.slice(1));
+      if (owner) await notificationService.notifyTraceRequest?.(owner);
+    })().catch(err => console.warn('[TraceAccess] request notice failed:', err?.message));
+  },
   getUser: keyHash => storage.getUserByKeyHash(keyHash),
   host: authorCloud?.host || 'https://tee.node.tinycloud.xyz',
   async visible(id, actor) {
@@ -1292,6 +1307,22 @@ const handleTraceAccess = traceAccess({
     if (isHiddenWhilePending(id, author)) return null;
     return await canView(normalizeEntry(entry), actor.user?.handle, verifiedEmail(actor.user), author, storage, new Map()) ? entry : null;
   },
+  // What Router knows of a stored trace: never its contents, only its owner, its ciphertext hash and the owner's public key.
+  async traceInfo(user, entryId) {
+    if (!insights) return null;
+    const record: any = await insights.traceMetadata(user, entryId);
+    if (!record?.full?.sha256) return null;
+    return { ownerDid: record.ownerDid, ciphertextSha256: record.full.sha256, ownerPublicKey: insights.ownerKey(user).owner_public_key };
+  },
+  // In the enclave, the sub-container host's runner (TRACE_APPS=subhost; see subhost/README.md). Local
+  // development can instead run apps in this process with a simulated attestation, which owners'
+  // tools refuse unless told they are testing locally.
+  runner: process.env.TRACE_APPS === 'subhost'
+    ? subhostRunnerClient(process.env.TRACE_RUNS_SOCKET || '/var/run/dstack-filtered/runs.sock')
+    : process.env.TRACE_APPS === 'local-simulated' && process.env.NODE_ENV !== 'production'
+    ? simulatedRunnerClient(traceRunner({ fetchTrace: tinyCloudTraceSource(), execute: workerExecutor(new URL('./trace-app.js', import.meta.url).href) }),
+      { appId: '0'.repeat(40), name: 'trace-runner', codeHash: '0'.repeat(64) })
+    : undefined,
 });
 
 type LabelPatch = { repo?: unknown; tags?: unknown };
@@ -2309,7 +2340,20 @@ async function createMCPServer(secretKey: string) {
   // Server instructions reach the agent at the start of a session even when it loads tool descriptions lazily.
   // A slow or failed lookup must not hold up the connection: the session then starts without the list.
   const atStart = keyRecovery ? null : await within(SKILL_LOOKUP_MS, skillsForList());
-  const skillInstructions = keyRecovery ? KEY_RECOVERY_MESSAGE : atStart ? renderSkillIndex(atStart.items, atStart.mutes) || undefined : undefined;
+  const skillIndex = keyRecovery ? KEY_RECOVERY_MESSAGE : atStart ? renderSkillIndex(atStart.items, atStart.mutes) || undefined : undefined;
+  // Trace requests waiting on this person, so their agent can tell them at the start of the session.
+  const waitingTraces = keyRecovery ? null : await within(SKILL_LOOKUP_MS, (async () => {
+    const user = await storage.getUserByKeyHash(keyHash);
+    const owners = [pseudonym, ...(user?.handle ? ['@' + user.handle] : [])];
+    return (await Promise.all(owners.map(o => traceRequests.pending(o)))).flat();
+  })().catch(() => null));
+  const traceNotice = waitingTraces?.length
+    ? `Trace requests waiting for this person: ${waitingTraces.length}. Someone asked to run an app on the private trace behind one of their notes`
+      + `${waitingTraces.some(r => r.state === 'answered') ? ', and at least one app has run and its answer waits for their decision' : ''}. `
+      + `Tell them at a natural point. You can show them each app's purpose and code with router_trace_access action inbox and say what its answer could reveal. `
+      + `Running an app and releasing its answer happen in their own owner tool or at ${BASE_URL}/trace-access, never through you.`
+    : undefined;
+  const skillInstructions = [skillIndex, traceNotice].filter(Boolean).join('\n\n') || undefined;
 
   // Lazy lookup of handle - only computed when tools are listed/called
   async function getHandle(): Promise<string | null> {
@@ -2778,7 +2822,8 @@ async function createMCPServer(secretKey: string) {
 
     if (name === 'router_trace_access') {
       try {
-        if (args?.action === 'approve') throw new TraceRequestError('Approve from the owner review page with TinyCloud.');
+        // Running and releasing need the owner's storage key and trace key, which never reach Router or the agent.
+        if (['prepare', 'approve', 'release'].includes(args?.action as string)) throw new TraceRequestError('Run and release from the owner\'s own tool, which checks the enclave\'s attestation and holds the owner\'s keys.');
         const result = await handleTraceAccess({ user: await getToolUser(), pseudonym, keyHash }, args || {});
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
       } catch (err) { return { content: [{ type: 'text' as const, text: err instanceof TraceRequestError ? err.message : 'Trace request unavailable.' }], isError: true }; }

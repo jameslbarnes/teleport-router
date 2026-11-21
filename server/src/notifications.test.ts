@@ -31,6 +31,22 @@ describe('NotificationService', () => {
     });
   });
 
+  describe('notifyTraceRequest', () => {
+    it('tells a verified owner a request is waiting, with nobody else\'s text in the email', async () => {
+      const owner = { handle: 'traceowner', email: 'owner@example.test', emailVerified: true } as User;
+      await service.notifyTraceRequest!(owner);
+      expect(emailClient.calls).toHaveLength(1);
+      const sent = emailClient.calls[0];
+      expect(sent.to).toBe('owner@example.test');
+      expect(sent.html).toContain('https://router.test/trace-access');
+      expect(sent.html).toContain('Nothing is shared unless you release it');
+      expect(sent.html).toContain('unsubscribe?token=');
+      for (const quiet of [{ ...owner, emailVerified: false }, { ...owner, email: undefined }, { ...owner, handle: 'optedout', emailPrefs: { comments: false } }])
+        await service.notifyTraceRequest!(quiet as User);
+      expect(emailClient.calls).toHaveLength(1);
+    });
+  });
+
   describe('sendDailyDigests', () => {
     it('keeps private and AI-only followed/discovery text out of the email and model prompt',async()=>{
       const create=vi.fn().mockResolvedValue({content:[{type:'text',text:'<digest>Public update.</digest><question>Next?</question>'}]});

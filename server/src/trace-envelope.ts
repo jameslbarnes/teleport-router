@@ -13,8 +13,9 @@
  */
 import { createCipheriv, createDecipheriv, createECDH, createHash, hkdfSync, randomBytes, ECDH } from 'node:crypto';
 
-/** `preview`: what the insights enclave returns to one owner (their answers, the draft result), sealed to them alone. */
-export type TracePart = 'full' | 'derived' | 'preview';
+/** `preview`: what the insights enclave returns to one owner (their answers, the draft result), sealed to them alone.
+ *  `answer`: what a trace app returned, sealed by the runner to the owner and, once released, by the owner to the requester. */
+export type TracePart = 'full' | 'derived' | 'preview' | 'answer';
 export type WrapRole = 'owner' | 'release' | 'reader';
 export interface TraceContext { ownerDid: string; entryId: string }
 export interface KeyWrap { ephemeralPublicKey: string; nonce: string; ciphertext: string; tag: string }
@@ -81,7 +82,7 @@ export function sealPart(plaintext: Uint8Array, c: TraceContext, part: TracePart
   cipher.setAAD(partAAD(c, part));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const wraps: PartMeta['wraps'] = {};
-  for (const role of ['owner', 'release'] as WrapRole[]) if (recipients[role]) wraps[role] = wrapKey(contentKey, c, part, role, recipients[role]!);
+  for (const role of ['owner', 'release', 'reader'] as WrapRole[]) if (recipients[role]) wraps[role] = wrapKey(contentKey, c, part, role, recipients[role]!);
   contentKey.fill(0);
   const meta: PartMeta = { nonce: b64(nonce), tag: b64(cipher.getAuthTag()), sha256: sha256Hex(ciphertext), bytes: ciphertext.length, wraps };
   return { meta, ciphertext };

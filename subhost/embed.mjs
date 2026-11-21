@@ -24,9 +24,24 @@ export function probeSpec(root = ROOT) {
   return validateSpec({ ...base, cmd: ['node', '--input-type=module', '-e', readText(root, 'subhost/probe.mjs')] });
 }
 
+/** A trace-run container's spec: its base settings plus its script as the command. Null while its
+ *  image is still PENDING, that is, until a Router image carrying the trace app code exists to pin. */
+function runSpec(root, name) {
+  const base = JSON.parse(readText(root, `subhost/${name}.base.json`));
+  if (String(base.image).startsWith('PENDING')) return null;
+  return validateSpec({ ...base, cmd: ['node', '--input-type=module', '-e', readText(root, `subhost/${name}.mjs`)] });
+}
+export const runnerSpec = (root = ROOT) => runSpec(root, 'runner');
+export const sandboxSpec = (root = ROOT) => runSpec(root, 'sandbox');
+
 export function subhostBlock(root = ROOT) {
   const hostB64 = Buffer.from(readText(root, 'subhost/host.mjs'), 'utf8').toString('base64');
   const specB64 = Buffer.from(canonicalJson(probeSpec(root)), 'utf8').toString('base64');
+  const runner = runnerSpec(root), sandbox = sandboxSpec(root);
+  const runEnv = runner && sandbox ? [
+    `      - SUBHOST_RUNNER_SPEC=${Buffer.from(canonicalJson(runner), 'utf8').toString('base64')}`,
+    `      - SUBHOST_SANDBOX_SPEC=${Buffer.from(canonicalJson(sandbox), 'utf8').toString('base64')}`,
+  ] : [];
   return [
     BEGIN,
     '  # The only service, with the two TLS ingress containers, that mounts dstack\'s',
@@ -42,6 +57,7 @@ export function subhostBlock(root = ROOT) {
     '    environment:',
     '      - SUBHOST_MAIN=1',
     `      - SUBHOST_PROBE_SPEC=${specB64}`,
+    ...runEnv,
     '    volumes:',
     '      - /var/run/dstack.sock:/var/run/dstack.sock',
     '      - /var/run/docker.sock:/var/run/docker.sock',
