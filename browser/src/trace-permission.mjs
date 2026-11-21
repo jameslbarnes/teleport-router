@@ -12,9 +12,10 @@ export function traceReadSession(space, entryId, origin) {
   };
 }
 
-export async function grantTraceRead(owner, readerDid, session) {
+/** A trace app's run takes a grant of at most 15 minutes; a reader grant made before apps lasted 24 hours. */
+export async function grantTraceRead(owner, readerDid, session, expiryMs = 86400000) {
   const { delegation } = await owner.delegateTo(readerDid, session.manifest.permissions, {
-    expiry: 86400000, requireActivation: true,
+    expiry: expiryMs, requireActivation: true,
   });
   return delegation;
 }
