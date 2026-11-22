@@ -8,14 +8,14 @@
  * the trace. The runner uses the key once, runs the app, and seals the result to the owner.
  * Router only ever stores sealed results.
  */
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, hkdfSync, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { Worker } from 'node:worker_threads';
 import { gunzipSync } from 'node:zlib';
 import { SigningKey, Wallet } from 'ethers';
 import { APP_LIMITS, APP_RUNTIME, appHash, checkAppCode, type AppInfo, type AppLimits, type AppResult, type TraceApp } from './trace-app.js';
-import { compressPublicKey, openPart, sealPart, sha256Hex, type KeyWrap, type PartMeta, type TraceContext } from './trace-envelope.js';
+import { compressPublicKey, openPart, publicKeyOf, sealPart, sha256Hex, type KeyWrap, type PartMeta, type TraceContext } from './trace-envelope.js';
 
 export const RUN_DOMAIN = 'teleport-router/trace-run/v1';
 export const RUN_GRANT_MS = 15 * 60_000;
@@ -149,6 +149,28 @@ export function checkRunResult(sealed: SealedAnswer, signature: unknown, d: RunD
   catch { throw new RunError('The result carries no valid signature from the run.'); }
   if (compressPublicKey(signer) !== compressPublicKey(runPublicKey)) throw new RunError('The result was not signed by the attested run.');
 }
+
+const SECP256K1_N = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+
+/**
+ * Router's key for answers released through Router, to a requester who gave no key of their own.
+ * It is derived from Router's record-encryption key, so it exists only inside the enclave and stays
+ * the same across restarts. Released answers stay sealed to it at rest; Router opens one only to hand
+ * it to its requester.
+ */
+export function answerCustody(secret: Uint8Array) {
+  let privateKey = '';
+  for (let i = 0; !privateKey; i++) {
+    const k = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(32), `teleport-router/answer-custody/v1/${i}`, 32));
+    const n = BigInt('0x' + k.toString('hex'));
+    if (n > 0n && n < SECP256K1_N) privateKey = '0x' + k.toString('hex');
+  }
+  return {
+    publicKey: publicKeyOf(privateKey),
+    open: (sealed: SealedAnswer, d: RunDescription, sealedSha256: string) => openReleased(sealed, d, privateKey, sealedSha256),
+  };
+}
+export type AnswerCustody = ReturnType<typeof answerCustody>;
 
 export function sealResult(result: AppResult, d: RunDescription): SealedAnswer {
   const { meta, ciphertext } = sealPart(Buffer.from(JSON.stringify(result), 'utf8'), answerContext(d), 'answer', { owner: d.owner_public_key });

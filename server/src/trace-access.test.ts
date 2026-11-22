@@ -9,7 +9,7 @@ import type { User, JournalEntry } from './storage.js';
 import { traceAccess, traceRequestStore, readerDid } from './trace-access.js';
 import { sealPart } from './trace-envelope.js';
 import { runApp } from './trace-app.js';
-import { checkRunBundle, checkRunResult, openReleased, openResult, sealForRequester, sealResult, simulatedRunnerClient, traceRunner, type RunBundle } from './trace-run.js';
+import { answerCustody, checkRunBundle, checkRunResult, openReleased, openResult, sealForRequester, sealResult, simulatedRunnerClient, traceRunner, type RunBundle } from './trace-run.js';
 // @ts-expect-error The owner device uses browser WebCrypto in the production module.
 import { rewrapTraceKey } from '../../browser/src/trace-keys.mjs';
 
@@ -54,7 +54,7 @@ async function grant(recipient: string, { folder = path, seconds = 600 } = {}) {
   } finally { manager.free(); }
 }
 
-function fixture() {
+function fixture({ withCustody = true }: { withCustody?: boolean } = {}) {
   let time = clock, allowed = true, trace = storedTrace();
   const notices: any[] = [];
   const entry = {id:'a-note',handle:'author',pseudonym:author.pseudonym} as JournalEntry;
@@ -66,13 +66,15 @@ function fixture() {
   } });
   let duringRun: (() => Promise<unknown>) | undefined;
   const simulated = simulatedRunnerClient(core, identity);
+  const custody = withCustody ? answerCustody(randomBytes(32)) : undefined;
   const call = traceAccess({ store, host, now: () => time, getUser: async () => null,
     visible: async (id, who) => id === entry.id && (who.keyHash === author.keyHash || allowed && who.keyHash === agent.keyHash || who.keyHash === stranger.keyHash) ? entry : null,
     runner: { prepare: simulated.prepare, run: async input => { const r = await simulated.run(input); await duringRun?.(); return r; } },
     traceInfo: async () => ({ ownerDid, ciphertextSha256: trace.meta.sha256, ownerPublicKey: owner.signingKey.compressedPublicKey }),
-    onRequest: n => notices.push(n) }) as (actor: any, input: any) => Promise<any>;
+    onRequest: n => notices.push(n), custody }) as (actor: any, input: any) => Promise<any>;
   const ask = (app: any = APP) => call(agent, { action: 'request', entry_id: entry.id, app, answer_public_key: requesterKey.signingKey.compressedPublicKey });
-  return { call, ask, store, core, notices, restrict: () => { allowed = false; }, advance: (ms: number) => { time += ms; },
+  const askViaRouter = (app: any = APP) => call(agent, { action: 'request', entry_id: entry.id, app });
+  return { call, ask, askViaRouter, custody, store, core, notices, restrict: () => { allowed = false; }, advance: (ms: number) => { time += ms; },
     whileRunning: (fn: () => Promise<unknown>) => { duringRun = fn; },
     replaceTrace: (text: string) => { trace = storedTrace(text); }, trace: () => trace };
 }
@@ -134,7 +136,7 @@ describe('trace requests that carry an app', () => {
     const f = fixture();
     await expect(f.call(agent, { action: 'request', entry_id: 'a-note', reader_public_key: requesterKey.signingKey.compressedPublicKey })).rejects.toThrow('must carry an app');
     await expect(f.ask({ code: 'function analyze( {', purpose: 'x' })).rejects.toThrow('does not parse');
-    await expect(f.call(agent, { action: 'request', entry_id: 'a-note', app: APP })).rejects.toThrow('answer_public_key');
+    await expect(f.call(agent, { action: 'request', entry_id: 'a-note', app: APP, answer_public_key: 'nope' })).rejects.toThrow('answer_public_key');
     const first = await f.ask();
     await expect(f.ask({ ...APP, code: COUNT + '\n// v2' })).rejects.toThrow('Withdraw it first');
     await expect(f.call(author, { action: 'withdraw', request_id: first.request_id })).rejects.toThrow('Unknown');
@@ -262,6 +264,38 @@ describe('trace requests that carry an app', () => {
     const replaced = await g.call(author, { action: 'status', request_id: first.request_id });
     expect(replaced.state).toBe('pending');
     expect(replaced).not.toHaveProperty('answer');
+  });
+
+  it('hands the released answer back through Router to a requester who gave no key, and says so to their next session once', async () => {
+    const f = fixture(), r = await f.askViaRouter();
+    expect(r).toMatchObject({ state: 'pending', answer_via: 'router' });
+    expect(r).not.toHaveProperty('answer_public_key');
+    const shown = (await f.call(author, { action: 'inbox' })).requests[0];
+    expect(shown).toMatchObject({ answer_via: 'router', answer_public_key: f.custody!.publicKey });
+    const { answered, result } = await ownerRuns(f, shown);
+    expect(await f.store.decidedFor(agent.keyHash)).toHaveLength(0);
+    const { sealed } = sealForRequester((result as any).answer, answered.answer.description, shown.answer_public_key);
+    await f.call(author, { action: 'release', request_id: r.request_id, revision: r.revision, run_id: answered.answer.run_id, sealed });
+    // Stored sealed: the answer's text appears only in the requester's own view.
+    const stored = await f.store.get(r.request_id);
+    expect(JSON.stringify(stored)).not.toContain('Bash');
+    expect((await f.store.decidedFor(agent.keyHash)).map(x => x.id)).toEqual([r.request_id]);
+    const seen = await f.call(agent, { action: 'status', request_id: r.request_id });
+    expect(seen).toMatchObject({ state: 'released', answer_via: 'router', answer_text: '{"Read":2,"Bash":1}' });
+    expect(seen).not.toHaveProperty('answer');
+    expect(await f.store.decidedFor(agent.keyHash)).toHaveLength(0);
+    expect((await f.call(author, { action: 'status', request_id: r.request_id })).answer_via).toBe('router');
+  });
+
+  it('lists a declined request for its requester until they look, and needs a key where Router cannot hold answers', async () => {
+    const f = fixture(), r = await f.askViaRouter();
+    await f.call(author, { action: 'decline', request_id: r.request_id, revision: r.revision });
+    expect((await f.store.decidedFor(agent.keyHash)).map(x => x.state)).toEqual(['declined']);
+    expect(await f.call(agent, { action: 'status', request_id: r.request_id })).toMatchObject({ state: 'declined' });
+    expect(await f.store.decidedFor(agent.keyHash)).toHaveLength(0);
+    const plain = fixture({ withCustody: false });
+    await expect(plain.askViaRouter()).rejects.toThrow('cannot hand answers back');
+    expect((await plain.ask()).answer_via).toBe('your-key');
   });
 
   it('lets the owner withhold an answer, which the requester sees as declined', async () => {

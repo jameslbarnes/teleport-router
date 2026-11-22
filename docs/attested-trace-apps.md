@@ -62,6 +62,8 @@ When it runs, the runner refuses a trace whose ciphertext hash differs from the 
 
 ## Answers and failures
 
+Since Nov 22, a requester does not need a key (James, Nov 21). With no `answer_public_key`, the run's answer key is Router's custody key, derived from Router's record-encryption key with HKDF, so it exists only inside the enclave. The owner releases to it exactly as to a requester's key, Router stores the release sealed, and `status` opens it for the requester as `answer_text`. A requester who wants Router unable to read the answer still gives a key. Either way, the requester's next session mentions a decision until they collect it with `status`.
+
 The runner seals the result, answer or error, to the owner with the same envelope as traces (`trace-envelope.ts`, part `answer`). Router stores only that ciphertext, so the operator cannot read it and Router cannot release it on its own. App errors and stack traces can quote the trace, so they are sealed too. Neither the runner nor Router logs them.
 
 The owner's tool remembers the run, the answer's hash and the requester's key it reviewed, and `release` refuses unless all three are unchanged. `show` prints a pin covering the request as read: its version, requester, note, purpose, the code's hash computed on the owner's machine, and the requester's key. `run` refuses without that pin or if any of it changed, so Router cannot swap the request between reading and running. It shows code, purposes and answers with control and text-direction characters escaped, so a stranger's text cannot hide or rewrite what the terminal shows.
