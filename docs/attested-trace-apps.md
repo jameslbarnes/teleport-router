@@ -35,7 +35,7 @@ function analyze(trace, info) {
 
 - `trace` is the decrypted session slice as text. `info` holds the note ID and the trace's size.
 - The return value must be a string of at most 8 KB. Anything else fails the run.
-- The code is at most 32 KB of plain JavaScript, run by QuickJS compiled to WebAssembly. The sandbox gives it no network, files, processes, timers or keys. It gets 256 MB of memory and 10 seconds, and the runner kills the worker running it if the engine's own checks miss.
+- The code is at most 32 KB of plain JavaScript, run by QuickJS compiled to WebAssembly. The sandbox gives it no network, files, processes, timers or keys. It gets 256 MB of memory and 10 seconds. If the engine's own checks miss, the runner gives up a few seconds later and the host removes the app's container.
 - The app's hash is SHA-256 of `{"code":…,"runtime":"quickjs-wasm/v1"}` as canonical JSON. The runtime's own version is fixed by the runner's code hash.
 
 ## Where the code lives
