@@ -5,7 +5,7 @@ import { tracePointer } from './trace-pointer.js';
 import type { JournalEntry, User } from './storage.js';
 import type { KeyWrap } from './trace-envelope.js';
 import { APP_LIMITS, appHash, checkApp, checkAppParses, TraceAppError } from './trace-app.js';
-import { RUN_GRANT_MS, RUN_PREPARE_MS, RunError, checkRunDescription, type RunBundle, type RunDescription, type SealedAnswer } from './trace-run.js';
+import { RUN_GRANT_MS, RUN_PREPARE_MS, RunError, checkRunDescription, type AnswerCustody, type RunBundle, type RunDescription, type SealedAnswer } from './trace-run.js';
 
 export const TRACE_GRANT_MS = 24 * 3600_000;
 export const traceFolder = (entryId: string) => `router/traces/${entryId}/`;
@@ -26,6 +26,10 @@ interface Request {
   app?: AppRecord; run?: RunRecord; answer?: AnswerRecord; released?: ReleaseRecord;
   /** The run whose key has been handed its grant. Only that run's result may be saved, and only to this revision. */
   running?: { runId: string; since: number };
+  /** The requester gave no key: the answer is released to Router's custody key, and Router hands it to them. */
+  answerVia?: 'router';
+  /** The requester has seen the decision, so their sessions stop mentioning it. */
+  collected?: boolean;
 }
 export class TraceRequestError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -67,6 +71,13 @@ export function traceRequestStore(db?: Firestore) {
       const snapshots = await Promise.all(states.map(state => collection.where('owner', '==', owner).where('state', '==', state).get()));
       return snapshots.flatMap(s => s.docs.map(doc => doc.data() as Request));
     },
+    /** Decided requests carrying an app that the requester has not yet looked at. */
+    async decidedFor(requester: string): Promise<Request[]> {
+      const states: State[] = ['released', 'declined', 'withheld'];
+      if (!collection) return [...memory.values()].filter(r => r.requester === requester && r.app && states.includes(r.state) && !r.collected);
+      const snapshots = await Promise.all(states.map(state => collection.where('requester', '==', requester).where('state', '==', state).get()));
+      return snapshots.flatMap(s => s.docs.map(doc => doc.data() as Request)).filter(r => r.app && !r.collected);
+    },
     async change(id: string, update: (current?: Request) => Request): Promise<Request> {
       if (!db || !collection) { const next = update(memory.get(id)); memory.set(id, next); return next; }
       const ref = collection.doc(id);
@@ -100,9 +111,11 @@ interface Dependencies {
   traceInfo?: TraceInfo;
   /** Called once for each new request, and again when the requester replaces the app before the owner runs it. */
   onRequest?: (request: { id: string; owner: string; entryId: string; requesterName: string; purpose: string }) => void;
+  /** Router's own key for answers to requesters who gave none. Without it, requests must name a key. */
+  custody?: AnswerCustody;
   now?: () => number;
 }
-export function traceAccess({ store, visible, getUser, host, runner, traceInfo, onRequest, now = Date.now }: Dependencies) {
+export function traceAccess({ store, visible, getUser, host, runner, traceInfo, onRequest, custody, now = Date.now }: Dependencies) {
   const isOwner = (r: Request, actor: Actor) => identities(actor).includes(r.owner);
   /** What the requester sees before release: no timing or failure detail. */
   const requesterState = (r: Request): string => {
@@ -123,11 +136,18 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
         ...(who === 'requester' && r.approval && r.approval.expires > now() ? { grant: r.approval } : {}) };
     }
     const app = { purpose: r.app.purpose, code: r.app.code, hash: r.app.hash, runtime: r.app.runtime };
+    const viaRouter = r.answerVia === 'router';
     if (who === 'requester') {
-      return { ...base, app, answer_public_key: r.publicKey, state: requesterState(r),
-        ...(r.state === 'released' && r.released ? { answer: r.released.sealed, sealed_sha256: r.released.sealed.meta.sha256, run: r.released.description, released_at: r.released.at } : {}) };
+      const released = r.state === 'released' ? r.released : undefined;
+      if (viaRouter) {
+        let text: string | null = null;
+        if (released && custody) try { text = custody.open(released.sealed, released.description, released.sealed.meta.sha256); } catch { text = null; }
+        return { ...base, app, answer_via: 'router', state: requesterState(r), ...(released ? { answer_text: text, released_at: released.at } : {}) };
+      }
+      return { ...base, app, answer_via: 'your-key', answer_public_key: r.publicKey, state: requesterState(r),
+        ...(released ? { answer: released.sealed, sealed_sha256: released.sealed.meta.sha256, run: released.description, released_at: released.at } : {}) };
     }
-    return { ...base, app, answer_public_key: r.publicKey, state: r.state,
+    return { ...base, app, answer_via: viaRouter ? 'router' : 'requester-key', answer_public_key: r.publicKey, state: r.state,
       ...(r.run ? { run: { run_id: r.run.id, description: r.run.description, public_key: r.run.publicKey, prepared_at: r.run.preparedAt } } : {}),
       ...(r.answer ? { answer: { run_id: r.answer.runId, description: r.answer.description, sealed: r.answer.sealed, signature: r.answer.signature, run_public_key: r.answer.runPublicKey, at: r.answer.at } } : {}),
       ...(r.released ? { released: { run_id: r.released.runId, sealed_sha256: r.released.sealed.meta.sha256, at: r.released.at } } : {}) };
@@ -148,12 +168,16 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     if (!entry) throw missing();
     const owner = entry.handle ? '@' + entry.handle : entry.pseudonym;
     if (identities(actor).includes(owner)) throw new TraceRequestError('This is your own trace.');
-    if (input.app === undefined) throw new TraceRequestError('A trace request must carry an app: {code, purpose}, with answer_public_key. The code defines function analyze(trace, info), which returns a short string; the owner reads the code, runs it in Router\'s enclave and decides whether to release its answer to you.');
+    if (input.app === undefined) throw new TraceRequestError('A trace request must carry an app: {code, purpose}. The code defines function analyze(trace, info), which returns a short string; the owner reads the code, runs it in Router\'s enclave and decides whether to release its answer to you. Collect it with status. To have it sealed to a key of your own instead, also give answer_public_key.');
     const app = await (async () => {
       try { const checked = checkApp(input.app); await checkAppParses(checked.code); return checked; }
       catch (err) { throw new TraceRequestError(err instanceof TraceAppError ? err.message : 'Invalid app.'); }
     })();
-    const publicKey = checkedKey(input.answer_public_key, 'Give answer_public_key: the compressed secp256k1 public key the answer should be sealed to. Keep its private key on the requester\'s device.');
+    // No key given: the owner releases the answer to Router's custody key, and status hands it over.
+    const viaRouter = input.answer_public_key === undefined || input.answer_public_key === null;
+    if (viaRouter && !custody) throw new TraceRequestError('Give answer_public_key: the compressed secp256k1 public key the answer should be sealed to. This server cannot hand answers back itself.');
+    const publicKey = viaRouter ? custody!.publicKey
+      : checkedKey(input.answer_public_key, 'answer_public_key must be a compressed secp256k1 public key. Keep its private key on the requester\'s device.');
     const hash = appHash(app);
     const id = createHash('sha256').update(JSON.stringify([entry.id, owner, actor.keyHash])).digest('hex');
     let fresh = false;
@@ -166,7 +190,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       }
       fresh = true;
       return { id, revision: randomUUID(), entryId: entry.id, owner, requester: actor.keyHash, requesterName: identities(actor).at(-1)!,
-        publicKey, created: now(), state: 'pending', app: { ...app, hash } };
+        publicKey, created: now(), state: 'pending', app: { ...app, hash }, ...(viaRouter ? { answerVia: 'router' as const } : {}) };
     });
     if (fresh) try { onRequest?.({ id, owner, entryId: entry.id, requesterName: result.requesterName, purpose: app.purpose }); } catch { /* an alert never blocks the request */ }
     return view(result, 'requester');
@@ -266,7 +290,11 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     if (!r || !isOwner(r, actor) && actor.keyHash !== r.requester) throw missing();
     const entry = await visible(r.entryId, actor);
     if (!entry || (entry.handle ? '@' + entry.handle : entry.pseudonym) !== r.owner && entry.pseudonym !== r.owner) throw missing();
-    if (input.action === 'status') return view(r, isOwner(r, actor) ? 'owner' : 'requester');
+    if (input.action === 'status') {
+      if (!isOwner(r, actor) && r.app && (r.state === 'released' || r.state === 'declined' || r.state === 'withheld') && !r.collected)
+        await store.change(r.id, current => current && !current.collected ? { ...current, collected: true } : current!).catch(() => {});
+      return view(r, isOwner(r, actor) ? 'owner' : 'requester');
+    }
     if (input.action === 'withdraw' && actor.keyHash === r.requester && !isOwner(r, actor)) {
       return view(await store.change(r.id, current => {
         if (!current) throw missing();

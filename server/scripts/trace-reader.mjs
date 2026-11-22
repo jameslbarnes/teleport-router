@@ -54,9 +54,10 @@ async function main() {
     'reader-key-file': {type:'string'}, 'router-key-file':{type:'string'}, router:{type:'string', default:'https://router.teleport.computer'},
     app:{type:'string'}, purpose:{type:'string'}, out:{type:'string'},
   } });
+  // Without --reader-key-file, Router hands the released answer back; with it, the answer is sealed to that key.
   const keyFile = v['reader-key-file'];
-  if (!keyFile) throw Error('Give --reader-key-file <local key file>.');
   if (action === 'keygen') {
+    if (!keyFile) throw Error('Give --reader-key-file <new local key file>.');
     const wallet = Wallet.createRandom(); await writeFile(keyFile, wallet.privateKey, { flag:'wx', mode:0o600 });
     console.log(wallet.signingKey.compressedPublicKey); return;
   }
@@ -64,12 +65,12 @@ async function main() {
     throw Error('Use keygen, request <post-id> --app <file.js> --purpose <one line>, status <request-id>, or read <request-id> --out <new file>.');
   if (action === 'request' && (!v.app || !v.purpose)) throw Error('A request carries an app: give --app <file.js> defining analyze(trace, info), and --purpose <one line>.');
   if (action === 'read' && !v.out) throw Error('Use --out <new file> for the released answer.');
-  const privateKey = (await readFile(keyFile,'utf8')).trim();
+  const privateKey = keyFile ? (await readFile(keyFile,'utf8')).trim() : null;
   const key = (await readFile(v['router-key-file'],'utf8')).trim();
   const base = new URL(v.router);
   if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost','127.0.0.1'].includes(base.hostname))) throw Error('Use an HTTPS Router.');
   const body = action === 'request'
-    ? {action, entry_id:id, app:{code:await readFile(v.app,'utf8'), purpose:v.purpose}, answer_public_key:new Wallet(privateKey).signingKey.compressedPublicKey}
+    ? {action, entry_id:id, app:{code:await readFile(v.app,'utf8'), purpose:v.purpose}, ...(privateKey ? {answer_public_key:new Wallet(privateKey).signingKey.compressedPublicKey} : {})}
     : {action:'status', request_id:id};
   const r = await fetch(new URL('/api/trace-access',base), {method:'POST',redirect:'error',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
     body: JSON.stringify(body)});
@@ -77,8 +78,14 @@ async function main() {
   if (!r.ok) throw Error(request.error || 'Router did not accept the request.');
   if (action === 'read') {
     if (request.state !== 'released') throw Error('The trace request is ' + request.state + '.');
-    await writeFile(v.out, openReleased(request.answer, request.run, privateKey, request.sealed_sha256), { flag:'wx', mode:0o600 });
+    if (request.answer_via === 'router') {
+      if (typeof request.answer_text !== 'string') throw Error('Router could not open the released answer.');
+      await writeFile(v.out, request.answer_text, { flag:'wx', mode:0o600 });
+    } else {
+      if (!privateKey) throw Error('This answer is sealed to your key: give --reader-key-file.');
+      await writeFile(v.out, openReleased(request.answer, request.run, privateKey, request.sealed_sha256), { flag:'wx', mode:0o600 });
+    }
   }
-  console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, app_hash:request.app?.hash}));
+  console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, app_hash:request.app?.hash, answer_via:request.answer_via}));
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main().catch(e => { console.error(e.message); process.exitCode=1; });
