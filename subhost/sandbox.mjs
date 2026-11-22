@@ -1,12 +1,35 @@
 // One app run (docs/attested-trace-apps.md). This container has no network, no keys and no socket
-// but its own. It takes one job, runs the app in QuickJS inside a worker that it kills if the app
-// overruns, answers, and exits; the host then removes the container. It never logs the trace, the
-// code or the answer, and its logs are not kept.
+// but its own. It takes one job, runs the app in QuickJS, answers, and exits; the host then removes
+// the container. It never logs the trace, the code or the answer, and its logs are not kept.
+//
+// The app runs on this process's own thread, not in a worker: the container is single-use, and an
+// app the engine's own time and memory limits miss is stopped by the runner's deadline, after which
+// the host removes the container. If the engine itself fails, the sealed error, which only the owner
+// reads, says how much memory the container and the machine had, so the cause can be told apart.
 import { createServer } from 'node:http';
-import { chmodSync, rmSync } from 'node:fs';
-import { sandboxJobHandler, workerExecutor } from '/app/server/dist/trace-run.js';
+import { chmodSync, readFileSync, rmSync } from 'node:fs';
+import { freemem, totalmem } from 'node:os';
+import { runApp } from '/app/server/dist/trace-app.js';
+import { sandboxJobHandler } from '/app/server/dist/trace-run.js';
 
-const handle = sandboxJobHandler(workerExecutor('file:///app/server/dist/trace-app.js'));
+const mb = bytes => `${Math.round(Number(bytes) / 1048576)} MB`;
+function memory() {
+  const read = path => { try { return readFileSync(path, 'utf8').trim(); } catch { return null; } };
+  const used = read('/sys/fs/cgroup/memory.current') ?? read('/sys/fs/cgroup/memory/memory.usage_in_bytes');
+  const max = read('/sys/fs/cgroup/memory.max') ?? read('/sys/fs/cgroup/memory/memory.limit_in_bytes');
+  const events = (read('/sys/fs/cgroup/memory.events') || '').replace(/\s+/g, ' ');
+  const container = used ? `container ${mb(used)} of ${max && max !== 'max' ? mb(max) : 'no limit'}${events ? ` (${events})` : ''}` : 'container memory unknown';
+  return `${container}; machine ${mb(freemem())} free of ${mb(totalmem())}; this process ${mb(process.memoryUsage().rss)}`;
+}
+
+const handle = sandboxJobHandler(async (app, trace, info, limits) => {
+  try {
+    const result = await runApp(app, trace, info, limits);
+    return result.ok || !/stopped the sandbox/.test(result.error) ? result : { ok: false, error: `${result.error} [${memory()}]` };
+  } catch (err) {
+    return { ok: false, error: `The sandbox could not start its engine: ${String(err?.message || err).slice(0, 200)} [${memory()}]` };
+  }
+});
 const socket = `${process.env.SUBHOST_DIR || '/run/sandbox'}/sandbox.sock`;
 let taken = false;
 

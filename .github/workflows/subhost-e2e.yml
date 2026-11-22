@@ -48,6 +48,9 @@ jobs:
           node subhost/embed.mjs --check
           node --test subhost/subhost.test.mjs
 
+      - name: Run trace apps in the pinned sandbox image, with the production container settings
+        run: node subhost/dev/sandbox-check.mjs
+
       - name: Start the host against a stand-in dstack, on the real Docker daemon
         run: |
           mkdir -p /tmp/subhost-e2e

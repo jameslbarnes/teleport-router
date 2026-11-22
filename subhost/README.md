@@ -82,7 +82,10 @@ the compose file carries a runner spec and a sandbox spec:
 - **`trace-sandbox`** (`sandbox.mjs`), one container per run, started on the
   runner's request and removed after. No network at all (`NetworkMode: none`), no
   keys, no kept logs, only its own directory. It runs the app in QuickJS compiled
-  to WebAssembly, in a worker it kills if the app overruns, answers once and exits.
+  to WebAssembly on its own thread, answers once and exits. An app the engine's
+  limits miss is stopped by the runner's deadline, after which the host removes
+  the container. (A worker thread inside the sandbox failed in the enclave on Nov
+  21 though it worked everywhere else, so the container is the hard stop now.)
 - **Router** reaches the runner through `router/runs.sock`, in the directory only
   Router mounts: `/prepare` and `/run`. For `/prepare` the host computes the run
   description's hash itself and returns a quote whose report data is SHA-512 of
