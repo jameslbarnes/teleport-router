@@ -1,11 +1,11 @@
 {
-  "git_sha": "1ad2ff733b67e937e8c75741277aaf29293c7829",
-  "git_sha_short": "1ad2ff7",
-  "image_digest": "sha256:8336044310cc36c59721a8dadbe4bf0b4b86dfa6ae19657a259697b6db4bb3ad",
-  "agent_image_digest": "sha256:7d7e7ff1ca35516e255a86459eaaf164ced60ec8fc157963fad3a9b00b6e2f7d",
+  "git_sha": "3af8fba1f5d72d8302fac7010f76f7a45da55152",
+  "git_sha_short": "3af8fba",
+  "image_digest": "sha256:0729a64d0c9c30cd97d9fb46b63cf84fd1e0de48efd4c6c520cca24dfaf0ba14",
+  "agent_image_digest": "sha256:e35b6af479ba1cf8d422df863ae79d60e1d725f84306fc70759b598c8dea1a74",
   "discord_image_digest": "sha256:c403d2b14086cb05c1091128e27406216b613b54fddeadc402dfbf0ac32b4328",
   "app_id": "db82f581256a3c9244c4d7129a67336990d08cdf",
   "evidence_source": "Phala attestation API",
-  "deployed_at": "2026-11-22T21:57:44Z",
-  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/45074460570"
+  "deployed_at": "2026-11-22T23:17:40Z",
+  "workflow_run": "https://github.com/jameslbarnes/teleport-router/actions/runs/45081868592"
 }
