@@ -243,7 +243,7 @@ const SECRET_PATTERNS = [
   /\b0x[0-9a-fA-F]{64}\b/g,
 ];
 // A name that says "this is a credential", then its value. Keeps the name, removes the value.
-const NAMED_SECRET = /((?:secret[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|secret|token)\\?["']?\s*[:=]\s*\\?["']?)([^\s"'\\&,;<>)}\]]{8,})/gi;
+const NAMED_SECRET = /((?:secret[_-]?key|api[_-]?key|model[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|secret|token)\\?["']?\s*[:=]\s*\\?["']?)([^\s"'\\&,;<>)}\]]{8,})/gi;
 const URL_SECRET = /([?&](?:key|secret_key|token|access_token|api_key|invite_token)=)([^&\s"'\\<>)]{8,})/gi;
 const BEARER = /(\bBearer\s+)([A-Za-z0-9._~+/-]{20,}=*)/g;
 
@@ -256,6 +256,28 @@ export function scrubText(text, extraSecrets = []) {
   for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, () => { count++; return REMOVED; });
   for (const pattern of [NAMED_SECRET, URL_SECRET, BEARER]) out = out.replace(pattern, (m, lead, value) => value === REMOVED || value.startsWith('[secret') ? m : (count++, lead + REMOVED));
   return { text: out, count };
+}
+
+// A requester's own key at a model provider travels in router_trace_access's model_key field. Wherever the call is
+// recorded (a Claude Code tool_use, a Codex MCP call or function call), the field is replaced, whatever the key looks like.
+const TRACE_ACCESS_TOOL = /router_trace_access$/;
+function withoutModelKey(value, stats) {
+  const replace = args => {
+    if (typeof args === 'string') {
+      const parsed = parse(args);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.model_key === undefined) return args;
+      stats.secrets_removed++;
+      return JSON.stringify({ ...parsed, model_key: REMOVED });
+    }
+    if (!args || typeof args !== 'object' || Array.isArray(args) || args.model_key === undefined) return args;
+    stats.secrets_removed++;
+    return { ...args, model_key: REMOVED };
+  };
+  const named = name => typeof name === 'string' && TRACE_ACCESS_TOOL.test(name);
+  if (value.type === 'tool_use' && named(value.name)) return { ...value, input: replace(value.input) };
+  if (value.type === 'McpToolCall' && named(value.tool)) return { ...value, arguments: replace(value.arguments) };
+  if (value.type === 'function_call' && named(value.name)) return { ...value, arguments: replace(value.arguments) };
+  return value;
 }
 
 function deepStrings(value, fn) {
@@ -273,6 +295,7 @@ function deepStrings(value, fn) {
  *   - the duplicate copy of each tool result (toolUseResult) is dropped; the result itself stays
  *   - inline images and files are replaced by their size
  *   - credentials it recognises are replaced by a marker (best effort)
+ *   - the model_key field of a call to router_trace_access is replaced by a marker, always
  */
 export function cleanRecords(records, { extraSecrets = [] } = {}) {
   const stats = { records_in: records.length, records_kept: 0, left_out_by_type: {}, provider_ciphertext_bytes: 0,
@@ -286,6 +309,7 @@ export function cleanRecords(records, { extraSecrets = [] } = {}) {
     if (!value || typeof value !== 'object') return value;
     if (value.type === 'redacted_thinking') { stats.provider_ciphertext_bytes += String(value.data || '').length; return { type: 'redacted_thinking', removed: 'provider ciphertext' }; }
     if (value.type === 'image' && value.source && typeof value.source.data === 'string') { stats.images_removed++; return { type: 'image', removed: `image, ${value.source.data.length} base64 characters` }; }
+    value = withoutModelKey(value, stats);
     const out = {};
     for (const [key, child] of Object.entries(value)) {
       if (key === 'encrypted_content' || (key === 'signature' && value.type === 'thinking')) { stats.provider_ciphertext_bytes += String(child || '').length; continue; }

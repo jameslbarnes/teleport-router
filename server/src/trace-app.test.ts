@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { APP_LIMITS, APP_RUNTIME, appHash, checkApp, checkAppParses, runApp } from './trace-app.js';
+import { APP_LIMITS, APP_RUNTIME, appHash, checkApp, checkAppParses, runApp, runAppStep } from './trace-app.js';
+import { MODEL_LIMITS } from './trace-model.js';
 import { canonicalJson } from './trace-run.js';
 
 const app = (code: string) => ({ runtime: APP_RUNTIME, code, purpose: 'test' } as const);
@@ -70,5 +71,43 @@ describe('trace apps: the sandbox', () => {
     expect(await runApp(app('function analyze() { return 42 }'), '', info)).toEqual({ ok: false, error: 'analyze must return a string.' });
     expect(await runApp(app('function analyze() { return Promise.resolve("x") }'), '', info)).toEqual({ ok: false, error: 'analyze must return a string.' });
     expect(await runApp(app('function analyze(t) { throw new Error("saw " + t) }'), 'secret', info)).toEqual({ ok: false, error: 'The app failed: Error: saw secret' });
+  });
+});
+
+describe('trace apps: asking a model, one step at a time', () => {
+  const asking = app(`function analyze(trace, info, replies) {
+    if (replies.length < 2) return { ask: 'step ' + replies.length + ' of ' + trace.length + ' chars' + (replies.length ? ', after ' + replies[0] : '') };
+    return 'done: ' + replies.join(' | ');
+  }`);
+  it('passes the replies so far and returns either a prompt or the answer', async () => {
+    expect(await runAppStep(asking, 'abc', info, APP_LIMITS, [])).toEqual({ ask: 'step 0 of 3 chars' });
+    expect(await runAppStep(asking, 'abc', info, APP_LIMITS, ['one'])).toEqual({ ask: 'step 1 of 3 chars, after one' });
+    expect(await runAppStep(asking, 'abc', info, APP_LIMITS, ['one', 'two'])).toEqual({ ok: true, answer: 'done: one | two' });
+    // An app written before model calls ignores the third argument and runs as before.
+    expect(await runAppStep(app('function analyze(t, i) { return i.entry_id + t }'), 'x', info)).toEqual({ ok: true, answer: 'a-notex' });
+  });
+  it('fails an app that asks where no model was declared', async () => {
+    expect(await runApp(asking, 'abc', info)).toEqual({ ok: false, error: 'The app asked for a model but declared none.' });
+  });
+  it('measures a prompt inside the sandbox and refuses one too large, empty or not plain text', async () => {
+    const big = MODEL_LIMITS.promptBytes;
+    expect(await runAppStep(app(`function analyze() { return { ask: 'x'.repeat(${big}) } }`), '', info)).toEqual({ ask: 'x'.repeat(big) });
+    expect(await runAppStep(app(`function analyze() { return { ask: 'x'.repeat(${big + 1}) } }`), '', info)).toEqual({ ok: false, error: 'A prompt must be at most 256 KB.' });
+    expect(await runAppStep(app(`function analyze() { return { ask: 'é'.repeat(${big / 2 + 1}) } }`), '', info)).toEqual({ ok: false, error: 'A prompt must be at most 256 KB.' });
+    expect(await runAppStep(app('function analyze() { return { ask: "" } }'), '', info)).toEqual({ ok: false, error: 'A prompt must be non-empty plain text.' });
+    expect(await runAppStep(app('function analyze() { return { ask: "lone \\ud800" } }'), '', info)).toEqual({ ok: false, error: 'A prompt must be non-empty plain text.' });
+  });
+  it('treats anything else as a wrong return, including a getter that throws', async () => {
+    for (const code of ['function analyze() { return null }', 'function analyze() { return { ask: 42 } }', 'function analyze() { return { answer: "x" } }',
+      'function analyze() { return { get ask() { throw new Error("secret") } } }', 'function analyze() { return ["x"] }'])
+      expect(await runAppStep(app(code), '', info), code).toEqual({ ok: false, error: 'analyze must return a string.' });
+    // A getter that never returns is stopped by the deadline like any other app code.
+    expect(await runAppStep(app('function analyze() { return { get ask() { for (;;) {} } } }'), '', info, quick)).toEqual({ ok: false, error: 'The app ran out of time (0.3 seconds).' });
+    // The engine is still usable after all that.
+    expect(await runAppStep(app('function analyze() { return { ask: "ok" } }'), '', info)).toEqual({ ask: 'ok' });
+  });
+  it('refuses replies it was not meant to be given', async () => {
+    for (const replies of [[1], Array(MODEL_LIMITS.calls + 1).fill('x'), ['x'.repeat(MODEL_LIMITS.replyBytes + 1)]] as any[])
+      expect(await runAppStep(asking, '', info, APP_LIMITS, replies)).toEqual({ ok: false, error: 'The runner gave the app malformed replies.' });
   });
 });

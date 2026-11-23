@@ -394,3 +394,31 @@ describe('The client and server envelopes are the same format', () => {
     expect(() => openPart(copy.meta, copy.ciphertext, c, 'full', 'release', enclave.privateKey)).toThrow();
   });
 });
+
+describe("A requester's model key in their own trace", () => {
+  it('is replaced in every recorded call to router_trace_access, whatever it looks like, and counted', () => {
+    const MK = 'mk-abc123';
+    const call = { action: 'request', entry_id: 'a-note', model: { provider: 'redpill', model: 'z-ai/glm-5.3', calls: 1, prompt_bytes: 100, reply_tokens: 10 }, model_key: MK };
+    const records: any[] = [
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'mcp__plugin_teleport-router_router__router_trace_access', input: call }] } },
+      { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'McpToolCall', id: 'e1', server: 'router', tool: 'router_trace_access', arguments: call, status: 'completed' } } },
+      { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'McpToolCall', id: 'e2', server: 'hermes', tool: 'router_trace_access', arguments: JSON.stringify(call), status: 'completed' } } },
+      { type: 'response_item', payload: { type: 'function_call', name: 'mcp__router__router_trace_access', arguments: JSON.stringify(call), call_id: 'c1' } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't2', name: 'mcp__other__lookup', input: { model_key: 'kept-as-is' } }] } },
+    ];
+    const { records: out, stats } = cleanRecords(records);
+    expect(JSON.stringify(out)).not.toContain(MK);
+    expect(stats.secrets_removed).toBe(4);
+    expect(out[0].message.content[0].input).toEqual({ ...call, model_key: '[secret removed]' });
+    expect(out[1].payload.item.arguments.model_key).toBe('[secret removed]');
+    expect(JSON.parse(out[2].payload.item.arguments)).toEqual({ ...call, model_key: '[secret removed]' });
+    expect(JSON.parse(out[3].payload.arguments).model_key).toBe('[secret removed]');
+    // Another tool's field of the same name is not this key.
+    expect(out[4].message.content[0].input).toEqual({ model_key: 'kept-as-is' });
+    expect(records[0].message.content[0].input.model_key).toBe(MK);
+    // Written out in code, the key is caught by its name.
+    const code = cleanRecords([{ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'c2', name: 'exec', input: 'tools.router_trace_access({model_key: "mk-0123456789"})' } }]);
+    expect(JSON.stringify(code.records)).not.toContain('mk-0123456789');
+    expect(code.stats.secrets_removed).toBe(1);
+  });
+});

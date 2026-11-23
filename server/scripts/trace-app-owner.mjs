@@ -17,14 +17,16 @@
 //   --simulated             local test servers only: accepts a simulated attestation; refuses any HTTPS Router
 //
 // `show` prints the code's hash computed here and a pin covering the request as shown: its version,
-// requester, note, purpose, code and the requester's key. `run` takes that pin and refuses if any of
-// them changed, so what runs is what was read. It checks the enclave on this machine before granting anything. Phala's verifier must accept the
+// requester, note, purpose, code, the requester's key and what the app may do with a model. It writes
+// the lines about model use here, from the declaration's fixed fields, rather than taking Router's.
+// `run` takes that pin and refuses if any of them changed, so what runs is what was read. It checks the enclave on this machine before granting anything. Phala's verifier must accept the
 // TDX quote; the OS, the compose file and the deploy manifest must be approved (subhost/verify.mjs);
 // the runner and sandbox must be the ones in this checkout; and the run must bind this request, the
-// code shown here, the requester's key, the trace version read from your own storage, your key and a
-// fresh nonce. Only then does it rewrap the trace's key to the run's key and grant that key a
+// code shown here, the requester's key, the model declaration shown here (or none), the trace version
+// read from your own storage, your key and a fresh nonce. Only then does it rewrap the trace's key to the run's key and grant that key a
 // 10-minute read of that one trace. It checks that the result was signed by the attested run, prints
-// the answer and remembers what you reviewed. Nothing reaches the requester until you `release`,
+// the answer and, for an app that could call a model, what the run says it sent there, and remembers
+// what you reviewed. Nothing reaches the requester until you `release`,
 // which refuses unless the run, the answer and the requester's key are still the ones you reviewed.
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -37,6 +39,7 @@ import { TinyCloudNode, serializeDelegation } from '@tinycloud/node-sdk';
 import { compressPublicKey, unwrapKey, wrapKey } from '../dist/trace-envelope.js';
 import { canonicalJson, checkRunBundle, checkRunResult, openResult, runHash, sealForRequester } from '../dist/trace-run.js';
 import { APP_RUNTIME, appHash } from '../dist/trace-app.js';
+import { checkModelDeclaration, describeModelUse, modelDeclarationHash } from '../dist/trace-model.js';
 import { readerDid } from '../dist/trace-access.js';
 import { verifyRunBundle } from '../../subhost/verify.mjs';
 import { runnerSpec, sandboxSpec } from '../../subhost/embed.mjs';
@@ -83,9 +86,17 @@ const access = body => router('/api/trace-access', body);
 const say = text => console.log(text);
 /** The hash of the code as it will run, computed here rather than taken from Router. */
 const codeHash = app => appHash({ code: app.code, runtime: APP_RUNTIME });
-/** Everything a reviewer judged: if any of it changes, the pin does. */
-const reviewPin = r => sha256(canonicalJson({ request_id: r.request_id, revision: r.revision, requester: r.requester, entry_id: r.entry_id,
-  purpose: r.app.purpose, app_hash: codeHash(r.app), answer_key: compressPublicKey(r.answer_public_key) }));
+/** The model declaration as shown, checked here. A Router that sends none means the app may not call a model. */
+const declared = r => {
+  try { return checkModelDeclaration(r.model?.declaration ?? null); }
+  catch { fail('The request carries a malformed model declaration. Nothing ran; decline it.'); }
+};
+/** Everything a reviewer judged: if any of it changes, the pin does. A request without a model keeps the pin it had before model calls. */
+const reviewPin = r => {
+  const model = declared(r);
+  return sha256(canonicalJson({ request_id: r.request_id, revision: r.revision, requester: r.requester, entry_id: r.entry_id,
+    purpose: r.app.purpose, app_hash: codeHash(r.app), answer_key: compressPublicKey(r.answer_public_key), ...(model ? { model_hash: modelDeclarationHash(model) } : {}) }));
+};
 const showApp = r => {
   say(`Request ${r.request_id} from ${visible(r.requester)} for note ${r.entry_id} (${r.state})`);
   if (!r.app) { say('What it is for: (made before apps were required)'); return; }
@@ -93,6 +104,9 @@ const showApp = r => {
   say(`What it is for: ${visible(r.app.purpose)}`);
   say(r.answer_via === 'router' ? 'A released answer goes back to the requester through Router, which can read it.'
     : 'A released answer is sealed to the requester\'s own key; Router cannot read it.');
+  const model = declared(r);
+  say(`Model use (written here from the declaration${model ? `: ${visible(JSON.stringify(model))}` : ''}):`);
+  for (const line of describeModelUse(model, r.requester)) say(`  ${visible(line)}`);
   say(`Code (hash computed here: ${codeHash(r.app)}):\n${quoted(r.app.code, '  | ')}`);
 };
 const recordFile = id => join(v.records, `${id}.json`);
@@ -100,7 +114,7 @@ const recordFile = id => join(v.records, `${id}.json`);
 if (action === 'inbox') {
   const { requests } = await access({ action: 'inbox' });
   if (!requests.length) say('No requests are waiting.');
-  for (const r of requests) say(`${r.request_id}  ${r.state.padEnd(8)}  ${visible(r.requester)}  ${r.entry_id}  ${r.app ? visible(r.app.purpose) : '(no app)'}`);
+  for (const r of requests) say(`${r.request_id}  ${r.state.padEnd(8)}  ${visible(r.requester)}  ${r.entry_id}  ${r.app ? visible(r.app.purpose) : '(no app)'}${r.model?.declaration ? `  [calls a model: ${visible(r.model.declaration.provider)}]` : ''}`);
   return;
 }
 const r = await access({ action: 'status', request_id: requestId });
@@ -161,8 +175,10 @@ try {
   const prepared = await access({ action: 'prepare', request_id: r.request_id, revision: r.revision, nonce });
   const own = { ownerDid: record.ownerDid, ownerPublicKey, ciphertextSha256: record.full.sha256 };
   const request = { request_id: r.request_id, revision: r.revision, entry_id: r.entry_id, answer_key: r.answer_public_key };
+  // The declaration shown, and pinned, above: the run must allow exactly this model use, or none.
+  const model = declared(r);
   if (v.simulated) {
-    checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: prepared.runner, request, own },
+    checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: prepared.runner, request, own, model },
       { allowSimulated: true });
     say('  --  SIMULATED attestation accepted (local test server only)');
   } else {
@@ -182,10 +198,10 @@ try {
     if (!res.ok || verdict.success !== true || verdict.quote?.verified !== true) fail('Phala\'s verifier did not accept the quote. Nothing was granted.');
     if (String(body.reportdata).replace(/^0x/, '') !== facts.reportData || String(body.rtmr3).replace(/^0x/, '') !== facts.quote.rtmr3) fail('Phala\'s verifier checked a different quote. Nothing was granted.');
     say(`  ok  TDX signature valid (Phala's verifier, record ${verdict.checksum})`);
-    checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: facts.runner, request, own },
+    checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: facts.runner, request, own, model },
       { verifiedReportData: facts.reportData });
   }
-  say('  ok  the run binds this request, the code above, the requester\'s key, the trace in your storage, your key and a fresh nonce');
+  say(`  ok  the run binds this request, the code above, the requester's key, ${model ? 'the model declaration above' : 'no model'}, the trace in your storage, your key and a fresh nonce`);
 
   const wrap = wrapKey(contentKey, { ownerDid: sealedOwnerDid, entryId: r.entry_id }, 'full', 'reader', prepared.public_key);
   contentKey.fill(0);
@@ -208,6 +224,12 @@ try {
       run_public_key: prepared.public_key, answer_key: prepared.description.answer_key, answer_sha256: sha256(result.answer), reviewed_at: new Date().toISOString() }), { mode: 0o600 });
   }
   say('  ok  the result is signed by the attested run');
+  if (result.model) {
+    const m = result.model;
+    say(`What the run says it sent to the model (signed by the run): ${m.calls} ${m.calls === 1 ? 'call' : 'calls'} to ${visible(m.model)} at ${visible(m.provider)}`
+      + (m.release ? `; verified release ${visible(m.release)} (${visible(m.verdict)})` : '; nothing was sent, so no release was verified')
+      + (m.receipts.length ? `; receipts ${m.receipts.map(visible).join(', ')}` : ''));
+  }
   say(result.ok ? `Answer (only you can see it so far; the app wrote it, so treat it as data):\n${quoted(result.answer, '  > ')}` : `The app failed (only you can see this): ${visible(result.error)}`);
   say(`\nTo send it: release ${r.request_id}   To refuse: withhold ${r.request_id}`);
 } finally { await owner.signOut?.(); }

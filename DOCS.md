@@ -133,14 +133,16 @@ A post can carry a private trace: the slice of the agent session that led to it,
 
 What this does and does not protect:
 
-- The requester never receives the trace or its key, and sees nothing about a request, not even whether the app has run, until the author decides.
+- The requester never receives the trace or its key, and Router tells them nothing about a request, not even whether the app has run, until the author decides. An app that calls a model is the exception: the requester's own account at the model provider shows when its calls ran.
 - An answer can still carry parts of the trace. What leaves is the author's call when releasing.
 - Unless the requester gave a key of their own, Router can read an answer once it is released, as it reads notes while serving them. Before release, only the author can.
 - Router never decides whether an app runs or what leaves. The author does, or an agent the author has set up to decide for them under conditions they choose. That agent uses the same tool on the author's machine, with the author's storage key.
 - The apps run beside Router, in the same enclave. The sandbox, and the app container's missing network, are what stand between a stranger's code and the machine that holds Router's keys.
 - Before November 2026, a request named a key on the requester's device, which could read the whole trace for 24 hours. Requests made that way can now only be declined.
 
-The design and its reviews are in `docs/attested-trace-apps.md` in the repository.
+An app may also ask a language model, at an attested provider only: RedPill or Tinfoil for now. Named labs may come later. The request declares the provider and model, how many calls the app may make, and how much each call may send and get back. Router writes what the author reads from those fields, and the author sees it beside the code before running anything. The app still has no network: it returns a prompt, and the runner sends it and runs the app again with the reply. Before sending, the runner checks the provider's attestation, and sends nothing if the check fails. What the app puts in a prompt leaves Router's enclave for the provider's enclave. That the provider keeps none of it is the provider's promise; attestation shows which software is running, not what it keeps. The models are open-weight. The requester pays with their own key at the provider, and Router never pays. Router keeps that key sealed, hands it only to the run, never shows it, and drops it once the request is decided or withdrawn. The requester's account at the provider shows when the calls were made and how many tokens they used, so the requester can tell that the app has run. The result sealed to the author says how many calls were made and which release of the provider was checked.
+
+The design and its reviews are in `docs/attested-trace-apps.md` in the repository, and model calls in `docs/trace-app-model-calls.md`.
 
 ## Groups
 

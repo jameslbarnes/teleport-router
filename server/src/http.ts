@@ -15,6 +15,7 @@ import { linkMessage, networkRecovery } from './openkey-recovery.js';
 import { tracePointer } from './trace-pointer.js';
 import { traceAccess, traceRequestStore, TraceRequestError } from './trace-access.js';
 import { answerCustody, simulatedRunnerClient, subhostRunnerClient, tinyCloudTraceSource, traceRunner, workerExecutor } from './trace-run.js';
+import { ATTESTED_PROVIDERS, modelKeyVault, type AttestedProvider } from './trace-model.js';
 import { createServer } from 'http';
 import { randomUUID, createHash, randomBytes, createHmac } from 'crypto';
 import { readFile } from 'fs/promises';
@@ -590,7 +591,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   },
   {
     id: 'system_router_trace_access', name: 'router_trace_access', handlerType: 'builtin', instructions: '', createdAt: 0,
-    description: 'Ask to run a small app on the private trace behind a note you can read. You never get the trace: the owner, or an agent the owner set up to do it, reads your app\'s code, runs it in an attested enclave, reads its answer and decides whether to release that answer to you. The app is JavaScript defining function analyze(trace, info) that returns a string of at most 8 KB; it has no network, files or timers, 256 MB and 10 seconds. trace is JSON text: {kind: "router-post-trace", entry_id, agent ("claude-code" or "codex"), session_id, posted_at, records}, where records are the session\'s log entries in that agent\'s own format, cleaned of credentials (for agent "claude-code", {type: "user" or "assistant", timestamp, message: {role, content}}, content being text or a list of {type: "text", text}, {type: "tool_use", name, input} and {type: "tool_result", content, is_error when it failed}; an assistant message also has model and usage, its token counts); info is {entry_id, bytes}. Try the function with plain Node on a small trace of that shape before sending it. The released answer comes back from status as answer_text. To have it sealed to a key of your own instead, so that Router cannot read it, give answer_public_key. Use withdraw to take a request back (needed before sending a different app). Use inbox for requests to you (with each app\'s code, so you can review it for your person), decline or withhold to refuse. A pointer alone grants no access.',
+    description: 'Ask to run a small app on the private trace behind a note you can read. You never get the trace: the owner, or an agent the owner set up to do it, reads your app\'s code, runs it in an attested enclave, reads its answer and decides whether to release that answer to you. The app is JavaScript defining function analyze(trace, info) that returns a string of at most 8 KB; it has no network, files or timers, 256 MB and 10 seconds. trace is JSON text: {kind: "router-post-trace", entry_id, agent ("claude-code" or "codex"), session_id, posted_at, records}, where records are the session\'s log entries in that agent\'s own format, cleaned of credentials (for agent "claude-code", {type: "user" or "assistant", timestamp, message: {role, content}}, content being text or a list of {type: "text", text}, {type: "tool_use", name, input} and {type: "tool_result", content, is_error when it failed}; an assistant message also has model and usage, its token counts); info is {entry_id, bytes}. Try the function with plain Node on a small trace of that shape before sending it. The released answer comes back from status as answer_text. To have it sealed to a key of your own instead, so that Router cannot read it, give answer_public_key. An app can also ask a language model: declare model {provider, model, calls, prompt_bytes, reply_tokens} and give model_key, then analyze(trace, info, replies) may return {ask: prompt}; the runner sends the prompt and runs the function again from the start with the reply added to replies (empty at first). Only attested providers are accepted (redpill or tinfoil), and the calls are billed to your own key there, so make a key for this with a small spending limit; the owner sees the declaration, and Router never shows or logs the key. Use withdraw to take a request back (needed before sending a different app). Use inbox for requests to you (with each app\'s code, so you can review it for your person), decline or withhold to refuse. A pointer alone grants no access.',
     inputSchema: { type: 'object', properties: {
       action: { type: 'string', enum: ['request', 'inbox', 'status', 'withdraw', 'decline', 'withhold'] },
       entry_id: { type: 'string' },
@@ -599,6 +600,14 @@ export const SYSTEM_SKILLS: Skill[] = [
         purpose: { type: 'string', description: 'One line, at most 280 characters: what the app is for. The owner reads it.' },
       }, required: ['code', 'purpose'] },
       answer_public_key: { type: 'string', description: 'Optional: 0x02 or 0x03 followed by 64 hex digits. The answer is then sealed to this key, which Router cannot open; keep the private key. Without it, status returns the released answer as answer_text.' },
+      model: { type: 'object', description: 'Optional, when requesting: what the app may do with a model. Unknown fields are refused.', properties: {
+        provider: { type: 'string', enum: ['redpill', 'tinfoil'], description: 'An attested provider: the runner checks its proof of confidential compute before sending anything.' },
+        model: { type: 'string', description: 'The model ID at that provider.' },
+        calls: { type: 'integer', minimum: 1, maximum: 8 },
+        prompt_bytes: { type: 'integer', minimum: 1, maximum: 262144, description: 'The most bytes one prompt may hold.' },
+        reply_tokens: { type: 'integer', minimum: 1, maximum: 4096, description: 'The most tokens one reply may hold.' },
+      }, required: ['provider', 'model', 'calls', 'prompt_bytes', 'reply_tokens'] },
+      model_key: { type: 'string', description: 'Required exactly when model is given: your own API key at that provider. Router seals it at once and passes it only to the run.' },
       request_id: { type: 'string' }, revision: { type: 'string', description: 'Required when declining or withholding.' },
     }, required: ['action'] },
   },
@@ -1292,6 +1301,11 @@ const handleTraceAccess = traceAccess({
   store: traceRequests,
   // Answers to requesters who gave no key are released to a key only this enclave holds.
   custody: authorIdentity ? answerCustody(authorIdentity.encryptionKey) : undefined,
+  // Requesters' own keys at model providers are sealed at rest with a key derived from the same enclave secret.
+  modelKeys: authorIdentity ? modelKeyVault(authorIdentity.encryptionKey) : undefined,
+  // The attested providers apps may call, for example TRACE_MODELS=redpill,tinfoil. Unset: none.
+  models: (process.env.TRACE_MODELS || '').split(',').map(p => p.trim().toLowerCase())
+    .filter((p): p is AttestedProvider => (ATTESTED_PROVIDERS as readonly string[]).includes(p)),
   // An owner hears of a new request by email, when they have a verified address, and at the start of their next session.
   onRequest: request => {
     if (!request.owner.startsWith('@')) return;

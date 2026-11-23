@@ -1,5 +1,9 @@
 // The requester's side of a trace request. Requests carry an app; the owner runs it and may release its answer,
 // sealed to this device's key. readGrantedTrace still opens a trace under a read grant made before apps were required.
+//
+// An app that asks a model: --model <file> holds the JSON declaration {provider, model, calls, prompt_bytes,
+// reply_tokens}, and --model-key-file <file> your own key at that provider (make one for this, with a small
+// spending limit). The key is read from the file and sent only in the request; it is never printed.
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -52,7 +56,7 @@ export async function openGrantedTrace(access, grant, id, privateKey) {
 async function main() {
   const { values: v, positionals: [action, id] } = parseArgs({ allowPositionals: true, options: {
     'reader-key-file': {type:'string'}, 'router-key-file':{type:'string'}, router:{type:'string', default:'https://router.teleport.computer'},
-    app:{type:'string'}, purpose:{type:'string'}, out:{type:'string'},
+    app:{type:'string'}, purpose:{type:'string'}, out:{type:'string'}, model:{type:'string'}, 'model-key-file':{type:'string'},
   } });
   // Without --reader-key-file, Router hands the released answer back; with it, the answer is sealed to that key.
   const keyFile = v['reader-key-file'];
@@ -65,12 +69,17 @@ async function main() {
     throw Error('Use keygen, request <post-id> --app <file.js> --purpose <one line>, status <request-id>, or read <request-id> --out <new file>.');
   if (action === 'request' && (!v.app || !v.purpose)) throw Error('A request carries an app: give --app <file.js> defining analyze(trace, info), and --purpose <one line>.');
   if (action === 'read' && !v.out) throw Error('Use --out <new file> for the released answer.');
+  if (!!v.model !== !!v['model-key-file']) throw Error('An app that asks a model needs both --model <declaration.json> and --model-key-file <file with your key at the provider>.');
+  let model;
+  if (v.model) try { model = JSON.parse(await readFile(v.model, 'utf8')); } catch { throw Error(`${v.model} must hold the model declaration as JSON.`); }
+  const modelKey = v['model-key-file'] ? (await readFile(v['model-key-file'], 'utf8')).trim() : undefined;
   const privateKey = keyFile ? (await readFile(keyFile,'utf8')).trim() : null;
   const key = (await readFile(v['router-key-file'],'utf8')).trim();
   const base = new URL(v.router);
   if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost','127.0.0.1'].includes(base.hostname))) throw Error('Use an HTTPS Router.');
   const body = action === 'request'
-    ? {action, entry_id:id, app:{code:await readFile(v.app,'utf8'), purpose:v.purpose}, ...(privateKey ? {answer_public_key:new Wallet(privateKey).signingKey.compressedPublicKey} : {})}
+    ? {action, entry_id:id, app:{code:await readFile(v.app,'utf8'), purpose:v.purpose}, ...(privateKey ? {answer_public_key:new Wallet(privateKey).signingKey.compressedPublicKey} : {}),
+      ...(model ? {model, model_key:modelKey} : {})}
     : {action:'status', request_id:id};
   const r = await fetch(new URL('/api/trace-access',base), {method:'POST',redirect:'error',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
     body: JSON.stringify(body)});
@@ -86,6 +95,7 @@ async function main() {
       await writeFile(v.out, openReleased(request.answer, request.run, privateKey, request.sealed_sha256), { flag:'wx', mode:0o600 });
     }
   }
-  console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, app_hash:request.app?.hash, answer_via:request.answer_via}));
+  console.log(JSON.stringify({request_id:request.request_id, state:request.state, entry_id:request.entry_id, app_hash:request.app?.hash, answer_via:request.answer_via,
+    ...(request.model ? {model:request.model} : {})}));
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main().catch(e => { console.error(e.message); process.exitCode=1; });
