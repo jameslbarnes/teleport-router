@@ -1,14 +1,19 @@
 /** Apps that read one private trace with its owner's approval.
  *
- * A requester's agent writes a JavaScript function, analyze(trace, info), that returns a short
- * string. Router stores the code with the request and shows it to the owner. The trace runner in
- * Router's enclave runs exactly that code in QuickJS compiled to WebAssembly. There the app has no
- * network, files, processes, timers or keys: only its two arguments and its return value.
+ * A requester's agent writes a JavaScript function, analyze(trace, info, replies), that returns a
+ * short string. Router stores the code with the request and shows it to the owner. The trace runner
+ * in Router's enclave runs exactly that code in QuickJS compiled to WebAssembly. There the app has no
+ * network, files, processes, timers or keys: only its arguments and its return value.
  * See docs/attested-trace-apps.md.
+ *
+ * An app that declared a model may instead return {ask: prompt}. It never calls out itself: the
+ * runner sends the prompt and runs the function again from the start, with the model's reply added
+ * to `replies` (docs/trace-app-model-calls.md).
  *
  * Router itself only checks and hashes apps. The QuickJS engine loads on first use, in the runner.
  */
 import { createHash } from 'node:crypto';
+import { MODEL_LIMITS } from './trace-model.js';
 
 export const APP_RUNTIME = 'quickjs-wasm/v1';
 export interface AppLimits {
@@ -30,6 +35,8 @@ export interface TraceApp { runtime: typeof APP_RUNTIME; code: string; purpose: 
 export interface AppInfo { entry_id: string; bytes: number }
 /** `error` may quote the trace (an app can throw anything), so it is shown to the owner only, like an answer. */
 export type AppResult = { ok: true; answer: string } | { ok: false; error: string };
+/** One run of the function: its answer, its error, or one prompt for the model. Measured and checked inside the sandbox. */
+export type AppStepResult = AppResult | { ask: string };
 
 export class TraceAppError extends Error {}
 
@@ -85,9 +92,20 @@ function quickjs(): Promise<Engine> {
 }
 
 /** Runs an app on a trace inside QuickJS. Never throws for anything the app does; every failure is an AppResult.
- *  The runner adds a hard stop around this call (a worker it terminates), in case the engine's own time check is ever missed. */
+ *  The runner adds a hard stop around this call (a worker it terminates), in case the engine's own time check is ever missed.
+ *  An app that asks for a model here, where none was declared, fails. */
 export async function runApp(app: TraceApp, trace: string, info: AppInfo, limits: AppLimits = APP_LIMITS): Promise<AppResult> {
+  const step = await runAppStep(app, trace, info, limits, []);
+  return 'ask' in step ? { ok: false, error: NO_MODEL } : step;
+}
+export const NO_MODEL = 'The app asked for a model but declared none.';
+
+/** One run of analyze(trace, info, replies), from the start. `replies` are the model's replies so far, oldest first.
+ *  Returns the answer, the app's error, or {ask} with a prompt that was measured inside the sandbox before it was copied out. */
+export async function runAppStep(app: TraceApp, trace: string, info: AppInfo, limits: AppLimits = APP_LIMITS, replies: readonly string[] = []): Promise<AppStepResult> {
   if (utf8Bytes(trace) > limits.traceBytes) return { ok: false, error: `The trace is larger than ${limits.traceBytes / (1024 * 1024)} MB, the most the runner accepts.` };
+  if (!Array.isArray(replies) || replies.length > MODEL_LIMITS.calls || replies.some(r => typeof r !== 'string' || utf8Bytes(r) > MODEL_LIMITS.replyBytes))
+    return { ok: false, error: 'The runner gave the app malformed replies.' };
   const QuickJS = await quickjs();
   const runtime = QuickJS.newRuntime();
   runtime.setMemoryLimit(limits.memoryBytes);
@@ -116,6 +134,13 @@ export async function runApp(app: TraceApp, trace: string, info: AppInfo, limits
     if (/stack overflow/i.test(text)) return 'The app overflowed its stack.';
     return `The app failed: ${text.slice(0, 500)}`;
   };
+  /** A string the app produced, measured inside the sandbox first so an enormous one is never copied out. UTF-8 has at least one byte per code unit. */
+  const bounded = (handle: import('quickjs-emscripten-core').QuickJSHandle, most: number): { text: string; units: number } | null => {
+    const length = hold(vm.getProp(handle, 'length'));
+    if (vm.typeof(length) !== 'number' || vm.getNumber(length) > most) return null;
+    const units = vm.getNumber(length), text = vm.getString(handle);
+    return utf8Bytes(text) > most ? null : { text, units };
+  };
   try {
     const loaded = vm.evalCode(app.code, 'app.js', { type: 'global' });
     if (loaded.error) return { ok: false, error: failure(loaded.error) };
@@ -126,16 +151,29 @@ export async function runApp(app: TraceApp, trace: string, info: AppInfo, limits
     const infoArg = hold(vm.newObject());
     vm.setProp(infoArg, 'entry_id', hold(vm.newString(info.entry_id)));
     vm.setProp(infoArg, 'bytes', hold(vm.newNumber(info.bytes)));
-    const called = vm.callFunction(analyze, vm.undefined, traceArg, infoArg);
+    const repliesArg = hold(vm.newArray());
+    replies.forEach((reply, i) => vm.setProp(repliesArg, i, hold(vm.newString(reply))));
+    const called = vm.callFunction(analyze, vm.undefined, traceArg, infoArg, repliesArg);
     if (called.error) return { ok: false, error: failure(called.error) };
     hold(called.value);
-    if (vm.typeof(called.value) !== 'string') return { ok: false, error: 'analyze must return a string.' };
-    // Measure inside the sandbox first, so an enormous string is never copied out. UTF-8 has at least one byte per code unit.
-    const length = hold(vm.getProp(called.value, 'length'));
-    if (vm.typeof(length) !== 'number' || vm.getNumber(length) > limits.answerBytes) return { ok: false, error: `The answer must be at most ${limits.answerBytes / 1024} KB.` };
-    const answer = vm.getString(called.value);
-    if (utf8Bytes(answer) > limits.answerBytes) return { ok: false, error: `The answer must be at most ${limits.answerBytes / 1024} KB.` };
-    return { ok: true, answer };
+    if (vm.typeof(called.value) === 'string') {
+      const answer = bounded(called.value, limits.answerBytes);
+      return answer === null ? { ok: false, error: `The answer must be at most ${limits.answerBytes / 1024} KB.` } : { ok: true, answer: answer.text };
+    }
+    // {ask: prompt}. Reading `ask` may run a getter, which is app code under the same deadline; one that throws reads as no prompt.
+    if (vm.typeof(called.value) === 'object' && !vm.sameValue(called.value, vm.null)) {
+      const ask = hold(vm.getProp(called.value, 'ask'));
+      if (vm.typeof(ask) === 'string') {
+        const prompt = bounded(ask, MODEL_LIMITS.promptBytes);
+        if (prompt === null) return { ok: false, error: `A prompt must be at most ${MODEL_LIMITS.promptBytes / 1024} KB.` };
+        // A lone surrogate cannot leave the sandbox unchanged: the copy turns each into three replacement characters,
+        // so its length differs from the length inside. Such a prompt is refused rather than sent altered.
+        if (!prompt.units || prompt.text.length !== prompt.units || !wellFormed(prompt.text)) return { ok: false, error: 'A prompt must be non-empty plain text.' };
+        return { ask: prompt.text };
+      }
+    }
+    if (Date.now() > deadline) return { ok: false, error: `The app ran out of time (${limits.timeMs / 1000} seconds).` };
+    return { ok: false, error: 'analyze must return a string, or {ask: prompt} when the request declared a model.' };
   } catch {
     // The engine itself failed (it can abort when memory runs out mid-allocation). Say so without echoing anything.
     engine = undefined;

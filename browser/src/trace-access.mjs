@@ -18,6 +18,14 @@ async function act(fn) {
 function element(tag, text, css) {
   const el = document.createElement(tag); el.textContent = text; if (css) el.className = css; return el;
 }
+/** What the app may do with a model. Router writes these lines from the declaration's fixed fields; they are still shown as text only. */
+function modelUse(r) {
+  const box = element('div', '', 'trace-app-model');
+  const lines = Array.isArray(r.model?.lines) ? r.model.lines.filter(line => typeof line === 'string') : ['This app cannot call a model or reach the network.'];
+  box.append(element('h3', r.model?.declaration ? 'This app may call a model' : 'No model'));
+  for (const line of lines) box.append(element('p', line));
+  return box;
+}
 function card(r) {
   const panel = element('article', '', 'r-perm');
   const link = element('a', 'Read the note'); link.href = '/e/' + encodeURIComponent(r.entry_id);
@@ -28,7 +36,8 @@ function card(r) {
   } else {
     panel.append(element('h2', r.requester + ' wants to run an app on the trace behind this note'), link,
       element('p', 'What it is for: ' + r.app.purpose),
-      element('p', 'The app gets the trace and returns a short answer. It runs in an attested enclave with no network, files or keys. You read its answer before deciding whether the requester gets it. The requester never gets the trace itself.'),
+      element('p', 'The app gets the trace and returns a short answer. It runs in an attested enclave with no network, files or keys of its own; if it declared a model, the runner sends its prompts to that model, as described below. You read its answer before deciding whether the requester gets it. The requester never gets the trace itself.'),
+      modelUse(r),
       element('pre', r.app.code, 'trace-app-code'),
       element('p', 'Code hash ' + r.app.hash),
       element('p', r.state === 'answered' ? 'It has run. Open its answer, and release or withhold it, with the owner tool.' : 'Run it with the owner tool, which checks the enclave before giving the run a 15-minute read of this one trace.'));

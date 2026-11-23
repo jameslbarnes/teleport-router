@@ -15,6 +15,10 @@ import { linkMessage, networkRecovery } from './openkey-recovery.js';
 import { tracePointer } from './trace-pointer.js';
 import { traceAccess, traceRequestStore, TraceRequestError } from './trace-access.js';
 import { answerCustody, simulatedRunnerClient, subhostRunnerClient, tinyCloudTraceSource, traceRunner, workerExecutor } from './trace-run.js';
+import { modelKeyVault } from './trace-model.js';
+import { enabledTraceModels, traceAccessTool } from './trace-access-tool.js';
+/** The attested model providers trace apps may call (TRACE_MODELS). None unless set; the tool says nothing of models then. */
+const TRACE_MODEL_PROVIDERS = enabledTraceModels();
 import { createServer } from 'http';
 import { randomUUID, createHash, randomBytes, createHmac } from 'crypto';
 import { readFile } from 'fs/promises';
@@ -590,17 +594,7 @@ export const SYSTEM_SKILLS: Skill[] = [
   },
   {
     id: 'system_router_trace_access', name: 'router_trace_access', handlerType: 'builtin', instructions: '', createdAt: 0,
-    description: 'Ask to run a small app on the private trace behind a note you can read. You never get the trace: the owner, or an agent the owner set up to do it, reads your app\'s code, runs it in an attested enclave, reads its answer and decides whether to release that answer to you. The app is JavaScript defining function analyze(trace, info) that returns a string of at most 8 KB; it has no network, files or timers, 256 MB and 10 seconds. trace is JSON text: {kind: "router-post-trace", entry_id, agent ("claude-code" or "codex"), session_id, posted_at, records}, where records are the session\'s log entries in that agent\'s own format, cleaned of credentials (for agent "claude-code", {type: "user" or "assistant", timestamp, message: {role, content}}, content being text or a list of {type: "text", text}, {type: "tool_use", name, input} and {type: "tool_result", content, is_error when it failed}; an assistant message also has model and usage, its token counts); info is {entry_id, bytes}. Try the function with plain Node on a small trace of that shape before sending it. The released answer comes back from status as answer_text. To have it sealed to a key of your own instead, so that Router cannot read it, give answer_public_key. Use withdraw to take a request back (needed before sending a different app). Use inbox for requests to you (with each app\'s code, so you can review it for your person), decline or withhold to refuse. A pointer alone grants no access.',
-    inputSchema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['request', 'inbox', 'status', 'withdraw', 'decline', 'withhold'] },
-      entry_id: { type: 'string' },
-      app: { type: 'object', description: 'Required when requesting.', properties: {
-        code: { type: 'string', description: 'JavaScript defining function analyze(trace, info), returning a string. At most 32 KB.' },
-        purpose: { type: 'string', description: 'One line, at most 280 characters: what the app is for. The owner reads it.' },
-      }, required: ['code', 'purpose'] },
-      answer_public_key: { type: 'string', description: 'Optional: 0x02 or 0x03 followed by 64 hex digits. The answer is then sealed to this key, which Router cannot open; keep the private key. Without it, status returns the released answer as answer_text.' },
-      request_id: { type: 'string' }, revision: { type: 'string', description: 'Required when declining or withholding.' },
-    }, required: ['action'] },
+    ...traceAccessTool(TRACE_MODEL_PROVIDERS),
   },
   {
     id: 'system_router_get_entry',
@@ -1292,6 +1286,10 @@ const handleTraceAccess = traceAccess({
   store: traceRequests,
   // Answers to requesters who gave no key are released to a key only this enclave holds.
   custody: authorIdentity ? answerCustody(authorIdentity.encryptionKey) : undefined,
+  // Requesters' own keys at model providers are sealed at rest with a key derived from the same enclave secret.
+  modelKeys: authorIdentity ? modelKeyVault(authorIdentity.encryptionKey) : undefined,
+  // The attested providers apps may call, for example TRACE_MODELS=redpill,tinfoil. Unset: none.
+  models: TRACE_MODEL_PROVIDERS,
   // An owner hears of a new request by email, when they have a verified address, and at the start of their next session.
   onRequest: request => {
     if (!request.owner.startsWith('@')) return;
