@@ -31,6 +31,8 @@ export const RUN_GRANT_MS = 15 * 60_000;
 export const RUN_PREPARE_MS = 10 * 60_000;
 /** The longest one run may take, from the moment the runner is handed its grant, model calls included. */
 export const RUN_DEADLINE_MS = 140_000;
+/** How long after its deadline a run is stopped whatever it is doing, and its slot freed. */
+export const RUN_SETTLE_MS = 5_000;
 
 /** Everything a run is allowed to do, fixed before the owner approves it. */
 export interface RunDescriptionV1 {
@@ -263,9 +265,10 @@ interface Run {
 /** `execute` runs stranger-written code, so it has no default: the runner passes sandboxExecutor or workerExecutor,
  *  which stop a stuck app; tests may pass runAppStep. `connectorFor` reaches the attested model providers; without
  *  it, runs that declare a model are refused at prepare. */
-export function traceRunner({ fetchTrace, execute, now = Date.now, maxActive = 2, limits = APP_LIMITS, fetchTimeoutMs = 60_000, connectorFor, runMs = RUN_DEADLINE_MS }: {
+export function traceRunner({ fetchTrace, execute, now = Date.now, maxActive = 2, limits = APP_LIMITS, fetchTimeoutMs = 60_000, connectorFor, runMs = RUN_DEADLINE_MS,
+  settleMs = RUN_SETTLE_MS, closeMs = MODEL_LIMITS.closeMs }: {
   fetchTrace: TraceSource; execute: AppExecutor; now?: () => number; maxActive?: number; limits?: AppLimits; fetchTimeoutMs?: number;
-  connectorFor?: ConnectorFor; runMs?: number;
+  connectorFor?: ConnectorFor; runMs?: number; settleMs?: number; closeMs?: number;
 }) {
   const runs = new Map<string, Run>();
   const sweep = () => {
@@ -307,7 +310,15 @@ export function traceRunner({ fetchTrace, execute, now = Date.now, maxActive = 2
       if (!r.model && input.model_key !== undefined && input.model_key !== null) throw new RunError('This run declared no model, so it takes no key.');
       const wallet = r.wallet;
       r.wallet = null; r.state = 'running';
-      try {
+      const timeLeft = () => started + runMs - now();
+      const outOfTime = `The run ran out of time (${runMs / 1000} seconds).`;
+      let gateway: ReturnType<typeof modelGateway> | null = null;
+      const finish = (result: RunResult) => {
+        if (gateway) result.model = gateway.evidence();
+        const sealed = sealResult(result, r.d);
+        return { run_id: r.d.run_id, sealed, signature: wallet.signingKey.sign(resultDigest(sealed, r.d)).serialized };
+      };
+      const work = async () => {
         let record: any, ciphertext: Buffer;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
@@ -330,11 +341,8 @@ export function traceRunner({ fetchTrace, execute, now = Date.now, maxActive = 2
         const text = plain.toString('utf8'), info = { entry_id: r.d.entry_id, bytes: plain.length }, appLimits = { ...limits, answerBytes: r.d.answer_bytes };
         plain.fill(0);
         // One deadline for the whole run. Each step, and each model call, gets at most the time left.
-        const timeLeft = () => started + runMs - now();
-        const outOfTime = `The run ran out of time (${runMs / 1000} seconds).`;
-        let gateway: ReturnType<typeof modelGateway> | null = null;
         if (r.model) {
-          try { gateway = modelGateway({ declaration: r.model, apiKey: input.model_key!, connect: r.connect!, timeLeft }); }
+          try { gateway = modelGateway({ declaration: r.model, apiKey: input.model_key!, connect: r.connect!, timeLeft, closeMs }); }
           catch (err) { throw new RunError(err instanceof TraceModelError ? err.message : 'The model gateway could not start.'); }
         }
         const step = async (replies: readonly string[]): Promise<AppStep> => {
@@ -347,11 +355,23 @@ export function traceRunner({ fetchTrace, execute, now = Date.now, maxActive = 2
           } finally { clearTimeout(timer); }
         };
         const outcome = await runWithModel(step, gateway);
-        const result: RunResult = outcome.ok ? { ok: true, answer: outcome.answer } : { ok: false, error: outcome.error };
-        if (gateway) result.model = gateway.evidence();
-        const sealed = sealResult(result, r.d);
-        return { run_id: r.d.run_id, sealed, signature: wallet.signingKey.sign(resultDigest(sealed, r.d)).serialized };
-      } finally { r.state = 'done'; }
+        return finish(outcome.ok ? { ok: true, answer: outcome.answer } : { ok: false, error: outcome.error });
+      };
+      // Whatever a connector, a call, a receipt check or a close is doing, the run settles a little after its deadline
+      // and frees its slot. Nothing more is sent once it has: the gateway is closed, and any later call refused.
+      let stop: ReturnType<typeof setTimeout> | undefined;
+      const stopped = new Promise<'stopped'>(resolve => { stop = setTimeout(() => resolve('stopped'), Math.max(0, timeLeft() + settleMs)); });
+      try {
+        const working = work();
+        // A run stopped at its deadline may still fail later; that is already answered, so it is not an unhandled error.
+        working.catch(() => undefined);
+        const settled = await Promise.race([working, stopped]);
+        if (settled !== 'stopped') return settled;
+        const open = gateway as ReturnType<typeof modelGateway> | null;
+        if (!open) throw new RunError(outOfTime);
+        void open.close();
+        return finish({ ok: false, error: outOfTime });
+      } finally { clearTimeout(stop); r.state = 'done'; }
     },
   };
 }

@@ -144,7 +144,9 @@ if (action === 'release') {
   const result = openResult(r.answer.sealed, r.answer.description, traceKey);
   if (!result.ok) fail(`The app failed, so there is nothing to release: ${visible(result.error)}\nWithhold it, or run it again.`);
   if (sha256(result.answer) !== reviewed.answer_sha256) fail('This is not the answer you reviewed. Nothing was released.');
-  say(`This exact text will be sealed to the requester's key:\n${quoted(result.answer, '  > ')}`);
+  say(r.answer_via === 'router'
+    ? `This exact text will be sealed to Router's enclave, which hands it to the requester (Router can read it):\n${quoted(result.answer, '  > ')}`
+    : `This exact text will be sealed to the requester's key:\n${quoted(result.answer, '  > ')}`);
   const { sealed, sealed_sha256 } = sealForRequester(result.answer, r.answer.description, reviewed.answer_key);
   await access({ action: 'release', request_id: r.request_id, revision: r.revision, run_id: r.answer.run_id, sealed });
   say(`Released. Receipt (SHA-256 of the sealed answer): ${sealed_sha256}`);

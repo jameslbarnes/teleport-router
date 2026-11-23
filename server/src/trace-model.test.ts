@@ -65,6 +65,7 @@ describe('what the owner is told', () => {
     expect(all).toContain("is RedPill's promise; attestation does not prove it");
     expect(all).toContain('open-weight');
     expect(lines).toContain("@reader's account at RedPill shows when the calls are made and how many tokens they use, so @reader can tell that the app has run.");
+    expect(lines).toContain("The app's code decides how many calls it makes and how large they are, and @reader's account shows those numbers, so running it can tell @reader a little about the trace even if you withhold the answer.");
     expect(describeModelUse({ ...attested, provider: 'tinfoil', calls: 1 }, '@reader').join(' ')).toContain("Tinfoil's release is the one its own public log names");
     expect(describeModelUse(attested, 'reader pen name').join(' ')).toContain("reader pen name's account at RedPill");
     expect(describeModelUse(null, 'reader')).toEqual(['This app cannot call a model or reach the network.']);
@@ -213,22 +214,66 @@ describe('an app that asks a model', () => {
 });
 
 describe("the requester's key at rest", () => {
-  it('seals a key so that only this vault opens it, and only for the request it was sealed for', () => {
-    const secret = randomBytes(32), vault = modelKeyVault(secret), id = 'ab'.repeat(32);
-    const sealed = vault.seal(KEY, id);
+  it('seals a key so that only this vault opens it, and only for the request, revision and declaration it was sealed for', () => {
+    const secret = randomBytes(32), vault = modelKeyVault(secret);
+    const binding = { requestId: 'ab'.repeat(32), revision: 'rev-1', modelHash: modelDeclarationHash(attested) };
+    const sealed = vault.seal(KEY, binding);
     expect(JSON.stringify(sealed)).not.toContain(KEY);
     expect(Buffer.from(sealed.iv, 'base64url')).toHaveLength(12);
-    expect(vault.open(sealed, id)).toBe(KEY);
-    expect(modelKeyVault(secret).open(sealed, id)).toBe(KEY);
-    expect(vault.seal(KEY, id).data).not.toBe(sealed.data);
+    expect(vault.open(sealed, binding)).toBe(KEY);
+    expect(modelKeyVault(secret).open(sealed, binding)).toBe(KEY);
+    expect(vault.seal(KEY, binding).data).not.toBe(sealed.data);
     const refusals = [
-      () => vault.open(sealed, 'cd'.repeat(32)),
-      () => modelKeyVault(randomBytes(32)).open(sealed, id),
-      () => vault.open({ ...sealed, data: Buffer.from('sk-test-0123456789abcdeX').toString('base64url') }, id),
-      () => vault.open({ ...sealed, tag: sealed.tag.slice(0, 8) }, id),
-      () => vault.open(undefined, id),
+      () => vault.open(sealed, { ...binding, requestId: 'cd'.repeat(32) }),
+      () => vault.open(sealed, { ...binding, revision: 'rev-2' }),
+      () => vault.open(sealed, { ...binding, modelHash: modelDeclarationHash({ ...attested, calls: 3 }) }),
+      () => modelKeyVault(randomBytes(32)).open(sealed, binding),
+      () => vault.open({ ...sealed, data: Buffer.from('sk-test-0123456789abcdeX').toString('base64url') }, binding),
+      () => vault.open({ ...sealed, tag: sealed.tag.slice(0, 8) }, binding),
+      () => vault.open(undefined, binding),
     ];
     for (const refused of refusals) expect(refused).toThrow("The requester's key for the model provider could not be opened.");
+  });
+
+  it('recognises the same key for the same request by a keyed hash that does not contain it', () => {
+    const secret = randomBytes(32), vault = modelKeyVault(secret);
+    const binding = { requestId: 'ab'.repeat(32), revision: 'rev-1', modelHash: modelDeclarationHash(attested) };
+    const tag = vault.tag(KEY, binding);
+    expect(tag).not.toContain(KEY);
+    expect(modelKeyVault(secret).tag(KEY, binding)).toBe(tag);
+    for (const other of [vault.tag(KEY + 'x', binding), vault.tag(KEY, { ...binding, revision: 'rev-2' }), modelKeyVault(randomBytes(32)).tag(KEY, binding)])
+      expect(other).not.toBe(tag);
+  });
+});
+
+describe('a provider that stalls or floods', () => {
+  const never = <T,>() => new Promise<T>(() => {});
+  it('ends a call, a reply, a receipt check and a close within their bounds, however the provider behaves', async () => {
+    const bounded = async (extra: Partial<ModelChannel>, expected: string) => {
+      const { channel } = fakeChannel(() => text('ok'), extra);
+      const gateway = modelGateway({ declaration: attested, apiKey: KEY, connect: async () => channel, timeLeft: () => 200 });
+      const started = Date.now();
+      await expect(gateway.ask('one')).rejects.toThrow(expected);
+      expect(Date.now() - started).toBeLessThan(2000);
+    };
+    await bounded({ fetch: () => never() }, 'The call to RedPill did not complete.');
+    await bounded({ fetch: async () => new Response(new ReadableStream({ start() { /* never sends a byte */ } })) }, 'a reply the runner could not read');
+    await bounded({ confirm: () => never() }, "RedPill's signed receipt for the call did not verify");
+    const { channel } = fakeChannel(() => text('ok'), { close: () => never() });
+    const gateway = modelGateway({ declaration: attested, apiKey: KEY, connect: async () => channel, closeMs: 100 });
+    await gateway.ask('one');
+    const started = Date.now();
+    await gateway.close();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('stops reading a reply as soon as it passes the limit', async () => {
+    let pulled = 0;
+    const flood = new ReadableStream<Uint8Array>({ pull(c) { pulled++; c.enqueue(new Uint8Array(64 * 1024)); } });
+    const { channel } = fakeChannel(() => new Response(flood));
+    const gateway = modelGateway({ declaration: attested, apiKey: KEY, connect: async () => channel });
+    await expect(gateway.ask('one')).rejects.toThrow('a reply the runner could not read');
+    expect(pulled).toBeLessThan(10);
   });
 });
 

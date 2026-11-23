@@ -1,6 +1,7 @@
 /** Connectors for model providers that prove, before anything is sent, that they run in confidential compute.
  *  Each uses the provider's own verifier, loaded only in the trace runner. See docs/trace-app-model-calls.md.
  */
+import { randomBytes } from 'node:crypto';
 import { TraceModelError, type AttestedProvider, type ModelConnector } from './trace-model.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -39,12 +40,15 @@ export function redpillConnector(acceptedReleases: readonly string[]): ModelConn
   };
 }
 
-/** Tinfoil. Its client checks the enclave's attestation against the release named in Tinfoil's public transparency log,
- *  then encrypts each request body to a key held inside that enclave. It issues no receipts. */
+/** Tinfoil. Its client checks the enclave's attestation against the release named in Tinfoil's public transparency log.
+ *  The 'tls' transport then sends each whole request, headers and the requester's key included, over TLS pinned to the
+ *  key the attestation names; it fails if the attestation names none. (The default 'ehbp' transport seals only the body,
+ *  and sends the headers over ordinary HTTPS.) It issues no receipts. A fresh cache secret for each run keeps the
+ *  provider's prompt cache from being shared between runs. */
 export function tinfoilConnector(): ModelConnector {
   return async () => {
     const { SecureClient } = await import('tinfoil');
-    const client = new SecureClient({ transport: 'ehbp' });
+    const client = new SecureClient({ transport: 'tls', userCacheSecret: randomBytes(32).toString('hex') });
     await client.ready();
     const document = client.getVerificationDocument();
     const baseURL = client.getBaseURL();

@@ -68,8 +68,8 @@ describe('trace apps: the sandbox', () => {
   }, 30_000);
   it('reports what the app got wrong, which only the owner will see', async () => {
     expect(await runApp(app('const x = 1'), '', info)).toEqual({ ok: false, error: 'The app must define function analyze(trace, info).' });
-    expect(await runApp(app('function analyze() { return 42 }'), '', info)).toEqual({ ok: false, error: 'analyze must return a string.' });
-    expect(await runApp(app('function analyze() { return Promise.resolve("x") }'), '', info)).toEqual({ ok: false, error: 'analyze must return a string.' });
+    expect(await runApp(app('function analyze() { return 42 }'), '', info)).toEqual({ ok: false, error: 'analyze must return a string, or {ask: prompt} when the request declared a model.' });
+    expect(await runApp(app('function analyze() { return Promise.resolve("x") }'), '', info)).toEqual({ ok: false, error: 'analyze must return a string, or {ask: prompt} when the request declared a model.' });
     expect(await runApp(app('function analyze(t) { throw new Error("saw " + t) }'), 'secret', info)).toEqual({ ok: false, error: 'The app failed: Error: saw secret' });
   });
 });
@@ -100,7 +100,7 @@ describe('trace apps: asking a model, one step at a time', () => {
   it('treats anything else as a wrong return, including a getter that throws', async () => {
     for (const code of ['function analyze() { return null }', 'function analyze() { return { ask: 42 } }', 'function analyze() { return { answer: "x" } }',
       'function analyze() { return { get ask() { throw new Error("secret") } } }', 'function analyze() { return ["x"] }'])
-      expect(await runAppStep(app(code), '', info), code).toEqual({ ok: false, error: 'analyze must return a string.' });
+      expect(await runAppStep(app(code), '', info), code).toEqual({ ok: false, error: 'analyze must return a string, or {ask: prompt} when the request declared a model.' });
     // A getter that never returns is stopped by the deadline like any other app code.
     expect(await runAppStep(app('function analyze() { return { get ask() { for (;;) {} } } }'), '', info, quick)).toEqual({ ok: false, error: 'The app ran out of time (0.3 seconds).' });
     // The engine is still usable after all that.

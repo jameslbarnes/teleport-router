@@ -173,7 +173,7 @@ export async function runAppStep(app: TraceApp, trace: string, info: AppInfo, li
       }
     }
     if (Date.now() > deadline) return { ok: false, error: `The app ran out of time (${limits.timeMs / 1000} seconds).` };
-    return { ok: false, error: 'analyze must return a string.' };
+    return { ok: false, error: 'analyze must return a string, or {ask: prompt} when the request declared a model.' };
   } catch {
     // The engine itself failed (it can abort when memory runs out mid-allocation). Say so without echoing anything.
     engine = undefined;

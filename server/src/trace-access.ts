@@ -37,8 +37,12 @@ interface Request {
   /** What the app may do with a model, as the requester declared it. Absent: it may not call one. */
   model?: ModelDeclaration;
   /** The requester's own key at the model provider, sealed with a key only Router's enclave holds. It appears in no
-   *  view, error, log or notice, and is dropped once the request is decided, withdrawn or replaced. */
+   *  view, error, log or notice. It is dropped when a run is claimed, so one request pays for at most one run, and when
+   *  the request is decided, withdrawn or replaced. */
   modelKey?: SealedModelKey;
+  /** A keyed hash of that key (modelKeyVault.tag), kept after the key is dropped so that the same request sent again is
+   *  recognised whether or not the app has run. It cannot be turned back into the key. */
+  modelKeyTag?: string;
 }
 /** The record without the requester's model key, for a request that has been decided or withdrawn. */
 const dropKey = (r: Request): Request => { const { modelKey: _dropped, ...rest } = r; return rest; };
@@ -47,6 +51,7 @@ export class TraceRequestError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
 const missing = () => new TraceRequestError('Request or note not found.', 404);
+const NO_KEY = 'This request no longer holds the requester\'s key for the model provider: a request pays for at most one run. Decline it; they can ask again.';
 const identities = (actor: Actor) => [actor.pseudonym, ...(actor.user ? ['@' + actor.user.handle] : [])];
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 function checkedKey(key: unknown, purpose = 'Give the compressed public key of the agent that will read the trace.') {
@@ -187,10 +192,12 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     if (r.revision !== input.revision) throw new TraceRequestError('This request changed. Review it again.', 409);
   };
 
-  /** Whether a waiting request holds this same key (or, with no model, none). */
+  /** What a request's sealed key is bound to: its ID, its revision and its declaration. */
+  const keyBinding = (r: { id: string; revision: string; model?: ModelDeclaration }) => ({ requestId: r.id, revision: r.revision, modelHash: modelDeclarationHash(r.model!) });
+  /** Whether a waiting request was made with this same key (or, with no model, none). Answers the same before and after a run. */
   const sameKey = (r: Request, apiKey: unknown) => {
     if (!r.model) return apiKey === undefined || apiKey === null;
-    try { return modelKeys!.open(r.modelKey, r.id) === apiKey; } catch { return false; }
+    return usableModelKey(apiKey) && !!modelKeys && !!r.modelKeyTag && modelKeys.tag(apiKey, keyBinding(r)) === r.modelKeyTag;
   };
 
   async function request(actor: Actor, input: Record<string, unknown>) {
@@ -231,9 +238,10 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       }
       fresh = true;
       // A new request replaces any earlier one, and with it any key the earlier one held.
-      return { id, revision: randomUUID(), entryId: entry.id, owner, requester: actor.keyHash, requesterName: identities(actor).at(-1)!,
+      const revision = randomUUID(), binding = model ? keyBinding({ id, revision, model }) : null;
+      return { id, revision, entryId: entry.id, owner, requester: actor.keyHash, requesterName: identities(actor).at(-1)!,
         publicKey, created: now(), state: 'pending', app: { ...app, hash }, ...(viaRouter ? { answerVia: 'router' as const } : {}),
-        ...(model ? { model, modelKey: modelKeys!.seal(apiKey as string, id) } : {}) };
+        ...(model ? { model, modelKey: modelKeys!.seal(apiKey as string, binding!), modelKeyTag: modelKeys!.tag(apiKey as string, binding!) } : {}) };
     });
     if (fresh) try { onRequest?.({ id, owner, entryId: entry.id, requesterName: result.requesterName, purpose: app.purpose }); } catch { /* an alert never blocks the request */ }
     return view(result, 'requester');
@@ -250,7 +258,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     if (r.model) {
       const refused = modelRefusal(r.model.provider);
       if (refused) throw new TraceRequestError(refused, 503);
-      if (!r.modelKey) throw new TraceRequestError('This request no longer holds the requester\'s key for the model provider. Decline it; they can ask again.', 409);
+      if (!r.modelKey) throw new TraceRequestError(NO_KEY, 409);
     }
     const trace = await traceInfo(actor.user, r.entryId);
     if (!trace) throw new TraceRequestError('No trace is stored for this note.', 409);
@@ -289,19 +297,24 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
         path: traceFolder(r.entryId), actions: ['tinycloud.kv/get'], host, maxMs: RUN_GRANT_MS }, now());
     } catch { throw new TraceRequestError('The signed TinyCloud permission must give this run get-only access to this one trace for up to 15 minutes.'); }
     const wrap = checkedWrap(input.wrap);
-    // A run that may call a model takes the requester's key with it. Opened only here, and only to hand to the runner.
-    let modelKey: string | undefined;
-    if (run.description.v === 2) {
-      if (!modelKeys) throw new TraceRequestError('This server does not run apps that call a model yet.', 503);
-      try { modelKey = modelKeys.open(r.modelKey, r.id); }
-      catch { throw new TraceRequestError('This request no longer holds the requester\'s key for the model provider. Decline it; they can ask again.', 409); }
+    // A provider turned off since the run was prepared stops it here.
+    if (r.model) {
+      const refused = modelRefusal(r.model.provider);
+      if (refused) throw new TraceRequestError(refused, 503);
     }
     // The run's key is used once: claim the run before calling the runner, so a second approval cannot start it again.
+    // A run that may call a model takes the requester's key with it, and the same claim drops the key from the record,
+    // so one request pays for at most one run however many times it is prepared or approved.
+    let modelKey: string | undefined;
     await store.change(r.id, current => {
       if (!current || current.run?.id !== run.id) throw new TraceRequestError('This run was replaced. Review the request again.', 409);
       revised(current, input);
       if (current.state !== 'pending' && current.state !== 'answered') throw new TraceRequestError('This request has already been answered.', 409);
-      return { ...current, run: undefined, running: { runId: run.id, since: now() } };
+      if (run.description.v === 2) {
+        if (!current.model || !current.modelKey || !modelKeys) throw new TraceRequestError(NO_KEY, 409);
+        try { modelKey = modelKeys.open(current.modelKey, keyBinding(current)); } catch { throw new TraceRequestError(NO_KEY, 409); }
+      }
+      return { ...dropKey(current), run: undefined, running: { runId: run.id, since: now() } };
     });
     const clearRunning = (current?: Request): Request => {
       if (!current) throw missing();

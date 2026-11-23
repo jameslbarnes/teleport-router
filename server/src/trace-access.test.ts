@@ -56,32 +56,36 @@ async function grant(recipient: string, { folder = path, seconds = 600 } = {}) {
 }
 
 /** A model provider that has "verified". It records what it was sent, and its replies come from `reply`. */
-function fakeProvider(reply: (prompt: string, call: number) => string | Response = (prompt, call) => `reply ${call} to ${prompt.length} bytes`, onCall?: () => void) {
+function fakeProvider(reply: (prompt: string, call: number) => string | Response = (prompt, call) => `reply ${call} to ${prompt.length} bytes`, onCall?: () => void,
+  stall?: 'connect' | 'fetch' | 'confirm' | 'close') {
   const sent: { url: string; authorization: string; body: any }[] = [];
   let connects = 0;
+  const never = <T,>() => new Promise<T>(() => {});
   const connect: ModelConnector = async () => {
     connects++;
+    if (stall === 'connect') return never();
     return { baseURL: 'https://model.example/v1', release: 'ee'.repeat(32), verdict: 'VERIFIED (simulated)',
       fetch: async (url, init) => {
         const body = JSON.parse(String(init.body));
         sent.push({ url, authorization: (init.headers as Record<string, string>).authorization, body });
         onCall?.();
+        if (stall === 'fetch') return never();
         const r = reply(body.messages[0].content, sent.length);
         return r instanceof Response ? r : new Response(JSON.stringify({ choices: [{ message: { content: r } }] }));
       },
-      confirm: async () => `receipt-${sent.length}`, close: async () => {} };
+      confirm: async () => stall === 'confirm' ? never() : `receipt-${sent.length}`, close: async () => stall === 'close' ? never() : undefined };
   };
   return { connect, sent, connects: () => connects };
 }
 
-function fixture({ withCustody = true, models = ['redpill'] as AttestedProvider[], withVault = true, provider = fakeProvider(), connectors = ['redpill', 'tinfoil'] as AttestedProvider[], runMs }:
-  { withCustody?: boolean; models?: AttestedProvider[]; withVault?: boolean; provider?: ReturnType<typeof fakeProvider>; connectors?: AttestedProvider[]; runMs?: number } = {}) {
+function fixture({ withCustody = true, models = ['redpill'] as AttestedProvider[], withVault = true, provider = fakeProvider(), connectors = ['redpill', 'tinfoil'] as AttestedProvider[], runMs, closeMs, settleMs }:
+  { withCustody?: boolean; models?: AttestedProvider[]; withVault?: boolean; provider?: ReturnType<typeof fakeProvider>; connectors?: AttestedProvider[]; runMs?: number; closeMs?: number; settleMs?: number } = {}) {
   let time = clock, allowed = true, trace = storedTrace();
   const notices: any[] = [];
   const entry = {id:'a-note',handle:'author',pseudonym:author.pseudonym} as JournalEntry;
   const store = traceRequestStore();
   // The storage node's part: it serves the trace only to the key the grant names.
-  const core = traceRunner({ now: () => time, execute: runAppStep, runMs, connectorFor: p => connectors.includes(p) ? provider.connect : null, fetchTrace: async ({ delegation, privateKey }) => {
+  const core = traceRunner({ now: () => time, execute: runAppStep, runMs, closeMs, settleMs, connectorFor: p => connectors.includes(p) ? provider.connect : null, fetchTrace: async ({ delegation, privateKey }) => {
     if (deserializeDelegation(delegation).delegateDID.toLowerCase() !== readerDid(new Wallet(privateKey).signingKey.publicKey).toLowerCase()) throw Error('refused');
     return { record: trace.record, ciphertext: trace.ciphertext };
   } });
@@ -99,7 +103,7 @@ function fixture({ withCustody = true, models = ['redpill'] as AttestedProvider[
   const askViaRouter = (app: any = APP) => call(agent, { action: 'request', entry_id: entry.id, app });
   const askModel = ({ app = MODEL_APP, model = DECL as unknown, key = MODEL_KEY as unknown } = {}) =>
     call(agent, { action: 'request', entry_id: entry.id, app, answer_public_key: requesterKey.signingKey.compressedPublicKey, model, model_key: key });
-  return { call, ask, askViaRouter, askModel, custody, store, core, notices, provider, runnerCalls, restrict: () => { allowed = false; }, advance: (ms: number) => { time += ms; },
+  return { call, ask, askViaRouter, askModel, custody, store, core, notices, provider, runnerCalls, models, restrict: () => { allowed = false; }, advance: (ms: number) => { time += ms; },
     whileRunning: (fn: () => Promise<unknown>) => { duringRun = fn; },
     replaceTrace: (text: string) => { trace = storedTrace(text); }, trace: () => trace };
 }
@@ -460,7 +464,6 @@ describe('trace apps that ask a model', () => {
 
     const withheld = fixture(), c = await withheld.askModel();
     await ownerRuns(withheld, (await withheld.call(author, { action: 'inbox' })).requests[0]);
-    expect((await withheld.store.get(c.request_id))!.modelKey).toBeDefined();
     await withheld.call(author, { action: 'withhold', request_id: c.request_id, revision: c.revision });
     expect(await withheld.store.get(c.request_id)).not.toHaveProperty('modelKey');
     // Asking again without a model replaces the request, and holds no key.
@@ -536,5 +539,73 @@ describe('trace apps that ask a model', () => {
     await expect(f.call(author, { action: 'prepare', request_id: r.request_id, revision: r.revision, nonce: 'aa'.repeat(32) }))
       .rejects.toThrow('This runner cannot reach the declared model provider, so the run was not prepared.');
     expect(f.runnerCalls.filter(c => c.run)).toHaveLength(0);
+  });
+});
+
+describe('a requester\'s key pays for one run, which ends by its deadline', () => {
+  it('drops the key when a run is claimed, so a second prepare or approve cannot call the model', async () => {
+    const f = fixture(), r = await f.askModel();
+    let shown = (await f.call(author, { action: 'inbox' })).requests[0];
+    const first = await ownerRuns(f, shown);
+    expect(first.result).toMatchObject({ ok: true, model: { calls: 2 } });
+    expect(await f.store.get(r.request_id)).not.toHaveProperty('modelKey');
+    shown = (await f.call(author, { action: 'inbox' })).requests[0];
+    await expect(ownerRuns(f, shown)).rejects.toThrow('a request pays for at most one run. Decline it; they can ask again.');
+    expect(f.provider.sent).toHaveLength(2);
+    // The requester still gets the same answer to the same request after the run.
+    expect((await f.askModel()).revision).toBe(r.revision);
+  });
+
+  it('drops the key when the run is claimed even if the run then fails, and gives it to only one of two approvals', async () => {
+    const f = fixture(), r = await f.askModel();
+    const nonce = randomBytes(32).toString('hex');
+    const p = await f.call(author, { action: 'prepare', request_id: r.request_id, revision: r.revision, nonce });
+    const wrap = await rewrapTraceKey(f.trace().meta, ownerDid, 'a-note', owner.privateKey, p.public_key);
+    const delegation = await grant(readerDid(p.public_key));
+    const approve = { action: 'approve', request_id: r.request_id, revision: r.revision, run_id: p.description.run_id, delegation, wrap };
+    f.replaceTrace(TRACE + '\nchanged');
+    const both = await Promise.allSettled([f.call(author, approve), f.call(author, approve)]);
+    expect(both.every(x => x.status === 'rejected')).toBe(true);
+    expect(f.runnerCalls.filter(c => c.run)).toHaveLength(1);
+    expect(await f.store.get(r.request_id)).not.toHaveProperty('modelKey');
+    await expect(f.call(author, { action: 'prepare', request_id: r.request_id, revision: r.revision, nonce })).rejects.toThrow('at most one run');
+    expect(f.provider.sent).toHaveLength(0);
+  });
+
+  it('refuses to approve a prepared run once its provider has been turned off', async () => {
+    const f = fixture(), r = await f.askModel();
+    const nonce = randomBytes(32).toString('hex');
+    const p = await f.call(author, { action: 'prepare', request_id: r.request_id, revision: r.revision, nonce });
+    f.models.splice(0);
+    const wrap = await rewrapTraceKey(f.trace().meta, ownerDid, 'a-note', owner.privateKey, p.public_key);
+    await expect(f.call(author, { action: 'approve', request_id: r.request_id, revision: r.revision, run_id: p.description.run_id, delegation: await grant(readerDid(p.public_key)), wrap }))
+      .rejects.toThrow('does not run apps that call a model');
+    expect(f.runnerCalls.filter(c => c.run)).toHaveLength(0);
+    expect((await f.store.get(r.request_id))!.modelKey).toBeDefined();
+  });
+
+  for (const stall of ['connect', 'fetch', 'confirm', 'close'] as const) {
+    it(`settles by the deadline when the provider never answers at ${stall}, and frees the runner's slots`, async () => {
+      const f = fixture({ runMs: 400, closeMs: 100, settleMs: 300, provider: fakeProvider(undefined, undefined, stall) });
+      await f.askModel();
+      const started = Date.now();
+      const { prepared, result } = await ownerRuns(f, (await f.call(author, { action: 'inbox' })).requests[0]);
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.ok).toBe(stall === 'close');
+      if (!result.ok) expect(result.error).toMatch(/^(The run ran out of time \(0\.4 seconds\)\.|RedPill could not be verified, so nothing was sent to it\.|The call to RedPill did not complete\.|RedPill's signed receipt for the call did not verify, so its reply was not used\.)$/);
+      // Both of the runner's slots are free again.
+      for (const id of ['again-1', 'again-2']) f.core.prepare({ description: { ...prepared.description, run_id: id }, code: MODEL_APP.code, model: DECL });
+      expect(() => f.core.prepare({ description: { ...prepared.description, run_id: 'again-3' }, code: MODEL_APP.code, model: DECL })).toThrow('busy');
+    });
+  }
+
+  it('stops a run whose provider ignores every bound, a little after the deadline, and seals what it had called', async () => {
+    // A close that takes longer than the run has: only the runner's own stop ends it.
+    const f = fixture({ runMs: 300, closeMs: 60_000, settleMs: 200, provider: fakeProvider(undefined, undefined, 'close') });
+    await f.askModel();
+    const started = Date.now();
+    const { result } = await ownerRuns(f, (await f.call(author, { action: 'inbox' })).requests[0]);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(result).toMatchObject({ ok: false, error: 'The run ran out of time (0.3 seconds).', model: { calls: 2 } });
   });
 });
