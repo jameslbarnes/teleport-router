@@ -68,6 +68,19 @@ test('Router\'s runs socket takes only well-formed prepare and run requests', ()
     assert.notEqual(runsRequestCheck(path, body), null, `${path} ${JSON.stringify(body)?.slice(0, 60)}`);
 });
 
+test('Router may send a model declaration with a prepare and the requester\'s model key with a run', () => {
+  const nonce = randomBytes(32).toString('hex');
+  const prepare = { nonce, description: { run_id: 'r1' }, code: 'x' };
+  const run = { run_id: 'r1', delegation: 'd', wrap: {}, host: 'h' };
+  const model = { provider: 'redpill', model: 'z-ai/glm-5.3', calls: 2, prompt_bytes: 2000, reply_tokens: 100 };
+  for (const body of [{ ...prepare, model }, { ...prepare, model: null }, { ...prepare, model: {} }]) assert.equal(runsRequestCheck('/prepare', body), null);
+  for (const body of [{ ...run, model_key: 'sk-0123456789' }, { ...run, model_key: 'x'.repeat(400) }]) assert.equal(runsRequestCheck('/run', body), null);
+  for (const m of ['redpill', [model], 1, { ...model, model: 'x'.repeat(1100) }]) assert.equal(runsRequestCheck('/prepare', { ...prepare, model: m }), 'invalid model declaration');
+  for (const k of [null, 12, ['k'], 'x'.repeat(401)]) assert.equal(runsRequestCheck('/run', { ...run, model_key: k }), 'invalid model key');
+  // The reply names the field, never the key.
+  assert.ok(!String(runsRequestCheck('/run', { ...run, model_key: 'sk-' + 'z'.repeat(500) })).includes('zzz'));
+});
+
 // A synthetic run bundle that verifyRunBundle should accept, then variations it must refuse.
 function syntheticRunBundle({ nonce, runHash = RUN, publicKey = KEY }) {
   const template = 'services:\n  router:\n    image: r:${GIT_SHA}@${IMAGE_DIGEST}\n';

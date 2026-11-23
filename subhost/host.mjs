@@ -99,18 +99,24 @@ export function runBindingPreimage({ appId, name, codeHash: hash, runHash, publi
 const RUN_ID_RE = /^[\w-]{1,160}$/;
 const SANDBOX_ID_RE = /^[0-9a-f]{32}$/;
 
-/** Checks what Router sends on its runs socket. The runner checks the run description itself. */
+/** Checks what Router sends on its runs socket. The runner checks the run description and the model declaration itself.
+ *  A model declaration is absent, null or a small plain object; the requester's model key is absent or a short string. */
 export function runsRequestCheck(path, body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body is not an object';
   if (path === '/prepare') {
     if (typeof body.nonce !== 'string' || !HEX64_RE.test(body.nonce)) return 'nonce must be 64 lowercase hex characters';
     if (!body.description || typeof body.description !== 'object' || Array.isArray(body.description) || !RUN_ID_RE.test(String(body.description.run_id))) return 'invalid run description';
     if (typeof body.code !== 'string' || !body.code || body.code.length > 65536) return 'invalid code';
+    if (body.model !== undefined && body.model !== null
+      && (typeof body.model !== 'object' || Array.isArray(body.model) || Object.getPrototypeOf(body.model) !== Object.prototype || JSON.stringify(body.model).length > 1024))
+      return 'invalid model declaration';
     return null;
   }
   if (path === '/run') {
     if (typeof body.run_id !== 'string' || !RUN_ID_RE.test(body.run_id)) return 'invalid run id';
     if (typeof body.delegation !== 'string' || body.delegation.length > 90000 || !body.wrap || typeof body.wrap !== 'object' || typeof body.host !== 'string') return 'invalid grant';
+    // Never echoed: the reply names the field, not its value.
+    if (body.model_key !== undefined && (typeof body.model_key !== 'string' || body.model_key.length > 400)) return 'invalid model key';
     return null;
   }
   return 'not found';
@@ -526,7 +532,8 @@ export async function main(env = process.env) {
         }
         if (!prepareLimit()) { sendJson(res, 429, { error: 'too many requests' }); return; }
         const runHash = sha256Hex(canonicalJson(body.description));
-        const r = await unixRequest(runnerSocket, 'POST', '/prepare', { description: body.description, code: body.code }, { timeoutMs: 30_000, maxBytes: 64 * 1024 });
+        const forward = { description: body.description, code: body.code, ...(body.model !== undefined && body.model !== null ? { model: body.model } : {}) };
+        const r = await unixRequest(runnerSocket, 'POST', '/prepare', forward, { timeoutMs: 30_000, maxBytes: 64 * 1024 });
         const prepared = JSON.parse(r.text);
         if (r.status !== 200) { sendJson(res, r.status === 400 ? 400 : 502, { error: typeof prepared?.error === 'string' ? prepared.error.slice(0, 300) : 'The runner refused.' }); return; }
         if (prepared.run_id !== body.description.run_id || prepared.run_hash !== runHash || typeof prepared.public_key !== 'string' || !PUBLIC_KEY_RE.test(prepared.public_key)) {
