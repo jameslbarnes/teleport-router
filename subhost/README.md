@@ -102,7 +102,7 @@ not remove is retried. Owners check runs with
 Phala's verifier before granting anything.
 
 `runner.base.json` and `sandbox.base.json` pin the Router image built from the
-merge that added trace apps (PR 81). A spec whose image says PENDING is left out
+merge that added model calls for trace apps (PR 86). A spec whose image says PENDING is left out
 of the compose file and runs stay off. To move the runner to a newer Router image,
 pin its digest in both files and run `node subhost/embed.mjs`; owners' tools then
 accept the new runner only from a checkout that has the same pins. Router uses the
