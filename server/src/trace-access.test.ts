@@ -455,17 +455,24 @@ describe('trace apps that ask a model', () => {
   it("drops the requester's key when the request is declined, withheld or withdrawn, and when a new request replaces it", async () => {
     const declined = fixture(), a = await declined.askModel();
     expect((await declined.store.get(a.request_id))!.modelKey).toBeDefined();
+    expect((await declined.store.get(a.request_id))!.modelKeyTag).toBeDefined();
     await declined.call(author, { action: 'decline', request_id: a.request_id, revision: a.revision });
     expect(await declined.store.get(a.request_id)).not.toHaveProperty('modelKey');
+    expect(await declined.store.get(a.request_id)).not.toHaveProperty('modelKeyTag');
 
     const withdrawn = fixture(), b = await withdrawn.askModel();
     await withdrawn.call(agent, { action: 'withdraw', request_id: b.request_id });
     expect(await withdrawn.store.get(b.request_id)).not.toHaveProperty('modelKey');
+    expect(await withdrawn.store.get(b.request_id)).not.toHaveProperty('modelKeyTag');
 
     const withheld = fixture(), c = await withheld.askModel();
     await ownerRuns(withheld, (await withheld.call(author, { action: 'inbox' })).requests[0]);
+    // After the run the key is gone but its keyed hash stays, so asking again looks the same; a decision drops that too.
+    expect(await withheld.store.get(c.request_id)).not.toHaveProperty('modelKey');
+    expect((await withheld.store.get(c.request_id))!.modelKeyTag).toBeDefined();
     await withheld.call(author, { action: 'withhold', request_id: c.request_id, revision: c.revision });
     expect(await withheld.store.get(c.request_id)).not.toHaveProperty('modelKey');
+    expect(await withheld.store.get(c.request_id)).not.toHaveProperty('modelKeyTag');
     // Asking again without a model replaces the request, and holds no key.
     await withheld.ask();
     expect(await withheld.store.get(c.request_id)).not.toHaveProperty('modelKey');

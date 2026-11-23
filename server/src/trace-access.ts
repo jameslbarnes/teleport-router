@@ -46,6 +46,8 @@ interface Request {
 }
 /** The record without the requester's model key, for a request that has been decided or withdrawn. */
 const dropKey = (r: Request): Request => { const { modelKey: _dropped, ...rest } = r; return rest; };
+/** At a decision or withdrawal nothing about the key is kept, not even its keyed hash. */
+const dropKeyAndTag = (r: Request): Request => { const { modelKey: _key, modelKeyTag: _tag, ...rest } = r; return rest; };
 const sameModel = (a?: ModelDeclaration, b?: ModelDeclaration | null) => (a ? modelDeclarationHash(a) : null) === (b ? modelDeclarationHash(b) : null);
 export class TraceRequestError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -344,7 +346,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     return view(await store.change(r.id, current => {
       if (!current || current.state !== 'answered' || !current.answer || current.answer.runId !== input.run_id) throw new TraceRequestError('This request changed. Review it again.', 409);
       revised(current, input);
-      return { ...dropKey(current), state: 'released', released: { runId: current.answer.runId, description: current.answer.description, sealed, at: now() } };
+      return { ...dropKeyAndTag(current), state: 'released', released: { runId: current.answer.runId, description: current.answer.description, sealed, at: now() } };
     }), 'owner');
   }
 
@@ -369,7 +371,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       return view(await store.change(r.id, current => {
         if (!current) throw missing();
         if (current.state !== 'pending' && current.state !== 'answered') return current;
-        return { ...dropKey(current), state: 'withdrawn', run: undefined, running: undefined, answer: undefined };
+        return { ...dropKeyAndTag(current), state: 'withdrawn', run: undefined, running: undefined, answer: undefined };
       }), 'requester');
     }
     if (!isOwner(r, actor)) throw missing();
@@ -384,7 +386,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       return view(await store.change(r.id, current => {
         if (!current || current.state !== 'answered') throw new TraceRequestError('There is no answer waiting to withhold.', 409);
         revised(current, input);
-        return { ...dropKey(current), state: 'withheld' };
+        return { ...dropKeyAndTag(current), state: 'withheld' };
       }), 'owner');
     }
     if (input.action !== 'decline') throw new TraceRequestError('Unknown trace request action.');
@@ -392,7 +394,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       if (!current || current.revision !== input.revision) throw new TraceRequestError('This request changed. Review it again.', 409);
       if (current.state === 'declined') return current;
       if (current.state !== 'pending') throw new TraceRequestError('This request has already been answered.', 409);
-      return { ...dropKey(current), state: 'declined', run: undefined, running: undefined };
+      return { ...dropKeyAndTag(current), state: 'declined', run: undefined, running: undefined };
     }), 'owner');
   };
 }
