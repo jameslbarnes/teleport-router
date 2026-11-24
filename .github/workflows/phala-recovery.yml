@@ -1,19 +1,17 @@
 name: Phala Recovery
-
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: Read-only latency diagnostics
+        description: Read-only check of authenticated log availability
         required: true
         type: choice
         default: status
         options: [status]
-
 jobs:
   phala-recovery:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 4
     permissions:
       contents: read
     env:
@@ -22,44 +20,32 @@ jobs:
     steps:
       - name: Install pinned Phala CLI
         run: npm install -g phala@1.1.19
-      - name: Sample resource counters
+      - name: Read authenticated log links and report counts only
         shell: bash
         run: |
-          for sample in 1 2 3; do
-            date -u +%FT%TZ
-            timeout 30s phala api "/cvms/${PHALA_APP_ID}/stats" -q '{is_online,error,sysinfo: (.sysinfo | {uptime,num_cpus,total_memory,available_memory,used_memory,total_swap,used_swap,free_swap,loadavg_one,loadavg_five,loadavg_fifteen})}' || true
-            if [ "$sample" != 3 ]; then sleep 10; fi
-          done
-      - name: Count container errors without printing logs
-        shell: bash
-        run: |
-          for container in dstack-router-1 dstack-discord-bot-1 dstack-shape-matrix-bridge-1; do
-            output="$(mktemp)"
-            errors="$(mktemp)"
-            set +e
-            timeout 30s phala logs "$container" --cvm-id "$PHALA_APP_ID" -n 400 -t >"$output" 2>"$errors"
-            code=$?
-            set -e
-            node --input-type=module - "$container" "$output" "$errors" "$code" <<'NODE'
-          import { readFileSync } from 'node:fs';
-          const [container,path,errorPath,exit] = process.argv.slice(2);
-          const raw = readFileSync(path,'utf8');
-          const stderr = readFileSync(errorPath,'utf8');
-          const patterns = ['TinyCloud','timeout','timed out','ECONNRESET','ETIMEDOUT','EAI_AGAIN','ENOTFOUND','429','502','503','504','heap','out of memory','decrypt','delegation','grant','Error','error'];
-          const counts = Object.fromEntries(patterns.map(pattern => [pattern,raw.split(pattern).length-1]));
-          const times = raw.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g) || [];
-          console.log(JSON.stringify({container,exit_code:Number(exit),bytes:Buffer.byteLength(raw),lines:raw.split('\n').length,stderr_bytes:Buffer.byteLength(stderr),counts,first_timestamp:times[0],last_timestamp:times.at(-1)}));
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          let data;
+          try {data=JSON.parse(execFileSync('phala',['api',`/cvms/${process.env.PHALA_APP_ID}/composition`],{encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024}));}
+          catch {console.log(JSON.stringify({composition_available:false}));process.exit(1);}
+          const names=['dstack-router-1','dstack-discord-bot-1','dstack-shape-matrix-bridge-1'];
+          const patterns=['TinyCloud','timeout','timed out','ECONNRESET','ETIMEDOUT','EAI_AGAIN','ENOTFOUND','429','502','503','504','heap','out of memory','decrypt','delegation','grant','Error','error'];
+          for(const name of names){
+            const container=data.containers?.find(c=>c.names?.some(n=>n.replace(/^\//,'')===name));
+            if(!container?.log_endpoint){console.log(JSON.stringify({container:name,authenticated_log_link:false}));continue;}
+            try {
+              const url=new URL(container.log_endpoint);
+              if(url.protocol!=='https:'||!/(^|\.)phala\.(network|com|cloud)$/.test(url.hostname)){
+                console.log(JSON.stringify({container:name,authenticated_log_link:true,accepted_origin:false}));continue;
+              }
+              url.searchParams.set('tail','400');url.searchParams.set('timestamps','true');
+              const response=await fetch(url,{signal:AbortSignal.timeout(25000),redirect:'error'});
+              let raw='';
+              for await(const chunk of response.body){raw+=Buffer.from(chunk).toString('utf8');if(Buffer.byteLength(raw)>1024*1024)throw Error('bounded_read_limit');}
+              const counts=Object.fromEntries(patterns.map(pattern=>[pattern,raw.split(pattern).length-1]));
+              const errorFlags=Object.fromEntries(['forbidden','disabled','public_logs','unauthorized','not found','expired'].map(pattern=>[pattern,raw.toLowerCase().includes(pattern)]));
+              const times=raw.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g)||[];
+              console.log(JSON.stringify({container:name,authenticated_log_link:true,status:response.status,bytes:Buffer.byteLength(raw),counts,error_flags:errorFlags,first_timestamp:times[0],last_timestamp:times.at(-1)}));
+            } catch(error){console.log(JSON.stringify({container:name,authenticated_log_link:true,error_type:error.name}));}
+          }
           NODE
-            rm -f "$output" "$errors"
-          done
-      - name: Compare endpoint timings from another network
-        shell: bash
-        run: |
-          for sample in 1 2; do
-            for path in /health /favicon.svg '/api/entries?limit=1'; do
-              printf 'router sample=%s path=%s ' "$sample" "$path"
-              curl -sS --connect-timeout 5 --max-time 20 -o /dev/null -w 'status=%{http_code} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} first_byte=%{time_starttransfer} total=%{time_total}\n' "https://router.teleport.computer$path" || true
-            done
-            printf 'direct sample=%s ' "$sample"
-            curl -sS --connect-timeout 5 --max-time 20 -o /dev/null -w 'status=%{http_code} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} first_byte=%{time_starttransfer} total=%{time_total}\n' "https://${PHALA_APP_ID}-3000.dstack-pha1-prod9.phala.network/health" || true
-          done
