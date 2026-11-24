@@ -1873,6 +1873,10 @@ async function checkAndGenerateDailySummary(entry: JournalEntry): Promise<void> 
   // Only check once per day
   if (lastDailySummaryDate === yesterday) return;
 
+  // After a restart, accounts load their own storage one by one. A summary written now would miss the ones still
+  // loading, and the day would be marked done. The next published note checks again.
+  if (authorLayer?.loading()) return;
+
   // Check if yesterday's summary already exists
   const existingSummary = await storage.getDailySummary(yesterday);
   if (existingSummary) {
@@ -1882,6 +1886,8 @@ async function checkAndGenerateDailySummary(entry: JournalEntry): Promise<void> 
 
   // Get yesterday's entries
   const entries = (await storage.getEntriesForDate(yesterday)).filter(isPublicNotebookEntry);
+  // The reads above may themselves have started a load, and returned before it finished.
+  if (authorLayer?.loading()) return;
   if (entries.length === 0) {
     lastDailySummaryDate = yesterday;
     return;
@@ -10328,6 +10334,18 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
     // ─────────────────────────────────────────────────────────────
     // Health check
     // ─────────────────────────────────────────────────────────────
+    // Moderators see which accounts' own storage is being served, and why any is not. Handles and reasons, no records.
+    if (req.method === 'GET' && url.pathname === '/api/author-storage') {
+      res.setHeader('Cache-Control', 'no-store');
+      const key = req.headers.authorization?.replace(/^Bearer /i, '');
+      const user = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
+      if (!user?.handle || !MODERATOR_HANDLES.has(user.handle)) {
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Moderator identity required.' })); return;
+      }
+      res.writeHead(200); res.end(JSON.stringify({ authors: authorLayer ? authorLayer.health() : [] }));
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok', service: 'teleport-router' }));

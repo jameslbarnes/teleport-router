@@ -5,7 +5,7 @@
 import { tokenize, encodePageCursor, generateEntryId, type Storage, type User,
   type JournalEntry, type Conversation, type Summary, type DailySummary, type OwnRecords } from './storage.js';
 import { moveAuthorFolder } from './author-move.js';
-import type { GroupStore } from './group-store.js';
+import { GroupStoreRevokedError, type GroupStore } from './group-store.js';
 import { isPublicNotebookEntry } from './public-views.js';
 import { recordCodec, canonical, RECOVERY_KEY, ownerPublicKey } from './author-records.js';
 export { recordCodec } from './author-records.js';
@@ -30,7 +30,22 @@ type Kind = 'posts' | 'conversations' | 'summaries';
 type BindingUser = User & { tinycloud: AuthorBinding };
 type AuthorState = { user: BindingUser; expires: number; available: boolean; activationPending?: boolean; retryAt?: number; checking?: Promise<void>;
   /** Records were evicted without the account's lock: only a full reload may make it available again. */
-  hidden?: boolean };
+  hidden?: boolean;
+  /** When the check now running began, so a read knows how long it has already been waited for; and whether
+   * that check reads every record or only lists them. */
+  checkingSince?: number; reloading?: boolean;
+  /** Failed checks and loads in a row, and why the last one failed. Cleared by a load that succeeds. */
+  failures?: number; lastError?: string; lastErrorAt?: number;
+  /** No check ahead of time before this, after one failed while the lease still stood; how many have failed in a
+   * row, and why the last did. */
+  renewRetryAt?: number; renewFailures?: number; lastRenewError?: string;
+  /** When this account's records were last listed in its storage, and how long that listing check took. */
+  listedAt?: number; listMs?: number;
+  loadedAt?: number; loadMs?: number };
+/** What a moderator sees about one account's storage: whether it is served, and why not. Never record contents. */
+export interface AuthorStorageHealth { handle: string; available: boolean; loading: boolean; records: number;
+  failures: number; lastError?: string; lastErrorAt?: number; retryAt?: number; loadedAt?: number; loadMs?: number;
+  listedAt?: number; listMs?: number; renewFailures: number; lastRenewError?: string }
 const order = (a: {timestamp: number; id: string}, b: {timestamp: number; id: string}) => b.timestamp - a.timestamp || b.id.localeCompare(a.id);
 const validId = (id: unknown): id is string => typeof id === 'string' && /^[\w-]{1,160}$/.test(id);
 
@@ -71,17 +86,86 @@ function readsWithin(store: GroupStore, ms: number): GroupStore {
   return limited;
 }
 
+const pause = (ms: number) => new Promise<void>(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
+
+/** The step a check or load failed in, kept beside the error and not in it, so errors reach their callers unchanged. */
+const failedDuring = new WeakMap<object, string>();
+function during(step: string, err: unknown) {
+  if (err && typeof err === 'object' && !failedDuring.has(err)) failedDuring.set(err, step);
+  return err;
+}
+/** What this file and the record codec say themselves when they refuse a record. */
+const OWN_REASONS = new Set(['Invalid author record path', 'Author identity mismatch', 'Author record ID collision',
+  'Owner recovery is missing', 'Author storage keys are unavailable', 'Author record integrity check failed',
+  'Invalid encrypted record encoding', 'Invalid encrypted record size', 'Invalid author record',
+  'Recovery public key does not match the TinyCloud owner', 'Owner recovery self-check failed',
+  'Owner recovery context mismatch', 'Expected an encrypted author record',
+  'Unsupported state or unable to authenticate data']);
+/** Why a check or load failed, for the log and for moderators. An error from storage or from parsing a record can
+ * quote what it was reading, so its text is never repeated: only the step, this code's own fixed messages, the kind
+ * of error, and a status or error code. */
+function reason(err: unknown): string {
+  const step = (err && typeof err === 'object' && failedDuring.get(err)) || 'the check';
+  if (err instanceof LinkTimeoutError) return `storage did not answer ${step} in time`;
+  if (err instanceof GroupStoreRevokedError) return `${step}: the grant was revoked or has expired`;
+  const message = err instanceof Error ? err.message : '';
+  if (OWN_REASONS.has(message)) return `${step}: ${message}`;
+  // Every part below comes from a fixed list. An error's own name, code and text are compared, never copied.
+  const parts = [err instanceof SyntaxError ? 'SyntaxError' : err instanceof TypeError ? 'TypeError'
+    : err instanceof RangeError ? 'RangeError' : err instanceof Error ? 'Error' : 'not an Error'];
+  if (step !== 'checking a record' && step !== 'checking owner recovery') {
+    const codes = [(err as { code?: unknown } | null)?.code, (err as { cause?: { code?: unknown } } | null)?.cause?.code,
+      message.match(/^TinyCloud \w+ failed: (\w+)/)?.[1]].filter((c): c is string => typeof c === 'string' && c !== 'error');
+    const code = codes.find(c => KNOWN_CODES.has(c));
+    if (code) parts.push(code); else if (codes.length) parts.push('another code');
+    const status = message.match(/\b[45]\d\d\b/)?.[0];
+    if (status && KNOWN_STATUSES.has(status)) parts.push(`status ${status}`);
+  }
+  return `${step} failed (${parts.join(', ')})`;
+}
+const KNOWN_STATUSES = new Set(['400', '401', '403', '404', '408', '409', '412', '413', '429', '500', '502', '503', '504']);
+/** Network error codes from Node, and the storage library's own. */
+const KNOWN_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'ABORT_ERR',
+  'INVALID_INPUT', 'STORAGE_ERROR', 'RESPONSE_BINDING_MISMATCH', 'VAULT_LOCKED', 'REPLICA_GATED', 'VALIDATION_ERROR',
+  'INVALID_NETWORK_ID', 'INVALID_ENVELOPE', 'KEY_NOT_FOUND', 'INVALID_RESPONSE', 'TRANSPORT_ERROR', 'DECRYPTION_FAILED',
+  'OUTCOME_UNKNOWN', 'NETWORK_NOT_FOUND', 'INVALID_ETAG', 'PUBLIC_KEY_NOT_FOUND', 'RESPONSE_SIGNATURE_INVALID', 'ABORTED',
+  'CONSENT_EXPIRED', 'SESSION_SCOPE_MISMATCH', 'NETWORK_NOT_ACTIVE', 'TIMEOUT', 'STATUS_TIMEOUT', 'DECRYPT_DENIED',
+  'REPLICA_CLOSED', 'KV_CONFLICT']);
+
+/** Stops handing out items once one has failed: the caller fails either way, and the rest would be wasted reads. */
 async function parallel<T>(items: T[], fn: (item: T) => Promise<void>, concurrency = 8) {
-  let next = 0;
+  let next = 0, stopped = false;
   const results = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (next < items.length) await fn(items[next++]);
+    while (next < items.length && !stopped) {
+      try { await fn(items[next++]); } catch (err) { stopped = true; throw err; }
+    }
   }));
   const failure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
   if (failure) throw failure.reason;
 }
 
+export interface AuthorStorageOptions {
+  /** How long an account's records are served after its grant was last checked. */
+  leaseMs?: number;
+  now?: () => number;
+  /** Longest a read waits for an account that is being loaded. Nothing of that account is served meanwhile. */
+  readerWaitMs?: number;
+  /** Longest a read waits for an account whose lease ran out to be checked again, before it stops serving that account. */
+  leaseWaitMs?: number;
+  /** Longest wait for one storage read or listing during a check or a load. */
+  readTimeoutMs?: number;
+  /** Tries for one storage read or listing during a check or a load, and the pause before the second. */
+  readAttempts?: number; readRetryMs?: number;
+  /** Wait after a first failed check or load. It doubles with each further failure, up to `maxRetryMs`. */
+  retryMs?: number; maxRetryMs?: number;
+  log?: (message: string) => void;
+}
+
 export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver | null,
-  codec: ReturnType<typeof recordCodec> | null, { leaseMs = 60000, now = Date.now } = {}) {
+  codec: ReturnType<typeof recordCodec> | null, { leaseMs = 60000, now = Date.now, readerWaitMs = 2000, leaseWaitMs = 15000,
+    readTimeoutMs = 30000, readAttempts = 3, readRetryMs = 250, retryMs = 10000, maxRetryMs = 300000,
+    log = (message: string) => console.error(message) }: AuthorStorageOptions = {}) {
   const extra = base as Storage & Record<string, any>;
   const entries = new Map<string, JournalEntry>();
   const conversations = new Map<string, Conversation>();
@@ -109,24 +193,54 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     for (const map of [entries, conversations, summaries]) for (const [id, value] of map) if (belongs(value, user)) map.delete(id);
     for (const [date, summary] of daily) if (summary.pseudonyms.some(p => belongs({pseudonym:p},user))) daily.delete(date);
   }
+  /** One storage read or listing for a check or a load: it never waits longer than `readTimeoutMs`, and a failure is
+   * tried again before the account is given up on. Loading an account takes one read per record, so a load that
+   * failed whenever any single read did would stop succeeding once the account grew large enough. */
+  async function attempt<T>(what: string, read: () => Promise<T>): Promise<T> {
+    for (let tries = 1; ; tries++) {
+      try { return await within(read(), readTimeoutMs, what); }
+      // Storage saying the grant is revoked is an answer, not a failed read: it is not asked again.
+      catch (err) { if (tries >= readAttempts || err instanceof GroupStoreRevokedError) throw during(what, err); await pause(readRetryMs * tries); }
+    }
+  }
+  /** After a failed check or load: stop serving the account, say why, and wait longer before each further try.
+   * Without the wait, every read and every waiting post would start another full load of an account that cannot load. */
+  function failed(state: AuthorState, err: unknown) {
+    state.available = false;
+    state.expires = 0;
+    state.failures = (state.failures || 0) + 1;
+    const wait = Math.min(maxRetryMs, Math.min(retryMs, leaseMs) * 2 ** Math.min(state.failures - 1, 10));
+    state.retryAt = now() + wait;
+    state.lastError = reason(err);
+    state.lastErrorAt = now();
+    evict(state.user);
+    log(`[AuthorStore] @${state.user.handle} is not being served: try ${state.failures} failed (${state.lastError}); next try in ${Math.round(wait / 1000)} s`);
+  }
+  /** What a waiting post is told. The storage error itself is not passed on: it can quote what it was reading. */
+  const unreadable = (state: AuthorState) =>
+    new Error(`@${state.user.handle}'s storage could not be read (${state.lastError || 'unknown'}). The post stays waiting and is tried again.`);
+  /** Stop serving an account without its lock, as a failed check would. Only a full reload makes it available again. */
+  function hide(state: AuthorState) { state.available = false; state.expires = 0; state.hidden = true; evict(state.user); }
   async function readAuthor(state: AuthorState, opened?: GroupStore) {
     if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     const binding = state.user.tinycloud;
-    const store = opened || await resolveStore(binding);
+    const store = opened || await attempt('opening the grant', () => resolveStore(binding));
     const loaded: { kind: Kind; value: RecordValue }[] = [];
     for (const kind of ['posts', 'conversations', 'summaries'] as Kind[]) {
-      const keys = await store.list(`${kind}/`);
+      const keys = await attempt('a listing', () => store.list(`${kind}/`));
       await parallel(keys, async key => {
         const id = key.slice(kind.length + 1);
         if (key !== `${kind}/${id}` || !validId(id)) throw new Error('Invalid author record path');
-        const raw = await store.get(key);
+        const raw = await attempt('a read', () => store.get(key));
         if (raw === null) return;
-        const value = codec.decode(raw, binding, kind, id, binding.minRecordVersion || 1);
-        if (!belongs(value, state.user) || ('handle' in value && value.handle && value.handle !== state.user.handle))
-          throw new Error('Author identity mismatch');
-        const existing = index(kind).get(id);
-        if (existing && !belongs(existing, state.user)) throw new Error('Author record ID collision');
-        loaded.push({ kind, value });
+        try {
+          const value = codec.decode(raw, binding, kind, id, binding.minRecordVersion || 1);
+          if (!belongs(value, state.user) || ('handle' in value && value.handle && value.handle !== state.user.handle))
+            throw new Error('Author identity mismatch');
+          const existing = index(kind).get(id);
+          if (existing && !belongs(existing, state.user)) throw new Error('Author record ID collision');
+          loaded.push({ kind, value });
+        } catch (err) { throw during('checking a record', err); }
       });
     }
     return loaded;
@@ -134,10 +248,13 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
   async function loadAuthor(state: AuthorState) {
     if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     const binding = state.user.tinycloud;
+    const began = Date.now(), listed = now();
     if (binding.minRecordVersion === 2) {
-      const recovery = await (await resolveStore(binding)).get(RECOVERY_KEY);
-      if (!recovery || !binding.ownerPublicKey) throw new Error('Owner recovery is missing');
-      codec.verifyRecovery(recovery, binding, binding.ownerPublicKey);
+      const recovery = await attempt('a read', async () => (await resolveStore(binding)).get(RECOVERY_KEY));
+      try {
+        if (!recovery || !binding.ownerPublicKey) throw new Error('Owner recovery is missing');
+        codec.verifyRecovery(recovery, binding, binding.ownerPublicKey);
+      } catch (err) { throw during('checking owner recovery', err); }
     }
     const loaded = await readAuthor(state);
     evict(state.user);
@@ -145,42 +262,77 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     state.available = true;
     state.hidden = false;
     state.expires = now() + leaseMs;
+    state.failures = 0;
+    delete state.lastError; delete state.lastErrorAt; delete state.retryAt; delete state.renewRetryAt;
+    state.renewFailures = 0; delete state.lastRenewError;
+    // The listings were taken as the load began. A long load is followed by a fresh listing check ahead of time.
+    state.listedAt = listed;
+    state.loadedAt = now();
+    state.loadMs = Date.now() - began;
   }
-  async function check(state: AuthorState, reload = false) {
+  /** `early` checks an account that is still inside its lease, once half a lease has passed since its records were
+   * last listed. Reads then rarely find the lease run out, and what the owner deleted in their own storage stops
+   * being served even while new posts keep the lease going. */
+  async function check(state: AuthorState, reload = false, early = false) {
     if (!resolveStore || !codec) return; // Locked authors stay out of every published index.
     if (state.activationPending) return; // uncertain metadata commit: only a verified re-link can resume
-    if (!reload && state.available && state.expires > now()) return;
-    if (!reload && !state.available && (state.retryAt || 0) > now()) return;
+    const leased = () => state.available && (early
+      ? state.expires - now() > leaseMs / 2 && now() - (state.listedAt ?? 0) < leaseMs / 2 : state.expires > now());
+    const waiting = () => !state.available && (state.retryAt || 0) > now();
+    if (!reload && (leased() || waiting())) return;
+    if (early && (state.renewRetryAt || 0) > now()) return;
     // A link holds this account until it ends, and every read would wait for it here. Instead, stop serving this
     // account's records once their lease has run out, as a failed check would, and let everyone else's reads go on.
     // The link loads them again when it switches; if it fails, the next check after it does.
     if (!reload && linking.has(state.user.handle)) {
-      if (state.available) { state.available = false; state.expires = 0; state.hidden = true; evict(state.user); }
+      if (state.available && !early) hide(state);
       return;
     }
-    if (state.checking) return state.checking;
+    if (state.checking) {
+      if (!reload || state.reloading) return state.checking;
+      // A forced reload reads every record again. A listing check already running does not stand in for it.
+      await state.checking;
+      return check(state, true);
+    }
     const started = now();
+    state.checkingSince = started;
+    state.reloading = reload || !state.available;
     state.checking = exclusive(state.user.handle, async () => {
+      // A link that ran first replaced this account's storage: its old records must not be loaded over the new ones.
+      if (authors.get(state.user.handle) !== state) return;
+      // A post published while this check waited for the account may have loaded it, or failed to.
+      if (!reload && (leased() || waiting())) return;
+      const began = Date.now();
       try {
         if (reload || !state.available) await loadAuthor(state);
         else {
-          const store = await resolveStore(state.user.tinycloud);
+          const store = await attempt('opening the grant', () => resolveStore(state.user.tinycloud));
           // Listing verifies the current grant and lets owner-side deletions take effect.
-          const keys = new Set(await store.list('posts/'));
+          const keys = new Set(await attempt('a listing', () => store.list('posts/')));
+          const others = new Map<Kind, Set<string>>();
+          for (const kind of ['conversations', 'summaries'] as Kind[]) others.set(kind, new Set(await attempt('a listing', () => store.list(`${kind}/`))));
+          // A read gave up waiting for this check and stopped serving the account: only a full reload brings it back.
+          if (!state.available) return;
           for (const [id, e] of entries) if (belongs(e, state.user) && !keys.has(`posts/${id}`)) entries.delete(id);
-          for (const kind of ['conversations', 'summaries'] as Kind[]) {
-            const kept = new Set(await store.list(`${kind}/`));
+          for (const [kind, kept] of others)
             for (const [id, value] of index(kind)) if (belongs(value, state.user) && !kept.has(`${kind}/${id}`)) index(kind).delete(id);
-          }
           state.expires = started + leaseMs;
+          state.listedAt = started;
+          state.listMs = Date.now() - began;
+          state.renewFailures = 0; delete state.lastRenewError;
         }
-      } catch {
-        state.available = false;
-        state.expires = 0;
-        state.retryAt = now() + Math.min(10000, leaseMs);
-        evict(state.user);
+      } catch (err) {
+        // Checking ahead of time: unless storage said the grant is revoked, the lease still stands, so keep serving.
+        // The check at its end decides.
+        if (early && !reload && !(err instanceof GroupStoreRevokedError) && state.available && state.expires > now()) {
+          state.renewRetryAt = now() + leaseMs / 8;
+          state.renewFailures = (state.renewFailures || 0) + 1;
+          state.lastRenewError = reason(err);
+          return;
+        }
+        failed(state, err);
       }
-    }).finally(() => { delete state.checking; });
+    }).finally(() => { delete state.checking; delete state.checkingSince; delete state.reloading; });
     await state.checking;
   }
   async function pageAll<T>(fetch: (limit: number, offset: number, cursor?: string) => Promise<T[]>, save: (v: T) => void) {
@@ -209,11 +361,40 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
       if (extra.getDailySummaries) for (const s of await extra.getDailySummaries(100000))
         if (!s.pseudonyms.some((p: string) => ownerOf({pseudonym: p}))
           && (s.publicOnly || ![...entries.values()].some(e=>new Date(e.timestamp).toISOString().slice(0,10)===s.date&&!isPublicNotebookEntry(e)))) daily.set(s.date, s);
-      await Promise.all([...authors.values()].map(s => check(s, true)));
+      // Each account loads on its own from here. A read waits a moment for them (see `ready`) and then serves what
+      // has loaded, so one large or failing account does not hold back everyone's reads after a restart.
+      for (const s of authors.values()) void check(s, true).catch(() => {});
     })().catch(err => { initializing = undefined; entries.clear(); conversations.clear(); summaries.clear(); daily.clear(); throw err; });
     await initializing;
   }
-  async function ready() { await init(); await Promise.all([...authors.values()].map(s => check(s))); }
+  /** Returns when the index holds everything a read may serve.
+   *
+   * An account inside its lease is served at once, and renewed ahead of time in the background. An account that is
+   * not available has nothing in the index, so a read waits only `readerWaitMs` from the start of its load, which
+   * keeps a quick load invisible, and then serves everyone else. An account whose lease has run out must be checked
+   * before anything of it is served: a read waits up to `leaseWaitMs` for that, then stops serving the account.
+   *
+   * `wait: 'all'` waits for every check to finish. Use it before changing a record, which must not be missed
+   * because its account was still loading.
+   *
+   * Whatever was waited for, nothing past its lease is left in the index when this returns. The caller reads the
+   * index at once, without waiting again. */
+  async function ready(wait: 'reads' | 'all' = 'reads') {
+    await init();
+    const settle = async (state: AuthorState) => {
+      if (state.available && state.expires > now()) { void check(state, false, true).catch(() => {}); return; }
+      const lapsed = state.available;
+      const pending = check(state);
+      if (wait === 'all') return pending;
+      const left = (lapsed ? leaseWaitMs : readerWaitMs) - (now() - (state.checkingSince ?? now()));
+      if (left > 0) await Promise.race([pending, pause(left)]);
+    };
+    await Promise.all([...authors.values()].map(settle));
+    // While this read waited for one account, the lease of another may have run out. Those get one wait of their own.
+    const lapsed = [...authors.values()].filter(s => s.available && s.expires <= now());
+    if (lapsed.length) await Promise.all(lapsed.map(settle));
+    for (const state of authors.values()) if (state.available && state.expires <= now()) hide(state);
+  }
   async function list<T extends RecordValue>(kind: Kind): Promise<T[]> { await ready(); return [...index(kind).values()].sort(order); }
   const search = (query: string, value: { content: string; keywords?: string[] }) => {
     const words = value.keywords || tokenize(value.content);
@@ -239,7 +420,11 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
       if (state) {
         if (state.activationPending) throw new Error('TinyCloud migration metadata is pending; retry linking before publishing.');
         if (state.user.tinycloud.minRecordVersion !== 2) throw new Error('Re-link TinyCloud with your owner key to enable encrypted writes. Your waiting post is retained.');
-        if (!state.available) await loadAuthor(state);
+        if (!state.available) {
+          // One failed load is enough. The other posts waiting for this account do not each load all of it again.
+          if ((state.retryAt || 0) > now()) throw unreadable(state);
+          try { await loadAuthor(state); } catch (err) { failed(state, err); throw unreadable(state); }
+        }
         const store = await resolveStore(state.user.tinycloud);
         saved = { ...value, id: (value as RecordValue).id || generateEntryId(), keywords: tokenize(value.content) } as RecordValue;
         await store.put(`${kind}/${saved.id}`, codec.encode(state.user.tinycloud, kind, saved));
@@ -257,7 +442,10 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
   }
   async function remove(kind: Kind, id: string) {
     if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
-    await ready();
+    await ready('all');
+    // A read may have stopped serving an account while its check ran. Load it again before taking the record as gone.
+    if (!index(kind).has(id) && [...authors.values()].some(s => s.hidden && !s.available && !s.activationPending
+      && !linking.has(s.user.handle) && (s.retryAt || 0) <= now())) await ready('all');
     const value = index(kind).get(id);
     if (!value) return;
     const lockHandle = value.handle || handlesByPseudonym.get(value.pseudonym) || '__legacy';
@@ -474,7 +662,20 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     });
     return { ...raw, put: (k, v, condition) => write(() => raw.put(k, v, condition)), delete: k => write(() => raw.delete(k)) };
   }
-  return { storage, ready, link, assetStore, refresh: async (handle:string) => { await init(); const state=authors.get(handle); if(state)await check(state,true); return state?.available??false; },
+  /** For moderators: which accounts are served, and why any is not. Handles and reasons only. */
+  function health(): AuthorStorageHealth[] {
+    return [...authors.values()].map(s => ({ handle: s.user.handle, available: s.available && s.expires > now(),
+      loading: !!s.checking && !s.available, failures: s.failures || 0,
+      records: [entries, conversations, summaries].reduce((n, map) => { for (const v of map.values()) if (belongs(v, s.user)) n++; return n; }, 0),
+      lastError: s.lastError, lastErrorAt: s.lastErrorAt, retryAt: s.available ? undefined : s.retryAt, loadedAt: s.loadedAt, loadMs: s.loadMs,
+      listedAt: s.listedAt, listMs: s.listMs, renewFailures: s.renewFailures || 0, lastRenewError: s.lastRenewError }));
+  }
+  /** Whether any account is being loaded, so its records are not in the index yet. */
+  const loading = () => [...authors.values()].some(s => !!s.checking && !s.available);
+  return { storage, ready, health, loading, link, assetStore,
+    // The account's state may be replaced by a link while this waits: report the state that is current afterwards.
+    refresh: async (handle:string) => { await init(); const state=authors.get(handle); if(state)await check(state,true);
+      const current=authors.get(handle); return !!current && current.available && current.expires > now(); },
     status: async (handle:string) => { await init(); const s=authors.get(handle);
       if(s&&!locks.has(handle))await check(s);
       return s ? {linked:true,available:s.available&&s.expires>now(),space:s.user.tinycloud.space,ownerDid:s.user.tinycloud.ownerDid,

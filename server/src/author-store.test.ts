@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { authorStorage, recordCodec, LinkTimeoutError, type AuthorBinding, type LinkStep } from './author-store.js';
 import { MemoryStorage, StagedStorage, type JournalEntry, type User } from './storage.js';
-import type { GroupStore } from './group-store.js';
+import { GroupStoreRevokedError, type GroupStore } from './group-store.js';
 import {testWallet,versionedMemoryStore,legacyRecord} from './author-test-fixtures.js';
 import {RECOVERY_KEY,recoverAuthorKey,decryptOwnerRecord} from './author-records.js';
 
@@ -508,5 +508,224 @@ describe('Publication when one author store is unavailable',()=>{
       expect(a).toEqual(b); expect(calls).toHaveBeenCalledTimes(1);
       expect(await base.getEntries()).toEqual([]); expect(staged.isPending(e.id)).toBe(false);
     } finally {staged.stop();}
+  });
+});
+
+/** Alice, Bob and Carol each linked with one note, then a restarted server over the same storage. `wrap` changes
+ * how that server's storage calls behave, per account. */
+async function restarted(wrap:(store:GroupStore,b:AuthorBinding)=>GroupStore,options:Parameters<typeof authorStorage>[3]={}) {
+  const f=await fixture(); const notes:Record<string,string>={};
+  for(const u of f.users){await f.layer.link(u,binding(u.handle)); notes[u.handle]=(await f.layer.storage.addEntry(post(u.handle))).id;}
+  let clock=1000; const logs:string[]=[];
+  const layer=authorStorage(f.base,async b=>wrap(await f.resolve(b),b),codec,{leaseMs:60,now:()=>clock,readRetryMs:1,log:m=>logs.push(m),...options});
+  const ids=async()=>(await layer.storage.getEntries()).map(e=>e.id);
+  const of=(handle:string)=>layer.health().find(a=>a.handle===handle)!;
+  return {f,notes,layer,logs,ids,of,tick:(ms:number)=>{clock+=ms;}};
+}
+const onlyAlice=(change:(store:GroupStore)=>Partial<GroupStore>)=>(store:GroupStore,b:AuthorBinding):GroupStore=>
+  b.space==='space:alice'?{...store,...change(store)}:store;
+const moment=(ms=5)=>new Promise(r=>setTimeout(r,ms));
+
+describe('One account that is slow or cannot be read',()=>{
+  it("answers reads with everyone else's notes while one account's load does not finish",async()=>{
+    let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const r=await restarted(onlyAlice(s=>({list:async p=>{await gate;return s.list(p);}})),{readerWaitMs:20});
+    expect((await r.ids()).sort()).toEqual([r.notes.bob,r.notes.carol].sort());
+    expect(await r.layer.storage.getEntry(r.notes.alice)).toBeNull();
+    expect(r.of('alice')).toMatchObject({available:false,loading:true,records:0});
+    expect(r.of('bob')).toMatchObject({available:true,loading:false,records:1,failures:0});
+    release(); await r.layer.ready('all');
+    expect(await r.ids()).toContain(r.notes.alice);
+    expect(r.of('alice')).toMatchObject({available:true,loading:false,records:1});
+  });
+
+  it('loads an account that cannot be read once per wait, however many reads and waiting posts ask, and waits longer each time',async()=>{
+    let broken=true, lists=0;
+    const r=await restarted(onlyAlice(s=>({list:async p=>{lists++;if(broken)throw new Error('storage unavailable');return s.list(p);}})),{readAttempts:1});
+    expect(await r.ids()).not.toContain(r.notes.alice);
+    expect(lists).toBe(1);
+    for(let i=0;i<5;i++) await r.ids();
+    await expect(r.layer.storage.addEntry(post('alice','waiting'))).rejects.toThrow('could not be read (a listing failed (Error))');
+    await expect(r.layer.storage.addEntry(post('alice','also waiting'))).rejects.toThrow('could not be read');
+    expect(lists).toBe(1);
+    expect(r.of('alice')).toMatchObject({available:false,failures:1,lastError:'a listing failed (Error)',retryAt:1060});
+    expect(r.logs).toHaveLength(1); expect(r.logs[0]).toContain('@alice is not being served: try 1 failed (a listing failed (Error))');
+    r.tick(61); await r.ids();            // the first wait (60) is over: one more try, which fails
+    expect(lists).toBe(2);
+    r.tick(61); await r.ids();            // the second wait is twice as long
+    expect(lists).toBe(2);
+    r.tick(61); await r.ids();
+    expect(lists).toBe(3);
+    expect(r.of('alice')).toMatchObject({failures:3,retryAt:1183+240});
+    // A waiting post tries the load itself once the wait is over, and its failure starts the next wait for everyone.
+    r.tick(241); await expect(r.layer.storage.addEntry(post('alice','still waiting'))).rejects.toThrow('could not be read (a listing failed (Error))');
+    expect(lists).toBe(4); await r.ids(); expect(lists).toBe(4);
+    broken=false; r.tick(481);
+    expect(await r.ids()).toContain(r.notes.alice);
+    expect(r.of('alice')).toMatchObject({available:true,failures:0,records:1});
+    expect(r.of('alice').lastError).toBeUndefined();
+    expect(await r.layer.storage.addEntry(post('alice','published'))).toBeTruthy();
+  });
+
+  it('tries a failed read again before giving up on the account',async()=>{
+    const seen=new Set<string>();
+    const r=await restarted((s,b)=>({...s,get:async k=>{const id=`${b.space} ${k}`;
+      if(!seen.has(id)){seen.add(id);throw new Error('connection reset');}return s.get(k);}}));
+    expect((await r.ids()).sort()).toEqual(Object.values(r.notes).sort());
+    expect(r.layer.health().every(a=>a.available&&a.failures===0)).toBe(true);
+    expect(r.logs).toEqual([]);
+  });
+
+  it('gives up on a read that never answers, and says so',async()=>{
+    const r=await restarted(onlyAlice(()=>({get:()=>new Promise<string|null>(()=>{})})),{readTimeoutMs:20,readAttempts:1,readerWaitMs:1000});
+    expect((await r.ids()).sort()).toEqual([r.notes.bob,r.notes.carol].sort());
+    expect(r.of('alice').lastError).toBe('storage did not answer a read in time');
+  });
+
+  it('reports why an account is not served without repeating what storage or a record said',async()=>{
+    const quoted='the note began: my private plan';
+    const leaky=await restarted(onlyAlice(()=>({list:async()=>{throw Object.assign(new Error(`TinyCloud list failed: KV_UNAVAILABLE 503 ${quoted}`),{code:'ECONNRESET'});}})),{readAttempts:1});
+    await leaky.ids();
+    expect(leaky.of('alice').lastError).toBe('a listing failed (Error, ECONNRESET, status 503)');
+    await expect(leaky.layer.storage.addEntry(post('alice'))).rejects.toThrow('could not be read (a listing failed (Error, ECONNRESET, status 503))');
+    expect(leaky.logs.join()).not.toContain('private');
+    // An error's own name and code are compared with fixed lists, never copied.
+    const named=await restarted(onlyAlice(()=>({list:async()=>{throw Object.assign(new Error('x'),{name:'my private plan',code:'MY_PRIVATE_PLAN'});}})),{readAttempts:1});
+    await named.ids();
+    expect(named.of('alice').lastError).toBe('a listing failed (Error, another code)');
+    // A record that fails its own check is named by this code's fixed message; one that cannot be parsed, only by the kind of error.
+    const tampered=await restarted(s=>s);
+    const map=tampered.f.data.get('space:alice')!, key=`posts/${tampered.notes.alice}`;
+    const wire=JSON.parse(map.get(key)!); wire.ciphertext=wire.ciphertext.slice(0,-2)+'aa'; map.set(key,JSON.stringify(wire));
+    expect(await tampered.layer.refresh('alice')).toBe(false);
+    expect(tampered.of('alice').lastError).toBe('checking a record: Unsupported state or unable to authenticate data');
+    map.set(key,`{"version":2,${quoted}`);
+    expect(await tampered.layer.refresh('alice')).toBe(false);
+    expect(tampered.of('alice').lastError).toBe('checking a record failed (SyntaxError)');
+    expect(tampered.logs.join()).not.toContain('private');
+  });
+
+  it('renews a lease ahead of time, so a read does not wait for the check',async()=>{
+    let lists=0, held=false; let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const r=await restarted(onlyAlice(s=>({list:async p=>{lists++;if(held)await gate;return s.list(p);}})));
+    await r.layer.ready('all'); const loaded=lists;
+    r.tick(20); await r.ids(); await moment();
+    expect(lists).toBe(loaded);              // the first half of the lease: no check
+    r.tick(20); await r.ids(); await moment();
+    expect(lists).toBe(loaded+3);            // past half: checked in the background, one listing per kind
+    held=true; r.tick(40);                   // the first lease would be over by now; the renewed one is not
+    expect(await r.ids()).toContain(r.notes.alice);
+    release(); await r.layer.ready('all');
+  });
+
+  it("serves nothing past its lease when one account's lease runs out while a read waits for another",async()=>{
+    const held=new Set<string>(); let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const r=await restarted((s,b)=>({...s,list:async p=>{if(held.has(b.space))await gate;return s.list(p);}}),{leaseWaitMs:60});
+    await r.layer.ready('all');
+    r.tick(30); expect(await r.layer.refresh('alice')).toBe(true);   // Alice's lease now ends 30 later than Bob's
+    held.add('space:alice'); held.add('space:bob');
+    r.tick(31);                              // Bob's lease is over; Alice's has 29 left, and neither check answers
+    const reading=r.ids();
+    await moment(20); r.tick(30);            // while the read waits for Bob, Alice's lease runs out too
+    expect(await reading).toEqual([r.notes.carol]);
+    expect(r.of('alice')).toMatchObject({available:false,records:0});
+    expect(r.of('bob')).toMatchObject({available:false,records:0});
+    release(); held.clear(); await r.layer.ready('all');
+    expect((await r.ids()).sort()).toEqual(Object.values(r.notes).sort());
+  });
+
+  it('reads every record again on a forced refresh, even while a listing check is running',async()=>{
+    let held=false, gets=0; let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const r=await restarted(onlyAlice(s=>({list:async p=>{if(held)await gate;return s.list(p);},get:async k=>{gets++;return s.get(k);}})));
+    await r.layer.ready('all'); const loaded=gets;
+    held=true; r.tick(61);
+    const checking=r.layer.ready('all');     // Alice's lease ran out: a listing check starts and waits on storage
+    await moment();
+    const refreshed=r.layer.refresh('alice');
+    held=false; release();
+    expect(await refreshed).toBe(true); await checking;
+    expect(gets).toBeGreaterThan(loaded);
+  });
+
+  it('does not load an account again from the state a link has just replaced',async()=>{
+    // The same write and re-link, with and without a refresh queued behind them on the state from before the link.
+    // That refresh must do nothing: it opens the storage no more often than when it was never asked for.
+    const run=async(withRefresh:boolean)=>{
+      let held=false, opens=0; let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+      const r=await restarted((s,b)=>{ if(b.space==='space:alice')opens++;
+        return {...s,put:async(...args:Parameters<GroupStore['put']>)=>{if(held&&b.space==='space:alice')await gate;return s.put(...args);}}; });
+      await r.layer.ready('all');
+      held=true;
+      const writing=r.layer.storage.addEntry(post('alice','second'));  // holds Alice's account
+      await moment();
+      const relink=r.layer.link(r.f.users[0],binding('alice'));        // queues behind the write, and replaces her state
+      await moment();                                                  // the link is now waiting for her account
+      const refreshed=withRefresh?r.layer.refresh('alice'):undefined;
+      held=false; release();
+      const second=await writing; await relink; await refreshed; await moment();
+      const before=opens;
+      expect(await r.ids()).toEqual(expect.arrayContaining([r.notes.alice,second.id]));
+      expect(await r.layer.status('alice')).toMatchObject({linked:true,available:true});
+      return before;
+    };
+    expect(await run(true)).toBe(await run(false));
+  });
+
+  it('keeps serving through a failed renewal ahead of time, and stops when the lease runs out unchecked',async()=>{
+    let broken=false;
+    const r=await restarted(onlyAlice(s=>({list:async p=>{if(broken)throw new Error('storage unavailable');return s.list(p);}})),{readAttempts:1});
+    await r.layer.ready('all');
+    broken=true; r.tick(40);
+    expect(await r.ids()).toContain(r.notes.alice); await moment();
+    expect(await r.ids()).toContain(r.notes.alice);
+    expect(r.of('alice')).toMatchObject({available:true,failures:0,renewFailures:1,lastRenewError:'a listing failed (Error)'});
+    r.tick(21);                              // the lease is over and the grant could not be checked
+    expect(await r.ids()).not.toContain(r.notes.alice);
+    expect(r.of('alice')).toMatchObject({available:false,failures:1,records:0});
+    broken=false; r.tick(61);
+    expect(await r.ids()).toContain(r.notes.alice);
+  });
+
+  it('stops serving at once when a check ahead of time finds the grant revoked',async()=>{
+    // With the usual three tries per read: the first answer is that the grant is revoked, and storage is not asked again.
+    let revoked=false, asked=0;
+    const r=await restarted(onlyAlice(s=>({list:async p=>{if(revoked){if(asked++===0)throw new GroupStoreRevokedError();return new Promise<string[]>(()=>{});}return s.list(p);}})),{readTimeoutMs:30});
+    await r.layer.ready('all');
+    revoked=true; r.tick(40);                // well inside the lease
+    await r.ids(); await moment();
+    expect(asked).toBe(1);
+    expect((await r.ids()).sort()).toEqual([r.notes.bob,r.notes.carol].sort());
+    expect(r.of('alice')).toMatchObject({available:false,failures:1,lastError:'a listing: the grant was revoked or has expired'});
+  });
+
+  it('stops serving a note its owner deleted in their own storage, even while new posts keep the lease going',async()=>{
+    const r=await restarted(s=>s);
+    await r.layer.ready('all');
+    r.f.data.get('space:alice')!.delete(`posts/${r.notes.alice}`);
+    for(let i=0;i<3;i++){ r.tick(20); await r.layer.storage.addEntry(post('alice',`more ${i}`)); await r.ids(); await moment(); }
+    expect(await r.ids()).not.toContain(r.notes.alice);
+    expect(r.of('alice')).toMatchObject({available:true,failures:0,renewFailures:0,records:3});
+    expect(r.of('alice').listedAt).toBeGreaterThan(1000);
+  });
+
+  it('stops serving an account whose lease ran out when its check does not answer in time',async()=>{
+    let held=false; let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const r=await restarted(onlyAlice(s=>({list:async p=>{if(held)await gate;return s.list(p);}})),{leaseWaitMs:20});
+    await r.layer.ready('all');
+    held=true; r.tick(61);
+    expect((await r.ids()).sort()).toEqual([r.notes.bob,r.notes.carol].sort());
+    expect(r.of('alice')).toMatchObject({available:false,records:0});
+    release(); held=false; await r.layer.ready('all');
+    expect(await r.ids()).toContain(r.notes.alice);
+  });
+
+  it('waits for an account that is still loading before deleting one of its notes',async()=>{
+    let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+    const r=await restarted(onlyAlice(s=>({list:async p=>{await gate;return s.list(p);}})),{readerWaitMs:10});
+    const removing=r.layer.storage.deleteEntry(r.notes.alice);
+    await moment(40);
+    expect(r.f.data.get('space:alice')!.has(`posts/${r.notes.alice}`)).toBe(true);
+    release(); await removing;
+    expect(r.f.data.get('space:alice')!.has(`posts/${r.notes.alice}`)).toBe(false);
   });
 });
