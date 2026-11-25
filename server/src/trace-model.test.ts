@@ -140,6 +140,8 @@ describe('the model gateway', () => {
       [() => new Response(`{"error":"${secret}"}`, { status: 400 }), 'RedPill refused the call (status 400).'],
       [() => new Response('not json'), 'a reply the runner could not read'],
       [() => text({ parts: [secret] }), 'a reply without text'],
+      [() => Response.json({ choices: [{ finish_reason: 'length', message: { content: null, reasoning_content: secret } }] }), `ran out of its ${attested.reply_tokens} tokens before any text was written`],
+      [() => Response.json({ choices: [{ finish_reason: 'length', message: { content: '' } }] }), 'A model that reasons first needs a larger reply size.'],
       [() => text('x'.repeat(MODEL_LIMITS.replyBytes + 1)), 'a reply larger than 64 KB'],
       [() => { throw new Error(`socket closed while sending ${secret} with ${KEY}`); }, 'The call to RedPill did not complete.'],
     ];
