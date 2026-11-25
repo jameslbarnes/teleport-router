@@ -95,7 +95,7 @@ Turning it on takes two deploys, each with the owner's approval: the first ships
 ## Not in this round
 
 - A limited approval key. An agent that approves for its owner works with the owner's storage key today. A key that can only grant short reads of traces to attested runs would let it approve with less, and while the owner's machine is off. This is the same question as the open proposal on delegating insights runs while the owner is offline.
-- AI model calls from an app. With no network an app cannot ask a model to read the trace. Allowing one would send the trace to that provider, and the owner would have to be told which.
+- AI model calls from an app. With no network an app cannot ask a model to read the trace. Allowing one would send the trace to that provider, and the owner would have to be told which. (Added since, for attested providers only: `docs/trace-app-model-calls.md`.)
 - The browser approval page.
 
 ## Prototype

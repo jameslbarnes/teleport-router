@@ -4,7 +4,8 @@
   "workdir": "/app/server",
   "env": {
     "NODE_ENV": "production",
-    "TINYCLOUD_HOST": "https://tee.node.tinycloud.xyz"
+    "TINYCLOUD_HOST": "https://tee.node.tinycloud.xyz",
+    "REDPILL_RELEASES": "f7136328f40a78a102ecebf9ccdbfd5cdf7f446fb42ddfe0b41e3dc8ddd7ace1,261760d004c92eab0b6bed59a55cf3214c65d2cb543a1bed6dff371cd2650a7a"
   },
   "user": "node"
 }
