@@ -32,7 +32,7 @@ export function traceAccessTool(providers: readonly AttestedProvider[]) {
         model: { type: 'string', description: 'The model ID at that provider.' },
         calls: { type: 'integer', minimum: 1, maximum: 8 },
         prompt_bytes: { type: 'integer', minimum: 1, maximum: 262144, description: 'The most bytes one prompt may hold.' },
-        reply_tokens: { type: 'integer', minimum: 1, maximum: 4096, description: 'The most tokens one reply may hold.' },
+        reply_tokens: { type: 'integer', minimum: 1, maximum: 4096, description: 'The most tokens one reply may hold, reasoning included: a model that reasons first needs a few hundred even for a short answer.' },
       }, required: ['provider', 'model', 'calls', 'prompt_bytes', 'reply_tokens'] },
       model_key: { type: 'string', description: 'Required exactly when model is given: your own API key at that provider, made for this with a small spending limit. It stays in your conversation log. Router seals it at once and passes it to one run only.' },
     } : {}),

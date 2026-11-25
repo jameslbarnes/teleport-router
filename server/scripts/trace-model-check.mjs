@@ -36,7 +36,8 @@ async function provider(name, connect) {
   await channel.close();
   if (!keys[name]) { console.log(`skip  ${name}: no key set, so no model call was made`); return; }
   await check(`${name}: one call through the gateway`, async () => {
-    const declaration = { provider: name, model: models[name], calls: 1, prompt_bytes: 200, reply_tokens: 16 };
+    // 300 tokens, not a handful: a model that reasons first spends its reply size on reasoning before it writes.
+    const declaration = { provider: name, model: models[name], calls: 1, prompt_bytes: 200, reply_tokens: 300 };
     const gateway = modelGateway({ declaration, apiKey: keys[name], connect });
     try {
       const reply = await gateway.ask('Reply with the single word: ready');

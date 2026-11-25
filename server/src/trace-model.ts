@@ -208,12 +208,17 @@ export function modelGateway(options: { declaration: ModelDeclaration; apiKey: s
       if (response.status === 401 || response.status === 403) throw new TraceModelError(`${name} refused the requester's key.`);
       if (response.status === 402 || response.status === 429) throw new TraceModelError(`${name} refused the call: the requester's account is out of credit or over its rate limit.`);
       if (!response.ok) throw new TraceModelError(`${name} refused the call (status ${response.status}).`);
-      let text: unknown;
+      let text: unknown, cutShort = false;
       try {
         // Read only as much as a reply may hold: the read stops, and the call fails, once it passes the limit.
         const body = await readBounded(response, MODEL_LIMITS.replyBytes * 2, left());
-        text = JSON.parse(body)?.choices?.[0]?.message?.content;
+        const choice = JSON.parse(body)?.choices?.[0];
+        text = choice?.message?.content;
+        cutShort = choice?.finish_reason === 'length';
       } catch { throw new TraceModelError(`${name} sent a reply the runner could not read.`); }
+      // A model that reasons before it answers can spend the whole reply size on reasoning and write nothing.
+      if (cutShort && (typeof text !== 'string' || !text))
+        throw new TraceModelError(`${name}'s reply ran out of its ${declaration.reply_tokens} tokens before any text was written. A model that reasons first needs a larger reply size.`);
       if (typeof text !== 'string') throw new TraceModelError(`${name} sent a reply without text.`);
       if (Buffer.byteLength(text, 'utf8') > MODEL_LIMITS.replyBytes) throw new TraceModelError(`${name} sent a reply larger than ${MODEL_LIMITS.replyBytes / 1024} KB.`);
       if (c.confirm) {

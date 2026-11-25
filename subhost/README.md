@@ -106,7 +106,9 @@ merge that added model calls for trace apps (PR 86). A spec whose image says PEN
 of the compose file and runs stay off. To move the runner to a newer Router image,
 pin its digest in both files and run `node subhost/embed.mjs`; owners' tools then
 accept the new runner only from a checkout that has the same pins. Router uses the
-runner when `TRACE_APPS=subhost`.
+runner when `TRACE_APPS=subhost`. The runner's `REDPILL_RELEASES` lists the RedPill
+gateway releases it will send a prompt to (`docs/trace-app-model-calls.md`);
+`node scripts/redpill-releases.mjs` compares it with the releases RedPill has published.
 
 The apps share the CVM's kernel with Router, as the probe does. The WebAssembly
 sandbox and the sandbox container's missing network are what stand between a

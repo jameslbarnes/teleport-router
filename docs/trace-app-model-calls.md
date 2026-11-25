@@ -1,6 +1,6 @@
 # Model calls from trace apps
 
-Status: built on branch `brin-trace-model-calls`, Nov 22, 2026, and not yet deployed. It adds to `docs/attested-trace-apps.md`, which left model calls out of its first round. Router accepts requests that declare a model only when `TRACE_MODELS` names the provider, and the runner can call a provider only once its pinned image contains this code. Neither is switched on yet.
+Status: built Nov 22, 2026; switched on for RedPill after a real call through this gateway code, made from outside the enclave on Nov 25, 2026 (UTC), returned a reply with a verified signed receipt. No model run inside the production enclave had been made when this was written. Tinfoil is built and stays off. It adds to `docs/attested-trace-apps.md`, which left model calls out of its first round. Router accepts requests that declare a model only when `TRACE_MODELS` names the provider, and the runner calls RedPill only for a gateway release listed in its spec.
 
 ## What it adds
 
@@ -19,6 +19,7 @@ A request that wants a model carries a declaration with fixed fields and nothing
 - `provider` is `redpill` or `tinfoil`. There is no field for an address: the runner knows each provider's endpoint.
 - `calls` is at most 8, `prompt_bytes` at most 256 KB, `reply_tokens` at most 4096.
 - Unknown fields are refused.
+- `reply_tokens` covers the model's reasoning as well as its answer. A model that reasons first can spend a small reply size before it writes anything; the call then fails with a sentence saying the reply ran out of its tokens. A few hundred is a sensible floor.
 
 Router writes what the owner reads from these fields (`describeModelUse`): the model and provider, the limits, that the provider is attested and what that does and does not prove, that the calls are billed to the requester's own account, and that the requester's account shows when the calls are made and how many tokens they use, so the requester can tell that the app has run. Because the app's code decides how many calls it makes and how large they are, and the requester sees those numbers, approving a run can tell the requester a little about the trace even if the answer is withheld. The requester's free-text purpose is shown separately, as their claim. The owner's own tool writes these lines again from the declaration rather than taking Router's.
 
@@ -58,6 +59,8 @@ What the app puts in a prompt leaves Router's enclave for the provider's. That t
 
 The runner reads its accepted RedPill releases from `REDPILL_RELEASES` (comma-separated sha256 hashes) in its own environment, which is part of its measured spec. Without any, runs that declare RedPill are refused at prepare. RedPill publishes each gateway release at least three days before it rolls out. The list has to include a release before that rollout, or RedPill calls stop until it does (they fail closed). This is a routine like the approvals for containers in Router's enclave.
 
+The routine: once a day `.github/workflows/redpill-releases.yml` runs `scripts/redpill-releases.mjs`, which reads RedPill's gateway releases on GitHub, computes each one's hash from its published `app_compose.json`, asks the gateway's app contract on Base whether it allows that hash, and opens a pull request when the list should change. A hash is proposed only once the contract allows it; an announced release the contract does not allow yet is reported and looked at again the next day. A person reviews and merges the pull request; nothing is accepted automatically. The list holds the release that is live, the one before it (replicas run both during a rollout), and any that is announced, so it changes once per release. Each change is a deploy and gives the runner a new measured identity, and RedPill has shipped a gateway release about twice a week, so this is a frequent routine.
+
 ## The requester's key
 
 The requester creates and funds a key at the provider, for this purpose and with a small spending limit; Router never pays. They send it with the request as `model_key`, which is required exactly when a model is declared. The key stays in the requester's own conversation log, which is why it should be made for this with a small spending limit. Router seals it at once and stores only the sealed form: AES-256-GCM under a key derived (HKDF-SHA256) from a secret that exists only inside Router's enclave, with the request's ID, its revision and the declaration's hash as associated data. Router also keeps a keyed hash of the key, so the same request sent again is recognised whether or not the app has run; it cannot be turned back into the key. The key appears in no view, error, log or notice. Approving a run opens it, hands it to the runner with the grant, and drops it from the record in the same step that claims the run, so one request pays for at most one run: preparing again afterwards is refused, and the owner declines so the requester can ask again. It is also dropped when the request is released, declined, withheld or withdrawn, and when a new request replaces it. Router's operator cannot read it outside the enclave; Router itself, inside the enclave, can.
@@ -69,7 +72,9 @@ The requester's own agent tooling must keep the key out of their uploaded traces
 ## Switching it on
 
 - Router: `TRACE_MODELS=redpill,tinfoil` (or one of them). Unset, every request that declares a model is refused.
-- The runner and sandbox: an image that contains this code, pinned in `subhost/runner.base.json` and `subhost/sandbox.base.json`, and `REDPILL_RELEASES` in the runner's spec for RedPill. The scripts in `subhost/` still start on older images, which refuse every model run at prepare.
+- The runner and sandbox: an image that contains this code, pinned in `subhost/runner.base.json` and `subhost/sandbox.base.json`, and `REDPILL_RELEASES` in the runner's spec for RedPill. Both base files pin an image that has this code. Production sets `TRACE_MODELS=redpill` in `docker-compose.template.yml`.
+- The runner runs the gateway code in its pinned image. A change to that code, such as the sentence for a reply that ran out of tokens, reaches the enclave only when both base files pin an image built from it. Until then the older image answers "sent a reply without text".
+- A change to `REDPILL_RELEASES` changes the runner's measured spec, so it needs `node subhost/embed.mjs`, a deploy, and owners' tools on a checkout with the same list.
 
 ## Code
 
