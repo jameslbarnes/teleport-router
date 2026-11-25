@@ -1,0 +1,71 @@
+name: RedPill release list
+
+# Once a day: compare the RedPill gateway releases the trace runner accepts with the ones RedPill
+# has published, and open a pull request when the list should change. A person reviews and merges
+# it, and merging deploys. See docs/trace-app-model-calls.md, "Upkeep".
+#
+# Opening the pull request needs the repository setting "Allow GitHub Actions to create and
+# approve pull requests". A pull request opened this way does not start the build checks, so the
+# sub-container tests run here before it is opened; the full tests run on merge, before the deploy.
+
+on:
+  schedule:
+    - cron: '23 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: redpill-releases
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Compare the list with the published releases
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          node scripts/redpill-releases.mjs --write > report.md
+          code=$?
+          cat report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+
+      - name: Open a pull request
+        if: steps.check.outputs.change == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.check.outputs.key }}
+        run: |
+          branch="redpill-releases-$KEY"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "This list is already proposed on $branch."
+            exit 0
+          fi
+          node subhost/embed.mjs
+          node subhost/embed.mjs --check
+          node --test subhost/subhost.test.mjs subhost/runs.test.mjs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add subhost/runner.base.json docker-compose.template.yml
+          git commit -m "Trace runner: accept the RedPill gateway releases now published"
+          git push origin "$branch"
+          gh pr create --base master --head "$branch" \
+            --title "Trace runner: update the accepted RedPill gateway releases" \
+            --body-file report.md

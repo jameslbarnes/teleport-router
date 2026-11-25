@@ -78,7 +78,7 @@ jobs:
           npm test
 
       - name: Test independent uptime monitor
-        run: node --test scripts/monitor-router.test.mjs
+        run: node --test scripts/monitor-router.test.mjs scripts/redpill-releases.test.mjs
 
       - name: Test the sub-container host
         run: |
