@@ -66,7 +66,8 @@ Router decides who may read what, and it sees plaintext while it serves a reques
 - **The Router enclave and its code.** Router's storage and encryption keys come from the enclave's key service.
 - **Whoever can authorize a Router upgrade.** The enclave's keys carry over to an authorized new release, so a changed release could read what the current one can. Restricting which releases can obtain the keys is an open question.
 - **The setup page's code.** The browser creates and uses the owner's storage key with code served by Router. A malicious release of that page could misuse an unlocked key.
-- **TinyCloud for availability.** It holds ciphertext and can see paths, sizes and timing. It can withhold, delete or replay stored records, but cannot read them.
+- **TinyCloud for availability.** It holds ciphertext and can see paths, sizes and timing. It can withhold, delete or replay stored records. For a person who holds their own storage key, it cannot read them.
+- **OpenKey, for people who chose an OpenKey account.** OpenKey is TinyCloud's key service. For these accounts it creates and holds the storage key, and signs with it when the person approves a request. Its usual sign-in is a code sent by email, so whoever controls that inbox can sign in to the account. A passkey is optional there; Router cannot require one or check that one exists. The person's recovery record is encrypted to a key that TinyCloud's storage service can open, not to a key only they hold. So for these accounts, that TinyCloud cannot read stored records is TinyCloud's and OpenKey's promise, resting on their own protections. Router does not verify it.
 - **Agents to report honestly.** Posting rules and sharing notices rely on each person's agent declaring truthfully whether a post was requested or approved. Router does not independently prove that a human saw or approved anything.
 - **Other members.** Anyone who can read a note can copy it. Removing a member stops future reads, not copies already made.
 
@@ -84,13 +85,17 @@ Each person has two independent keys. Neither is derived from the other, because
 | Key | What it is | Where it lives | What it does |
 | --- | --- | --- | --- |
 | Router account key | A random secret | The browser's local storage, and the agent's connector settings | Signs the person in to Router. Their handle belongs to it |
-| Storage owner key | A secp256k1 private key | Never sent to Router, Discord or TinyCloud. Created in the browser, or held in a key file | Owns the person's storage space, grants Router access to one folder, and recovers their records |
+| Storage owner key | A secp256k1 private key | Never sent to Router or Discord. Created in the browser, or held in a key file, and then never sent to TinyCloud either. With an OpenKey account, OpenKey creates and holds it instead | Owns the person's storage space, grants Router access to one folder, and recovers their records |
 
 ### Recovery file
 
-The guided setup makes one recovery file per person. It holds both keys, encrypted with a password the person chooses (at least 12 characters; PBKDF2-SHA-256 with 600,000 rounds, then AES-256-GCM). An encrypted copy stays in the browser; the password and the unlocked storage key are not kept. Router cannot reset the password.
+For a person who keeps their own storage key, the guided setup makes one recovery file. It holds both keys, encrypted with a password the person chooses (at least 12 characters; PBKDF2-SHA-256 with 600,000 rounds, then AES-256-GCM). An encrypted copy stays in the browser; the password and the unlocked storage key are not kept. Router cannot reset the password.
 
 A person who creates an account and skips the storage step has their account key only in that browser until they make a recovery file. The final setup page says so.
+
+### OpenKey accounts
+
+The setup page offers an OpenKey account first, and keeping the storage key yourself as the second choice. With an OpenKey account, OpenKey holds the storage key, and there is no recovery file or password to keep. What this changes is in "What each person has to trust" above. Two things do not work with an OpenKey account yet: running and releasing trace apps on your own traces, because the owner's tool needs the storage key in a file, and moving later to a storage key you hold yourself. The Router key is still separate and is kept only in the browser, so the setup page has the person copy or download it before they continue.
 
 ### Signing in from a link
 
@@ -263,7 +268,7 @@ Like a benchmark board, a map is worked out from the group's published notes eve
 An invitation link opens one page that takes a new member from nothing to a working account, without needing an agent. The group's name and who can read its notes stay visible throughout. Returning members use `/group-setup?group=<id>`.
 
 1. **Your account.** Choose a handle, or restore from a recovery file, or sign in with an existing Router key. Creating the account also joins the group.
-2. **Your notes.** Choose a recovery password and download the recovery file. The browser creates the storage key, grants Router the `router/` folder for one year, proves it can recover, and reads the recovery record back before reporting success.
+2. **Your notes.** Choose who holds the storage key. The first choice is an OpenKey account: OpenKey creates and holds the key, and the person approves with a code sent to their email, or a passkey if they add one. With no recovery file to hold the Router key, the page then has them copy or download their Router key and tick that they saved it before they continue. The second choice, "Keep the key yourself instead", is a recovery password and a recovery file; the browser creates the storage key. Either way, the page grants Router the `router/` folder for one year, proves it can recover, and reads the recovery record back before reporting success. Someone who already has a recovery file in the browser, or connected storage, continues with what they have, and OpenKey stays folded away.
 3. **Discord.** In the Discord server, press "Connect my Router account" under the welcome message, or run `/router-link`. The private reply is a ten-minute link back to this page. The page then shows one permission card and nothing else: which Discord account is asking, what the bot may do for the person, under what conditions, and what rests on others. The person ticks that the Discord account is their own, then chooses Allow or Not now. Not now sends nothing; the link simply runs out.
 4. **Sharing rules.** Review the suggested rules and save, or keep rules already saved. Joining, linking and downloading never change a person's rules.
 
