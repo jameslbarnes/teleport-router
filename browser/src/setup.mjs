@@ -12,7 +12,7 @@ const retryText = 'This step did not finish. Try again.';
 const isSolo = !invite && !groupId, solo = () => isSolo;
 function showSolo() {
   $('group-name').textContent = 'Set up Router'; document.title = 'Set up Router';
-  $('description').textContent = 'Create your account, keep a recovery file, choose your posting rules, then connect your agent.'; $('description').hidden = false;
+  $('description').textContent = 'Create your account, set up storage for your notes, choose your posting rules, then connect your agent.'; $('description').hidden = false;
   $('audience').hidden = true; $('eyebrow').hidden = true; $('step-discord').hidden = true; $('step-connect').hidden = false;
   $('create-submit').textContent = 'Create account';
   $('rules-intro').textContent = 'Posting rules say when your agent may post, who can read it, and what to leave out. They are your personal rules, used wherever you connect an agent to Router.';
@@ -49,10 +49,16 @@ async function act(operation) {
   if (busy) return; busy = true;
   const enabled = [...document.querySelectorAll('button:not(:disabled)')]; enabled.forEach(b => b.disabled = true);
   try { await operation(); } catch (error) { message(error.message || retryText, true); $('retry').hidden = false; }
-  finally { busy = false; enabled.forEach(b => b.disabled = false); $('connect-storage').disabled = !$('backup-kept').checked; $('confirm-discord').disabled = !$('discord-self').checked; }
+  finally { busy = false; enabled.forEach(b => b.disabled = false); $('connect-storage').disabled = !$('backup-kept').checked; $('confirm-discord').disabled = !$('discord-self').checked; $('storage-next').disabled = keyUnsaved(); }
 }
 const backupName = () => 'router_recovery:' + identity.handle;
 const receiptName = () => 'router_storage_grant:' + identity.handle;
+// An OpenKey account has no recovery file to hold the Router key. This records only that the person
+// ticked that they saved a copy; the key itself is never written anywhere new.
+const keySavedName = () => 'router_key_saved:' + identity.handle;
+const needsKeySave = () => storage?.recoveryMode === 'openkey' && localStorage.getItem(keySavedName()) !== '1';
+const keyUnsaved = () => !$('key-save').hidden && !$('key-kept').checked;
+const storageDone = () => storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running' && !needsKeySave();
 async function lookup(candidate) {
   const result = await request('/api/identity/lookup', { secret_key: candidate }, null);
   if (!result.handle) throw Error('This Router account has no handle yet.');
@@ -101,7 +107,7 @@ async function load() {
     }
     // Signed in already, for example straight after restoring a recovery file on a new device.
     await checkStorage();
-    if (params.get('storage') !== '1' && storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running') await showRules();
+    if (params.get('storage') !== '1' && storageDone()) await showRules();
     return;
   }
   context = await groupContext(); showGroup();
@@ -111,7 +117,7 @@ async function load() {
   if (!context.member) { screen(0); message(identity ? 'Join the group to continue. Your posting rules stay as they are.' : 'Pick a handle to create your account and join the group.'); return; }
   invite = undefined; history.replaceState(null, '', '/group-setup?group=' + encodeURIComponent(groupId));
   await checkStorage();
-  if (storage?.linked && storage.available && storage.encryption?.version === 2 && storage.job?.status !== 'running') await showDiscord();
+  if (storageDone()) await showDiscord();
 }
 async function joinGroup() {
   if (!identity) throw Error('Create an account or sign in first.');
@@ -128,23 +134,33 @@ async function checkStorage() {
   let saved; try { saved = JSON.parse(localStorage.getItem(backupName())); } catch { throw Error('The saved recovery file could not be read. Restore your downloaded file before continuing.'); }
   envelope ||= saved;
   $('openkey-storage').textContent = storage.recoveryMode === 'openkey' ? 'Renew OpenKey storage access' : storage.linked ? 'Move storage to OpenKey' : 'Connect with OpenKey';
-  $('openkey-choice').hidden = storage.job?.status === 'running';
   $('previous-storage').hidden = !storage.linked || storage.recoveryMode === 'openkey';
   const ready = storage.linked && storage.available && storage.encryption?.version === 2;
-  $('storage-ready').hidden = !ready; $('storage-new').hidden = ready || !!envelope || !!backup;
-  $('storage-unlock').hidden = ready || !envelope || !!backup;
-  $('storage-connect').hidden = ready || !backup;
+  const running = storage.job?.status === 'running';
+  // Someone starting from nothing sees OpenKey first, and keeping the key themselves as the second choice.
+  // Anyone with a recovery file here or storage already connected keeps their own path, with OpenKey folded away.
+  const fresh = !ready && !storage.linked && !running && !envelope && !backup;
+  if (fresh) $('self-held-choice').before($('openkey-choice')); else $('openkey-fold').append($('openkey-choice'));
+  $('openkey-heading').hidden = !fresh; $('openkey-storage').classList.toggle('r-btn--primary', fresh);
+  $('openkey-fold').hidden = fresh || running; $('openkey-choice').hidden = running;
+  $('storage-ready').hidden = !ready; $('self-held-choice').hidden = !fresh;
+  $('key-save').hidden = !ready || !needsKeySave(); $('storage-next').disabled = keyUnsaved();
+  $('storage-unlock').hidden = ready || running || storage.linked || !envelope || !!backup;
+  $('storage-connect').hidden = ready || running || storage.linked || !backup;
   // Skipping only risks the Router key while no recovery file holds a copy of it.
   $('skip-storage').hidden = ready; $('skip-note').hidden = ready || !!envelope;
-  if (ready) { $('storage-state').textContent = 'Your encrypted storage is connected.'; message('Storage is ready.'); }
-  else if (storage.job?.status === 'running') { $('storage-new').hidden = $('storage-unlock').hidden = $('storage-connect').hidden = true; message('Your storage is still being connected. Use “Check connection again” in a moment.'); }
-  else if (storage.linked) { $('storage-new').hidden = $('storage-unlock').hidden = $('storage-connect').hidden = true; throw Error('Your existing storage cannot be reached. Keep your original recovery file and check the connection again. This setup will not replace your storage.'); }
-  else message('Make a recovery file before connecting your storage.');
+  if (ready) { $('storage-state').textContent = 'Your encrypted storage is connected.'; message(needsKeySave() ? 'Storage is ready. Save a copy of your Router key to continue.' : 'Storage is ready.'); }
+  else if (running) message('Your storage is still being connected. Use “Check connection again” in a moment.');
+  else if (storage.linked) throw Error('Your existing storage cannot be reached. Keep your original recovery file and check the connection again. This setup will not replace your storage.');
+  else message(fresh ? 'Connect an OpenKey account, or keep the storage key yourself with a recovery file.' : 'Make a recovery file before connecting your storage.');
+}
+function saveFile(text, name, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 function download() {
   if (!envelope) throw Error('Create or unlock your recovery file first.');
-  const url = URL.createObjectURL(new Blob([JSON.stringify(envelope, null, 2) + '\n'], { type: 'application/json' }));
-  const a = document.createElement('a'); a.href = url; a.download = `router-${identity.handle}-recovery.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+  saveFile(JSON.stringify(envelope, null, 2) + '\n', `router-${identity.handle}-recovery.json`, 'application/json');
 }
 async function acceptBackup(data, encrypted) {
   if (data.origin !== location.origin) throw Error('This recovery file belongs to a different Router website.');
@@ -327,12 +343,28 @@ $('openkey-storage').onclick = () => act(async () => {
   const linked = await connectStorage({ useOpenKey: true, migrateFrom, expectedDid: !migrating && storage?.ownerDid, routerKey: key, request,
     onProgress: message, saveReceipt: value => localStorage.setItem(receiptName(), JSON.stringify(value)) });
   await checkStorage();
-  $('openkey-choice').open = true;
+  $('openkey-fold').open = true;
   $('openkey-capture').hidden = false;
   $('openkey-capture').textContent = 'Your trace capture public key (safe to copy): ' + linked.tracePublicKey;
-  message('Connected. Keep your Router key to sign in on another device.');
+  message(needsKeySave() ? 'Connected. Save a copy of your Router key to continue.' : 'Connected. Keep your Router key to sign in on another device.');
 });
-$('check-storage').onclick = () => act(checkStorage); $('storage-next').onclick = () => act(() => showDiscord());
+// The Router key goes only to the clipboard or a file the person saves. It is never shown on the page or put in an address.
+$('copy-router-key').onclick = async () => {
+  try { await navigator.clipboard.writeText(key); $('key-copy-state').textContent = 'Router key copied. Paste it into a password manager or another safe place.'; }
+  catch { $('key-copy-state').textContent = 'Could not copy. Use “Download my Router key” instead.'; }
+};
+$('download-router-key').onclick = () => {
+  saveFile(`Router key for @${identity.handle} on ${location.origin}\n` +
+    'Anyone who has this key can post as you. To sign in again, open ' + location.origin + '/group-setup, choose “Already have a Router account?” and paste it under Router key.\n\n' + key + '\n',
+    `router-${identity.handle}-key.txt`, 'text/plain');
+  $('key-copy-state').textContent = 'Router key downloaded. Keep the file somewhere only you can open.';
+};
+$('key-kept').onchange = () => {
+  if ($('key-kept').checked) localStorage.setItem(keySavedName(), '1'); else localStorage.removeItem(keySavedName());
+  $('storage-next').disabled = keyUnsaved();
+};
+$('check-storage').onclick = () => act(checkStorage);
+$('storage-next').onclick = () => act(async () => { if (keyUnsaved()) throw Error('Save a copy of your Router key first.'); await showDiscord(); });
 $('skip-storage').onclick = () => act(showRules);
 $('check-discord').onclick = () => act(() => showDiscord());
 $('discord-self').onchange = () => { $('confirm-discord').disabled = !$('discord-self').checked; };
