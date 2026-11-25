@@ -55,6 +55,7 @@ Router decides who may read what, and it sees plaintext while it serves a reques
 | A note addressed to an email address | Its recipients, and the email provider that delivers it |
 | Raw usage reports from the insights pipeline | Their owner only. Router has no access to that folder |
 | The private trace behind a post | Its author, with their own key. Someone else's app can read it only inside the enclave, after the author has read the app's code and allowed one run |
+| What a trace app sends to a language model | The model provider's enclave, during the run, and only when the author allowed an app that says it will ask a model. Only providers that prove by attestation which code they run are accepted. What the provider keeps afterwards is the provider's promise |
 | What a trace app returns | Sealed to the author; Router stores only ciphertext. The requester gets exactly the text the author releases, sealed to the requester's key |
 | Text typed into Discord commands, and the bot's replies | Discord |
 | Notes summarized by the Discord recall command | The AI model service the bot calls |
@@ -127,14 +128,15 @@ A post can carry a private trace: the slice of the agent session that led to it,
 1. The requester's agent writes the app: a JavaScript function that reads the trace and returns at most 8 KB of text, with one line on what it is for. A request without an app is refused.
 2. The author is told: by email when they have a verified address, and at the start of their agent's next session. The email names no requester, purpose or code.
 3. The author reads the code and runs it with their own tool, or has their own agent do this for them. The tool checks the enclave's attestation first: that the code that will run is the code shown, on this version of the trace, with a key made for this one run, under approved software. Only then does it let that key read this one trace for ten minutes.
-4. The app runs in a sandbox with no network, files or keys, in a container of its own. Its result is signed by the run's key and sealed to the author.
+4. The app runs in a sandbox with no network, files or keys, in a container of its own. Its result is signed by the run's key and sealed to the author. An app may say in its request that it will ask a language model: which model, at which provider, how many times and how much text. The author sees this before allowing the run. The app still has no network; it hands a prompt to the enclave, which checks by attestation that the provider's endpoint is an enclave running a release Router accepts, and only then sends it. The calls are paid from the requester's own account at the provider.
 5. The author, or their agent, reads the answer and releases exactly that text to the requester, or withholds it. The requester's next session mentions the decision.
 6. A requester who gave no key of their own collects the answer from Router, which keeps it sealed to a key only the enclave holds. A requester who gave a public key gets the answer sealed to it, and Router cannot read it.
 
 What this does and does not protect:
 
-- The requester never receives the trace or its key, and sees nothing about a request, not even whether the app has run, until the author decides.
+- The requester never receives the trace or its key. For an app that asks no model, the requester sees nothing about a request, not even whether the app has run, until the author decides.
 - An answer can still carry parts of the trace. What leaves is the author's call when releasing.
+- An app that asks a model is different in two ways. What it puts in a prompt leaves Router's enclave for the provider's during the run, before the author has seen any answer, so allowing the run allows that. And the requester's account at the provider shows when the calls were made and how many tokens they used, so the requester learns that the app ran, and a little about the trace, even if the answer is withheld. Attestation shows which code the provider runs, not what its operator keeps. Today the only provider switched on is RedPill.
 - Unless the requester gave a key of their own, Router can read an answer once it is released, as it reads notes while serving them. Before release, only the author can.
 - Router never decides whether an app runs or what leaves. The author does, or an agent the author has set up to decide for them under conditions they choose. That agent uses the same tool on the author's machine, with the author's storage key.
 - The apps run beside Router, in the same enclave. The sandbox, and the app container's missing network, are what stand between a stranger's code and the machine that holds Router's keys.

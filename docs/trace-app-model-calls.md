@@ -59,7 +59,7 @@ What the app puts in a prompt leaves Router's enclave for the provider's. That t
 
 The runner reads its accepted RedPill releases from `REDPILL_RELEASES` (comma-separated sha256 hashes) in its own environment, which is part of its measured spec. Without any, runs that declare RedPill are refused at prepare. RedPill publishes each gateway release at least three days before it rolls out. The list has to include a release before that rollout, or RedPill calls stop until it does (they fail closed). This is a routine like the approvals for containers in Router's enclave.
 
-The routine: once a day `.github/workflows/redpill-releases.yml` runs `scripts/redpill-releases.mjs`, which reads RedPill's gateway releases on GitHub, computes each one's hash from its published `app_compose.json`, asks the gateway's app contract on Base whether it allows that hash, and opens a pull request when the list should change. A person reviews and merges it; nothing is accepted automatically. The list holds the release that is live, the one before it (replicas run both during a rollout), and any that is announced, so it changes once per release. Each change is a deploy and gives the runner a new measured identity, and RedPill has shipped a gateway release about twice a week, so this is a frequent routine.
+The routine: once a day `.github/workflows/redpill-releases.yml` runs `scripts/redpill-releases.mjs`, which reads RedPill's gateway releases on GitHub, computes each one's hash from its published `app_compose.json`, asks the gateway's app contract on Base whether it allows that hash, and opens a pull request when the list should change. A hash is proposed only once the contract allows it; an announced release the contract does not allow yet is reported and looked at again the next day. A person reviews and merges the pull request; nothing is accepted automatically. The list holds the release that is live, the one before it (replicas run both during a rollout), and any that is announced, so it changes once per release. Each change is a deploy and gives the runner a new measured identity, and RedPill has shipped a gateway release about twice a week, so this is a frequent routine.
 
 ## The requester's key
 
@@ -73,6 +73,7 @@ The requester's own agent tooling must keep the key out of their uploaded traces
 
 - Router: `TRACE_MODELS=redpill,tinfoil` (or one of them). Unset, every request that declares a model is refused.
 - The runner and sandbox: an image that contains this code, pinned in `subhost/runner.base.json` and `subhost/sandbox.base.json`, and `REDPILL_RELEASES` in the runner's spec for RedPill. Both base files pin an image that has this code. Production sets `TRACE_MODELS=redpill` in `docker-compose.template.yml`.
+- The runner runs the gateway code in its pinned image. A change to that code, such as the sentence for a reply that ran out of tokens, reaches the enclave only when both base files pin an image built from it. Until then the older image answers "sent a reply without text".
 - A change to `REDPILL_RELEASES` changes the runner's measured spec, so it needs `node subhost/embed.mjs`, a deploy, and owners' tools on a checkout with the same list.
 
 ## Code

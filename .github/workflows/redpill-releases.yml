@@ -53,19 +53,24 @@ jobs:
           KEY: ${{ steps.check.outputs.key }}
         run: |
           branch="redpill-releases-$KEY"
-          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
-            echo "This list is already proposed on $branch."
+          # A pull request for this exact list, open or already decided, is not proposed again.
+          existing=$(gh pr list --head "$branch" --state all --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "This list already has a pull request from $branch."
             exit 0
           fi
-          node subhost/embed.mjs
-          node subhost/embed.mjs --check
-          node --test subhost/subhost.test.mjs subhost/runs.test.mjs
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
-          git add subhost/runner.base.json docker-compose.template.yml
-          git commit -m "Trace runner: accept the RedPill gateway releases now published"
-          git push origin "$branch"
+          # The branch can exist without a pull request if an earlier run pushed it and then could not open one.
+          if ! git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            node subhost/embed.mjs
+            node subhost/embed.mjs --check
+            node --test subhost/subhost.test.mjs subhost/runs.test.mjs
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -b "$branch"
+            git add subhost/runner.base.json docker-compose.template.yml
+            git commit -m "Trace runner: accept the RedPill gateway releases now published"
+            git push origin "$branch"
+          fi
           gh pr create --base master --head "$branch" \
             --title "Trace runner: update the accepted RedPill gateway releases" \
             --body-file report.md
