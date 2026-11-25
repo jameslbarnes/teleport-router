@@ -52,7 +52,6 @@ try {
   await page.goto(base + '/join?channelinvite=' + invite.token);
   await page.locator('#handle').fill('browser_reader');
   await page.locator('#create-account button').click();
-  await page.locator("#self-held-choice > summary").click();
   await page.locator('#storage-new').waitFor();
   await page.locator('#backup-password').fill('synthetic live browser password');
   await page.locator('#backup-repeat').fill('synthetic live browser password');
@@ -130,7 +129,6 @@ try {
   await soloPage.goto(base + '/group-setup');
   await soloPage.locator('#handle').fill('browser_solo');
   await soloPage.locator('#create-submit').click();
-  await soloPage.locator("#self-held-choice > summary").click();
   await soloPage.locator('#storage-new').waitFor();
   await soloPage.locator('#backup-password').fill('synthetic live solo password');
   await soloPage.locator('#backup-repeat').fill('synthetic live solo password');
