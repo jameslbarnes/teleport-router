@@ -42,36 +42,17 @@
     </section>
     <section id="storage" hidden>
       <h2 class="r-h2">Where your notes are stored</h2>
-      <p>TinyCloud provides personal storage for your notes; you don’t need an account there already. TinyCloud keeps encrypted records, and Router opens notes for you and the people you share with. A storage key owns that storage.</p>
-      <div id="storage-ready" hidden><p id="storage-state"></p>
-        <div id="key-save" hidden>
-          <p>An OpenKey account has no recovery file, so your Router key is kept only in this browser. Save a copy now: you need it to sign in on another device, or here after clearing the browser’s data.</p>
-          <div class="r-actions"><button id="copy-router-key" class="r-btn">Copy my Router key</button><button id="download-router-key" class="r-btn">Download my Router key</button></div>
-          <p id="key-copy-state" class="r-status" role="status" aria-live="polite"></p>
-          <label class="check"><input type="checkbox" id="key-kept">I have saved my Router key somewhere I can find it again.</label>
-          <p class="r-hint">Anyone who has your Router key can post as you. Keep it in a password manager or another place only you can open.</p>
-        </div>
-        <button id="storage-next" class="r-btn r-btn--primary">Continue</button></div>
-      <div id="openkey-choice">
-        <h3 id="openkey-heading" class="r-h3">Use an OpenKey account</h3>
-        <p>OpenKey creates and holds your storage key, so there is no recovery file or password to keep. You sign in to OpenKey with a code sent to your email. Add a passkey when OpenKey offers one: without it, anyone who can read that inbox can approve access to your notes.</p>
-        <p>TinyCloud holds the key that opens your recovery record. You cannot yet run trace apps on your own traces with an OpenKey account. After you connect, save a copy of your Router key: with no recovery file, it is how you sign in here again.</p>
-        <div id="previous-storage" hidden><label for="previous-file">Current Router recovery file (if it is on another device)</label><input id="previous-file" type="file" accept=".json"><label for="previous-password">Recovery file password</label><input id="previous-password" type="password" class="r-input" autocomplete="current-password"></div>
-        <button id="openkey-storage" class="r-btn r-btn--primary">Connect with OpenKey</button>
-        <p id="openkey-capture" hidden></p>
+      <p>TinyCloud provides personal storage for your notes; you don’t need an account there already. Your browser creates your storage key. TinyCloud keeps encrypted records, and Router opens notes for you and the people you share with.</p>
+      <div id="storage-ready" hidden><p id="storage-state"></p><button id="storage-next" class="r-btn r-btn--primary">Continue</button></div>
+      <div id="storage-new" hidden>
+        <p>Choose a password below, then download your recovery file. Keep both so you can restore your Router account and storage key on another device.</p>
+        <form id="prepare-backup"><label class="r-label" for="backup-password">Choose a recovery password</label><input class="r-input" type="password" id="backup-password" autocomplete="new-password" minlength="12" required aria-describedby="backup-hint">
+          <p class="r-hint" id="backup-hint">At least 12 characters. Router cannot reset this password.</p>
+          <label class="r-label" for="backup-repeat">Repeat the password</label><input class="r-input" type="password" id="backup-repeat" autocomplete="new-password" minlength="12" required>
+          <details><summary>Use an existing TinyCloud key</summary><p>Optional. This file is read on your device and is never uploaded.</p><label class="r-label" for="tinycloud-key-file">TinyCloud key file</label><input class="r-input" type="file" id="tinycloud-key-file" accept=".key,.txt,text/plain"></details>
+          <button type="submit" class="r-btn r-btn--primary">Create and download recovery file</button>
+        </form>
       </div>
-      <details id="self-held-choice" hidden><summary>Keep the key yourself instead</summary>
-        <p>Choose this if you want to be the only one who holds your storage key. Your browser creates it, and you keep it in a recovery file with a password. Router cannot reset that password.</p>
-        <div id="storage-new">
-          <p>Choose a password below, then download your recovery file. Keep both so you can restore your Router account and storage key on another device.</p>
-          <form id="prepare-backup"><label class="r-label" for="backup-password">Choose a recovery password</label><input class="r-input" type="password" id="backup-password" autocomplete="new-password" minlength="12" required aria-describedby="backup-hint">
-            <p class="r-hint" id="backup-hint">At least 12 characters. Router cannot reset this password.</p>
-            <label class="r-label" for="backup-repeat">Repeat the password</label><input class="r-input" type="password" id="backup-repeat" autocomplete="new-password" minlength="12" required>
-            <details><summary>Use an existing TinyCloud key</summary><p>Optional. This file is read on your device and is never uploaded.</p><label class="r-label" for="tinycloud-key-file">TinyCloud key file</label><input class="r-input" type="file" id="tinycloud-key-file" accept=".key,.txt,text/plain"></details>
-            <button type="submit" class="r-btn r-btn--primary">Create and download recovery file</button>
-          </form>
-        </div>
-      </details>
       <div id="storage-unlock" hidden><p>Your encrypted recovery file is saved in this browser. Unlock it to finish connecting your storage.</p>
         <form id="unlock-backup"><label class="r-label" for="unlock-password">Recovery password</label><input class="r-input" type="password" id="unlock-password" autocomplete="current-password" required><button type="submit" class="r-btn r-btn--primary">Unlock recovery file</button></form>
       </div>
@@ -82,8 +63,12 @@
         <p>Connect storage and allow Router to read, save and delete records in its folder for one year. Existing published Router records will move there after verification. Your storage key stays on this device.</p>
         <button id="connect-storage" class="r-btn r-btn--primary" disabled>Set up my note storage</button>
       </div>
-      <!-- Once someone has a recovery file or connected storage, the OpenKey block moves in here, folded away. -->
-      <details id="openkey-fold" hidden><summary>Use an OpenKey account</summary></details>
+      <details id="openkey-choice"><summary>Use an OpenKey account</summary>
+        <p>Approve access to your Router folder with your passkey. TinyCloud holds the key that opens your recovery record. Keep a separate copy of your Router account key to sign in here again.</p>
+        <div id="previous-storage" hidden><label for="previous-file">Current Router recovery file (if it is on another device)</label><input id="previous-file" type="file" accept=".json"><label for="previous-password">Recovery file password</label><input id="previous-password" type="password" class="r-input" autocomplete="current-password"></div>
+        <button id="openkey-storage" class="r-btn">Connect with OpenKey</button>
+        <p id="openkey-capture" hidden></p>
+      </details>
       <button id="check-storage" class="r-btn">Check connection again</button>
       <div class="gs-skip"><button id="skip-storage" class="r-btn r-btn--plain">Skip storage for now</button>
         <p id="skip-note" class="r-notice r-notice--warning">If you skip this, your Router key is kept only in this browser. Clearing the browser’s data would lose your account.</p></div>

@@ -62,7 +62,8 @@ try {
       await dialogContext.route('https://openkey.so/widget/**', route => route.fulfill({ contentType: 'text/html', body: '<title>OpenKey frame fixture</title>' }));
       const dialog = await dialogContext.newPage();
       await dialog.goto(base + '/group-setup?storage=1');
-      await dialog.locator('#openkey-choice').waitFor();
+      await dialog.locator('#storage-new').waitFor();
+      await dialog.locator('#openkey-choice summary').click();
       const opened = dialog.waitForEvent('framenavigated', frame => frame.url().startsWith('https://openkey.so/widget/'));
       await dialog.getByRole('button', { name: 'Connect with OpenKey' }).click();
       const element = await (await opened).frameElement();
@@ -72,26 +73,6 @@ try {
       await dialogContext.close();
     }
   }
-  // Someone with no storage yet: OpenKey is the first choice, open on the page with the primary button,
-  // and keeping the key yourself is the folded second choice below it.
-  const openKeyFirst = async p => {
-    await p.locator('#openkey-choice').waitFor();
-    assert.equal(await p.locator('#openkey-heading').isVisible(), true);
-    assert.equal(await p.locator('#openkey-choice').evaluate(el => !el.closest('details')
-      && !!(el.compareDocumentPosition(document.getElementById('self-held-choice')) & Node.DOCUMENT_POSITION_FOLLOWING)), true, 'OpenKey comes first, outside any fold');
-    assert.match(await p.locator('#openkey-storage').getAttribute('class'), /r-btn--primary/);
-    assert.equal(await p.locator('#self-held-choice').isVisible(), true);
-    assert.equal(await p.locator('#self-held-choice').evaluate(d => d.open), false);
-    assert.equal(await p.locator('#storage-new').isVisible(), false);
-    assert.equal(await p.locator('#openkey-fold').isVisible(), false);
-  };
-  // Someone with a recovery file here or storage connected is not steered to OpenKey: it stays folded, not primary.
-  const openKeyFolded = async p => {
-    assert.equal(await p.locator('#openkey-choice').evaluate(el => el.closest('details')?.id), 'openkey-fold');
-    assert.equal(await p.locator('#openkey-choice').isVisible(), false);
-    assert.doesNotMatch(await p.locator('#openkey-storage').getAttribute('class'), /r-btn--primary/);
-    assert.equal(await p.locator('#self-held-choice').isVisible(), false);
-  };
   const context = await newContext({ viewport: { width: 1160, height: 1000 } });
   const page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -111,10 +92,6 @@ try {
   await page.locator('#handle').fill('local_reader');
   await page.locator('#create-account button').click();
   await page.locator('#storage-ready').waitFor();
-  // Storage connected with a self-held key: no Router key step, and OpenKey stays folded.
-  assert.equal(await page.locator('#key-save').isVisible(), false);
-  assert.equal(await page.locator('#storage-next').isDisabled(), false);
-  await openKeyFolded(page);
   if (evidence) await page.screenshot({ path: resolve(evidence, 'setup-desktop.png'), fullPage: true });
   await page.locator('#storage-next').click();
   // This fixture has no Discord connection, so setup goes straight to the posting rules.
@@ -206,10 +183,6 @@ try {
   await recoveryPage.goto(inviteUrl);
   await recoveryPage.locator('#handle').fill('local_recovery');
   await recoveryPage.locator('#create-account button').click();
-  await openKeyFirst(recoveryPage);
-  if (evidence) await recoveryPage.screenshot({ path: resolve(evidence, 'storage-choice-phone.png'), fullPage: true });
-  // The self-held path still completes from inside its fold.
-  await recoveryPage.locator('#self-held-choice > summary').click();
   await recoveryPage.locator('#storage-new').waitFor();
   await recoveryPage.locator('#backup-password').fill('synthetic browser recovery password');
   await recoveryPage.locator('#backup-repeat').fill('synthetic browser recovery password');
@@ -225,13 +198,10 @@ try {
   assert.equal(requests.some(body => body.includes(recovered.tinycloudKey)), false);
   assert.equal(await recoveryPage.evaluate(privateKey => JSON.stringify(localStorage).includes(privateKey), recovered.tinycloudKey), false);
   assert.equal(await recoveryPage.locator('#connect-storage').isDisabled(), true);
-  await recoveryPage.locator('#storage-connect').waitFor();
-  await openKeyFolded(recoveryPage);
   if (evidence) await recoveryPage.screenshot({ path: resolve(evidence, 'recovery-phone.png'), fullPage: true });
   assert.equal(await recoveryPage.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await recoveryPage.reload();
   await recoveryPage.locator('#storage-unlock').waitFor();
-  await openKeyFolded(recoveryPage);
   await recoveryPage.locator('#unlock-password').fill('incorrect browser recovery password');
   await recoveryPage.locator('#unlock-backup button').click();
   await recoveryPage.locator('#status.error').waitFor();
@@ -282,8 +252,6 @@ try {
   assert.equal(await soloPage.locator('#create-submit').textContent(), 'Create account');
   await soloPage.locator('#handle').fill('local_solo');
   await soloPage.locator('#create-submit').click();
-  await openKeyFirst(soloPage);
-  await soloPage.locator('#self-held-choice > summary').click();
   await soloPage.locator('#storage-new').waitFor();
   assert.equal(await soloPage.locator('#skip-note').isVisible(), true);
   await soloPage.locator('#backup-password').fill('synthetic solo recovery password');
@@ -359,44 +327,8 @@ try {
   await inboxPage.locator('#status').filter({hasText:'declined'}).waitFor();
   await ownerContext.close();
   await soloContext.close();
-
-  // Storage connected through OpenKey: there is no recovery file, so the person saves their Router key
-  // (copied or downloaded, never shown on the page or put in the address) and ticks that they did before continuing.
-  const openKeyAccount = randomBytes(32).toString('base64url');
-  await api('/api/identity/register', { secret_key: openKeyAccount, handle: 'local_openkey' });
-  const keyContext = await newContext({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
-  await keyContext.route('**/api/tinycloud/status', route => route.fulfill({ json: { linked: true, available: true, encryption: { version: 2 }, recoveryMode: 'openkey' } }));
-  await keyContext.addInitScript(k => localStorage.setItem('router_key', k), openKeyAccount);
-  const keyPage = await keyContext.newPage();
-  keyPage.on('pageerror', error => errors.push(error.message));
-  await keyPage.goto(base + '/group-setup');
-  await keyPage.locator('#key-save').waitFor();
-  assert.equal(await keyPage.locator('#storage-next').isDisabled(), true);
-  await openKeyFolded(keyPage);
-  assert.equal((await keyPage.locator('body').innerText()).includes(openKeyAccount), false, 'The Router key is not printed on the page');
-  if (evidence) await keyPage.screenshot({ path: resolve(evidence, 'openkey-key-save-phone.png'), fullPage: true });
-  const keyDownload = keyPage.waitForEvent('download');
-  await keyPage.locator('#download-router-key').click();
-  const keyFile = await keyDownload;
-  assert.equal(keyFile.suggestedFilename(), 'router-local_openkey-key.txt');
-  const keyChunks = []; for await (const chunk of await keyFile.createReadStream()) keyChunks.push(chunk);
-  assert.equal(Buffer.concat(keyChunks).toString('utf8').trim().split('\n').at(-1), openKeyAccount);
-  await keyContext.grantPermissions(['clipboard-read', 'clipboard-write']);
-  await keyPage.locator('#copy-router-key').click();
-  await keyPage.locator('#key-copy-state').filter({ hasText: 'Router key copied' }).waitFor();
-  assert.equal(await keyPage.evaluate(() => navigator.clipboard.readText()), openKeyAccount);
-  assert.equal(keyPage.url().includes(openKeyAccount), false);
-  assert.equal(await keyPage.locator('#storage-next').isDisabled(), true, 'Copying alone does not unlock Continue');
-  await keyPage.locator('#key-kept').check();
-  assert.equal(await keyPage.locator('#storage-next').isDisabled(), false);
-  await keyPage.locator('#storage-next').click();
-  await keyPage.locator('#rules').waitFor();
-  // Once ticked, coming back goes on past storage.
-  await keyPage.reload();
-  await keyPage.locator('#rules').waitFor();
-  await keyContext.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: OpenKey first for a fresh joiner, folded once a recovery file or storage exists; self-held path completes from its fold; Router key saved and ticked before continuing after OpenKey; setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry; a published note’s trace link, a request carrying an app, its code shown as text, and the owner’s decline. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
+  console.log('PASS: setup without an invitation; fresh join; encrypted browser backup/reload; fresh-browser recovery; deferred storage; no owner-key transmission; unsaved draft; exact wording; stricter mode; returning member; mobile layout; removed-member recovery; public-group review; failed-join retry; a published note’s trace link, a request carrying an app, its code shown as text, and the owner’s decline. Storage availability and Discord are local fixtures; real storage is a separate check. No page errors.');
 } finally {
   await browser?.close();
   child.kill();
