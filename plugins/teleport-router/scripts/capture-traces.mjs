@@ -54,12 +54,12 @@
 //   --release-key <k>        the enclave key you checked (scripts/insights-owner.mjs enclave); required with the
 //                            first extraction copy, then remembered. The run stops if Router or your consent names
 //                            another key.
-import { readFile, writeFile, readdir, lstat, mkdir, rename, rm } from 'node:fs/promises';
+import { readFile, writeFile, readdir, lstat, mkdir, rename, rm, open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
 import { parseArgs } from 'node:util';
-import { findPosts, sessionOrigin, buildTrace, sourceOf, mentionsNeverUpload, mentionsRouterWrite, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+import { postFinder, originReader, eachLine, sliceHasher, buildTrace, sourceOf, mentionsNeverUpload, mentionsRouterWrite, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
 
 // The extraction copy must fit the enclave's limit on what it opens (400 KiB of ciphertext).
 const EXTRACTION_MAX_BYTES = 380 * 1024;
@@ -148,6 +148,7 @@ state.copies ||= {}; state.pointers ||= {}; state.unchanged ||= {};
 const copiesDir = join(dirname(statePath), 'copies');
 const saveState = async () => { const tmp = `${statePath}.${process.pid}.tmp`; await writeFile(tmp, JSON.stringify(state, null, 1)); await rename(tmp, statePath); };
 const sliceHash = (lines, post) => createHash('sha256').update(lines.slice(post.firstLine, post.lastLine + 1).join('\n')).digest('hex');
+const EMPTY_SLICE = createHash('sha256').update('').digest('hex');
 // state.sessions records, for every log read, which session started it and whether it called a never-upload
 // tool or opened with carried-over history. A session is excluded if it or any ancestor did, however the
 // logs were ordered when they were read.
@@ -200,7 +201,7 @@ try {
   }
   async function* allLogs() { yield* named(); for (const root of roots) yield* logs(root); }
   const totals = { never_upload_rules: neverUpload.length, logs_with_posts: 0, logs_too_large: 0, posts_found: 0, newly_indexed: 0, indexed_total: 0, indexed_withheld: 0, failed_writes: 0, unrecognized_receipts: 0,
-    logs_unchanged: 0, copies_written: 0, pointers_registered: 0, pointers_without_copy: 0, pointers_not_router_tool: 0, pointers_already: 0, pointers_withheld: 0, pointers_failed: 0,
+    logs_unchanged: 0, copies_written: 0, copy_reads: 0, pointers_registered: 0, pointers_without_copy: 0, pointers_not_router_tool: 0, pointers_already: 0, pointers_withheld: 0, pointers_failed: 0,
     uploaded: 0, already_uploaded: 0, uploaded_from_copy: 0, withheld: 0, not_your_post: 0, failed: 0 };
   const report = [], scanned = [], read = new Set();
   {
@@ -212,26 +213,51 @@ try {
       // ancestry are already recorded. This keeps the hook's runs at session start short.
       const before = state.unchanged[log.path];
       if (before && before.bytes === log.bytes && before.mtimeMs === log.mtimeMs) { totals.logs_unchanged++; continue; }
-      const text = await readFile(log.path, 'utf8');
+      // Logs are read one line at a time and never held whole: a session log can be hundreds of megabytes, and
+      // holding one (or several) with its lines ran the hook out of memory. First pass: does the log mention a
+      // Router write or a never-upload tool, and which session started it. A log with neither has its origin read
+      // from its first 2,000,000 characters only, as before.
+      const fileName = basename(log.path), HEAD_CHARS = 2_000_000;
+      const fullOrigin = originReader(fileName), headOrigin = originReader(fileName);
+      let full = false, chars = 0;
+      await eachLine(log.path, line => {
+        if (!full && (mentionsRouterWrite(line) || mentionsNeverUpload(line, neverUpload))) full = true;
+        fullOrigin.push(line);
+        const end = chars + line.length;   // where this line's newline is in the whole text
+        if (end < HEAD_CHARS) headOrigin.push(line);
+        chars = end + 1;
+        return full && fullOrigin.done;
+      });
       state.unchanged[log.path] = { bytes: log.bytes, mtimeMs: log.mtimeMs };
-      const mentionsPost = mentionsRouterWrite(text);
-      const full = mentionsPost || mentionsNeverUpload(text, neverUpload);
       // Every log's ancestry is recorded, also when it holds no post: it may sit between two that do.
-      const head = full ? null : text.slice(0, 2_000_000).split('\n');
-      if (head && text.length > 2_000_000) head.pop();
-      const lines = full ? text.split('\n') : head;
-      const origin = sessionOrigin(lines, basename(log.path));
+      const origin = full || chars - 1 <= HEAD_CHARS ? fullOrigin.result() : headOrigin.result();
       if (origin.logSessionId) {
         const known = state.sessions[origin.logSessionId] ||= {};
         if (origin.parentSessionId) known.parent = origin.parentSessionId;
         if (origin.startsFromSummary) known.summary = true;
       }
       if (!full) continue;
-      const found = findPosts(lines, { neverUpload, excludedSessions: excluded(), fileName: basename(log.path) });
+      // Second pass: the posts, each with the fingerprint of its slice. Slices follow one another from the first
+      // line, so one running hash covers the slice being read.
+      const finder = postFinder({ neverUpload, excludedSessions: excluded(), origin });
+      const hashes = [];
+      let sliceStart = 0, running = createHash('sha256');
+      await eachLine(log.path, (line, i) => {
+        running.update(i > sliceStart ? '\n' + line : line);
+        const before = finder.posts.length;
+        finder.push(line, i);
+        for (let k = before; k < finder.posts.length; k++) {
+          const post = finder.posts[k];
+          if (post.firstLine > post.lastLine) { hashes[k] = EMPTY_SLICE; continue; }   // a second post answered on the same line
+          if (post.firstLine !== sliceStart || post.lastLine !== i) throw new Error('A post slice did not start where the last one ended.');
+          hashes[k] = running.digest('hex'); running = createHash('sha256'); sliceStart = i + 1;
+        }
+      });
+      const found = finder.result();
       if (found.calledNeverUpload && found.logSessionId) state.sessions[found.logSessionId].called = true;
       if (!found.posts.length) continue;
       totals.logs_with_posts++; totals.failed_writes += found.failedWrites; totals.unrecognized_receipts += found.unrecognizedResults;
-      scanned.push({ path: log.path, parent: found.parentSessionId, posts: found.posts.map(post => ({ ...post, hash: sliceHash(lines, post) })) });
+      scanned.push({ path: log.path, parent: found.parentSessionId, posts: found.posts.map((post, k) => ({ ...post, hash: hashes[k] })) });
     }
   }
   const now = new Date().toISOString();
@@ -247,25 +273,39 @@ try {
       totals.newly_indexed++;
     }
   }
-  // Whether this machine's copy holds a post's slice exactly as indexed. Read fresh each time it is asked.
-  async function copyLines(entryId) {
-    const item = state.index[entryId], copy = item && state.copies[item.log];
-    if (!copy || copy.lines < item.last_line + 1) return null;
-    const lines = await readFile(copy.file, 'utf8').then(t => t.split('\n'), () => null);
-    return lines && sliceHash(lines, { firstLine: item.first_line, lastLine: item.last_line }) === item.slice_sha256 ? lines : null;
+  // Which of these posts (all from one log) this machine's copy holds exactly as indexed. Read fresh each time it is
+  // asked, one line at a time, and only as far as the last of their slices. With `tools`, also the tool that made
+  // each post, read again from the copy (as findPosts over the copy would find it; the session's origin plays no
+  // part in which tool or lines a post has, so none is read).
+  async function copyCheck(entryIds, { tools = false } = {}) {
+    const items = entryIds.map(id => [id, state.index[id]]).filter(([, item]) => item);
+    const copy = items.length && state.copies[items[0][1].log];
+    const result = new Map();
+    const usable = copy ? items.filter(([, item]) => item.log === items[0][1].log && copy.lines >= item.last_line + 1) : [];
+    if (!usable.length) return result;
+    const ranges = usable.map(([id, item]) => ({ id, first: item.first_line, last: item.last_line }));
+    const hasher = sliceHasher(ranges), last = Math.max(...ranges.map(r => r.last));
+    const finder = tools ? postFinder({ neverUpload: [], origin: { sessionId: null, logSessionId: null, parentSessionId: null, startsFromSummary: false } }) : null;
+    totals.copy_reads++;
+    // Read one line past the last slice: every line of a copy ends with a newline, so line r.last is known to be
+    // complete in the copy only when a line r.last + 1 (if only the empty one after the final newline) follows it.
+    const read = await eachLine(copy.file, (line, i) => { hasher.push(line, i); finder?.push(line, i); return i > last; }).catch(() => null);
+    if (read === null) return result;
+    for (const r of ranges) {
+      // A copy cut short would otherwise match an empty slice (a second post answered on the same line) by its empty
+      // hash, whatever its recorded line count says.
+      if (read <= r.last + 1 || hasher.digest(r) !== state.index[r.id].slice_sha256) continue;
+      const post = finder?.posts.find(p => p.entryId === r.id && p.firstLine === r.first && p.lastLine === r.last);
+      result.set(r.id, { tool: post?.tool || null });
+    }
+    return result;
   }
-  const copyHolds = async entryId => !!await copyLines(entryId);
   // The automatic path (--pointers-only, which the plugin's hook runs) registers only posts made by this plugin's
   // own Router server in Claude Code. The tool is read again from the copy, so an index entry made before tools were
   // recorded is judged the same way. Codex names its MCP servers as each person configured them, so there is no
   // fixed name to check, and Codex posts are left to the manual --pointers command.
   const ROUTER_TOOL = /^mcp__plugin_teleport-router_router__(?:router_write_entry|write_to_shared_notebook|channel_[\w-]+|skill_[\w-]+)$/;
-  function madeByRouter(entryId, lines) {
-    const item = state.index[entryId];
-    if (item.agent !== 'claude-code') return false;
-    const post = findPosts(lines, { fileName: basename(item.log) }).posts.find(p => p.entryId === entryId && p.firstLine === item.first_line && p.lastLine === item.last_line);
-    return !!post && ROUTER_TOOL.test(post.tool || '');
-  }
+  const madeByRouter = (entryId, held) => state.index[entryId].agent === 'claude-code' && ROUTER_TOOL.test(held.tool || '');
   // This machine's own copy of each log, from its first line to the last line of the last post this index takes
   // from it and does not withhold. The slices of a log's posts follow one another from its first line, so this is
   // exactly those posts' slices; nothing after the last of them is copied, nor anything from a log whose posts are
@@ -276,20 +316,34 @@ try {
     const needed = Math.max(...mine.map(p => p.lastLine)) + 1;
     // Rewritten when it would not cover the newest post, or when the copy file has gone.
     if ((state.copies[log.path]?.lines || 0) >= needed && await lstat(state.copies[log.path].file).then(f => f.isFile(), () => false)) continue;
+    const file = join(copiesDir, createHash('sha256').update(log.path).digest('hex').slice(0, 16), basename(log.path));
+    const tmp = `${file}.${process.pid}.tmp`;
     try {
-      const lines = (await readFile(log.path, 'utf8')).split('\n');
-      // The log may have been appended to since it was read, never rewritten; check the slices again before copying.
-      if (lines.length < needed || mine.some(p => sliceHash(lines, p) !== state.index[p.entryId].slice_sha256)) throw new Error('changed while it was read');
-      const file = join(copiesDir, createHash('sha256').update(log.path).digest('hex').slice(0, 16), basename(log.path));
       await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-      const tmp = `${file}.${process.pid}.tmp`;
-      await writeFile(tmp, lines.slice(0, needed).join('\n') + '\n', { mode: 0o600 });
+      // Streamed from the log to the copy, one line at a time. The log may have been appended to since it was read,
+      // never rewritten; the slices are checked again as they are copied, and the copy is kept only if they match.
+      const ranges = mine.map(p => ({ first: p.firstLine, last: p.lastLine, entryId: p.entryId }));
+      const hasher = sliceHasher(ranges), out = await open(tmp, 'w', 0o600);
+      let copied = 0;
+      try {
+        let batch = [], size = 0;
+        // writeFile on the handle writes the whole batch at the current position, however many writes that takes.
+        const flush = async () => { if (batch.length) { const text = batch.join(''); batch = []; size = 0; await out.writeFile(text); } };
+        await eachLine(log.path, (line, i) => {
+          hasher.push(line, i); batch.push(line, '\n'); size += line.length + 1; copied = i + 1;
+          const done = copied >= needed;
+          return done || size >= 4 * 1024 * 1024 ? flush().then(() => done) : false;
+        });
+        await flush();
+      } finally { await out.close(); }
+      if (copied < needed || ranges.some(r => hasher.digest(r) !== state.index[r.entryId].slice_sha256)) throw new Error('changed while it was read');
       await rename(tmp, file);
       state.copies[log.path] = { file, lines: needed, at: now };
       // Read back: a pointer is registered only for a post whose slice the copy is known to hold.
-      if (!(await Promise.all(mine.map(p => copyHolds(p.entryId)))).every(Boolean)) { delete state.copies[log.path]; throw new Error('the copy did not read back the same'); }
+      const ids = [...new Set(mine.map(p => p.entryId))];
+      if ((await copyCheck(ids)).size !== ids.length) { delete state.copies[log.path]; throw new Error('the copy did not read back the same'); }
       totals.copies_written++;
-    } catch (err) { delete state.unchanged[log.path]; report.push({ log: basename(log.path), error: `Could not copy its lines: ${err.message}` }); }
+    } catch (err) { await rm(tmp, { force: true }).catch(() => {}); delete state.unchanged[log.path]; report.push({ log: basename(log.path), error: `Could not copy its lines: ${err.message}` }); }
   }
   for (const [path, seen] of Object.entries(state.unchanged)) if (seen.mtimeMs < Date.now() - 45 * 86400_000) delete state.unchanged[path];
   totals.indexed_total = Object.keys(state.index).length;
@@ -304,15 +358,23 @@ try {
   if (pointersAsked && !pointersOff) {
     if (!routerKey) await stop('--pointers needs your Router key: --key-file <file> or the ROUTER_KEY environment variable. Nothing was sent.');
     const seen = Object.keys(state.index).filter(id => read.has(state.index[id].log));
+    const onlyRouterTool = flag('--pointers-only');
+    const wanting = entryId => {
+      const known = state.pointers[entryId];
+      return !state.index[entryId].withheld && !(known && !known.skipped) && !(known?.skipped && (known.tries || 1) >= 3);
+    };
+    // Each log's copy is read once for all its posts that may get a pointer, not once per post.
+    const byLog = new Map();
+    for (const entryId of seen.filter(wanting)) { const log = state.index[entryId].log; byLog.set(log, [...(byLog.get(log) || []), entryId]); }
+    const heldInCopy = new Map();
+    for (const ids of byLog.values()) for (const [id, held] of await copyCheck(ids, { tools: onlyRouterTool })) heldInCopy.set(id, held);
     for (const entryId of seen) {
       const item = state.index[entryId];
       if (item.withheld) { if (!state.pointers[entryId]) totals.pointers_withheld++; continue; }
-      const known = state.pointers[entryId];
-      if (known && !known.skipped) continue;
-      if (known?.skipped && (known.tries || 1) >= 3) continue;
-      const lines = await copyLines(entryId);
-      if (!lines) { totals.pointers_without_copy++; continue; }
-      if (flag('--pointers-only') && !madeByRouter(entryId, lines)) { totals.pointers_not_router_tool++; continue; }
+      if (!wanting(entryId)) continue;
+      const held = heldInCopy.get(entryId);
+      if (!held) { totals.pointers_without_copy++; continue; }
+      if (onlyRouterTool && !madeByRouter(entryId, held)) { totals.pointers_not_router_tool++; continue; }
       try {
         const r = await fetch(router + '/api/trace-pointers', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${routerKey}` },
           body: JSON.stringify({ entry_id: entryId, agent: item.agent || 'claude-code', slice_sha256: item.slice_sha256 }), signal: AbortSignal.timeout(20_000) });
@@ -362,6 +424,21 @@ try {
     return release = { publicKey: pinned, policyId: status.policy.policyId };
   }
 
+  // findPosts over a whole log (or this machine's copy of it), read one line at a time. Of the lines, only the first
+  // and those of the indexed slice are kept, at their own positions: all that sourceOf and buildTrace read. The rest
+  // of the array is empty, and its length is the log's line count.
+  async function readForUpload(path, item) {
+    const fileName = basename(item.log), origin = originReader(fileName);
+    await eachLine(path, line => { origin.push(line); return origin.done; });
+    const finder = postFinder({ neverUpload, excludedSessions: excluded(), origin: origin.result() });
+    const lines = [];
+    const count = await eachLine(path, (line, i) => {
+      if (i === 0 || (i >= item.first_line && i <= item.last_line)) lines[i] = line;
+      finder.push(line, i);
+    });
+    lines.length = count;
+    return { lines, found: finder.result() };
+  }
   for (const entryId of wanted) {
     const item = state.index[entryId], known = state.traces[entryId];
     if (!item) { totals.failed++; report.push({ entry: entryId, error: 'No session log on this machine is indexed for that post. Try a larger --days.' }); continue; }
@@ -370,13 +447,14 @@ try {
     let built, small = null, fromCopy = false;
     try {
       // The original log, or this machine's copy of its lines once the agent has cleaned the original up.
-      let lines = await readFile(item.log, 'utf8').then(t => t.split('\n'), err => { if (err.code !== 'ENOENT') throw err; return null; });
+      // Read one line at a time; only the first line and this post's slice are kept (see readForUpload).
+      let read = await readForUpload(item.log, item).catch(err => { if (err.code !== 'ENOENT') throw err; return null; });
       const copy = state.copies[item.log];
-      if (!lines && copy) { lines = await readFile(copy.file, 'utf8').then(t => t.split('\n'), () => null); fromCopy = !!lines; }
-      let post;
-      if (lines) {
+      if (!read && copy) { read = await readForUpload(copy.file, item).catch(() => null); fromCopy = !!read; }
+      let post, lines = read?.lines;
+      if (read) {
         // Decide again whether this trace may be uploaded: an exclusion may have been learned since it was indexed.
-        const fresh = findPosts(lines, { neverUpload, excludedSessions: excluded(), fileName: basename(item.log) });
+        const fresh = read.found;
         post = fresh.posts.find(p => p.entryId === entryId);
         if (!post || post.firstLine !== item.first_line || post.lastLine !== item.last_line || sliceHash(lines, post) !== item.slice_sha256) throw new Error('The session log changed since this post was indexed.');
         post.withheld ||= item.withheld || (isExcluded(fresh.parentSessionId) ? VIA_PARENT : null);

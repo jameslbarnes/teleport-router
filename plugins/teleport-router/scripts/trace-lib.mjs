@@ -9,6 +9,7 @@
 // checks the two against each other. Node built-ins only, so the plugin needs no install step.
 import { createCipheriv, createDecipheriv, createECDH, createHash, hkdfSync, randomBytes, ECDH } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
+import { open } from 'node:fs/promises';
 
 // ── Envelope ────────────────────────────────────────────────────────────────────────────
 
@@ -144,19 +145,28 @@ function entryIdFrom(text, structured) {
  * `sessionId`, `parentSessionId` and `calledNeverUpload` let the caller carry exclusions from log to log.
  */
 export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSessions = new Set(), fileName = '' } = {}) {
-  const origin = sessionOrigin(lines, fileName);
+  const finder = postFinder({ neverUpload, excludedSessions, origin: sessionOrigin(lines, fileName) });
+  for (let i = 0; i < lines.length; i++) finder.push(lines[i], i);
+  return finder.result();
+}
+
+/**
+ * findPosts one line at a time, for logs too large to hold: push every line in order (`i` counts from 0), then
+ * call result(). `origin` is sessionOrigin of the same log (originReader gives it without holding the log).
+ * `posts` grows as each post's last line is pushed.
+ */
+export function postFinder({ neverUpload = NEVER_UPLOAD_TOOLS, excludedSessions = new Set(), origin }) {
   const posts = [], pending = new Map();
   let withheld = origin.startsFromSummary ? 'the session log opens with a summary of an earlier session that cannot be checked'
     : origin.parentSessionId && excludedSessions.has(origin.parentSessionId) ? 'a session this one descends from called a tool whose results are never uploaded, or its log has not been read so that cannot be ruled out' : null;
   let first = 0, previous = null, failed = 0, unrecognized = 0, calledNeverUpload = false;
   const never = name => { const hit = neverUpload.find(p => name.includes(p)); if (hit) { calledNeverUpload = true; withheld ||= `the session called ${hit}, whose results are never uploaded`; } };
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
+  const push = (raw, i) => {
     const mentionsWrite = mentionsRouterWrite(raw);
     const mentionsNever = !calledNeverUpload && neverUpload.some(p => mentionsTool(raw, p));
     let mentionsPending = false;
     if (pending.size) for (const id of pending.keys()) if (raw.includes(id)) { mentionsPending = true; break; }
-    if (!mentionsWrite && !mentionsNever && !mentionsPending) continue;
+    if (!mentionsWrite && !mentionsNever && !mentionsPending) return;
     const record = parse(raw);
     const call = codexMcpCall(record);
     if (call) {
@@ -166,12 +176,12 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
         const text = (Array.isArray(call.result?.content) ? call.result.content : []).map(c => (c && typeof c.text === 'string') ? c.text : '').join('');
         const bad = call.status !== 'completed' || call.error || call.result?.isError || call.result?.is_error;
         const entryId = bad ? null : entryIdFrom(text, call.result?.structuredContent);
-        if (!entryId) { bad ? failed++ : unrecognized++; continue; }
+        if (!entryId) { bad ? failed++ : unrecognized++; return; }
         posts.push({ entryId, agent: 'codex', tool: name, firstLine: first, lastLine: i, previousEntryId: previous, sessionId: record.payload.thread_id || origin.sessionId,
           postedAt: record.timestamp || null, withheld });
         first = i + 1; previous = entryId;
       }
-      continue;
+      return;
     }
     for (const block of blocksOf(record)) {
       if (block.type === 'tool_use' && typeof block.name === 'string') {
@@ -187,9 +197,10 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
         first = i + 1; previous = entryId;
       }
     }
-  }
-  return { posts, failedWrites: failed, unrecognizedResults: unrecognized, unanswered: pending.size,
-    sessionId: origin.sessionId, logSessionId: origin.logSessionId, parentSessionId: origin.parentSessionId, calledNeverUpload, startsFromSummary: origin.startsFromSummary };
+  };
+  const result = () => ({ posts, failedWrites: failed, unrecognizedResults: unrecognized, unanswered: pending.size,
+    sessionId: origin.sessionId, logSessionId: origin.logSessionId, parentSessionId: origin.parentSessionId, calledNeverUpload, startsFromSummary: origin.startsFromSummary });
+  return { push, result, posts };
 }
 
 /**
@@ -198,32 +209,107 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
  * follow exclusions through any number of generations.
  */
 export function sessionOrigin(lines, fileName = '') {
-  const meta = parse(lines[0] || '');
-  if (meta?.type === 'session_meta') {   // Codex
-    const p = meta.payload || {};
-    let startsFromSummary = false;
-    for (let i = 1; i < Math.min(lines.length, 5000); i++) {
-      if (lines[i].includes('"type":"compacted"') && parse(lines[i])?.type === 'compacted') { startsFromSummary = true; break; }
-      if (lines[i].includes('"type":"response_item"') && parse(lines[i])?.type === 'response_item') break;
+  const reader = originReader(fileName);
+  if (!lines.length) reader.push('');
+  for (let i = 0; i < lines.length && !reader.done; i++) reader.push(lines[i]);
+  return reader.result();
+}
+
+/**
+ * sessionOrigin one line at a time: push the log's lines in order until `done` (at most its first 5000), then
+ * call result(). Only the first lines are read, so a caller can stop reading the log there.
+ */
+export function originReader(fileName = '') {
+  let at = 0, codex = null, sessionId = null, startsFromSummary = false;
+  const reader = {
+    done: false,
+    push(raw) {
+      if (reader.done) return;
+      const i = at++;
+      if (i >= 5000) { reader.done = true; return; }
+      if (i === 0) {
+        const meta = parse(raw);
+        if (meta?.type === 'session_meta') { codex = meta.payload || {}; return; }   // Codex
+      }
+      if (codex) {
+        if (raw.includes('"type":"compacted"') && parse(raw)?.type === 'compacted') { startsFromSummary = true; reader.done = true; }
+        else if (raw.includes('"type":"response_item"') && parse(raw)?.type === 'response_item') reader.done = true;
+        return;
+      }
+      if (!sessionId && raw.includes('"sessionId"')) sessionId = parse(raw)?.sessionId || null;
+      if (!/"type":"(?:user|assistant|summary)"/.test(raw)) return;
+      const record = parse(raw);
+      if (!record || !['user', 'assistant', 'summary'].includes(record.type)) return;
+      sessionId ||= record.sessionId || null;
+      startsFromSummary = record.type === 'summary' || record.isCompactSummary === true;
+      reader.done = true;
+    },
+    result() {
+      if (codex) {
+        const id = codex.id || codex.session_id || null;
+        return { sessionId: id, logSessionId: id, parentSessionId: codex.parent_thread_id || null, startsFromSummary };
+      }
+      // A Claude Code subagent's log carries the session ID of the session that started it, under its own file name.
+      const stem = fileName.replace(/\.jsonl$/, '');
+      const subagent = !!(stem && sessionId && stem !== sessionId);
+      return { sessionId, logSessionId: subagent ? stem : sessionId, parentSessionId: subagent ? sessionId : null, startsFromSummary };
+    },
+  };
+  return reader;
+}
+
+/**
+ * Calls `onLine(line, i)` for each line of a file, the same lines as `(await readFile(path, 'utf8')).split('\n')`,
+ * without holding the file: only the line being read is in memory. Stops early when `onLine` returns true (or a
+ * promise of true, which is awaited before the next line). Returns the number of lines read. A file that cannot
+ * be opened rejects with the open error (err.code ENOENT, ...).
+ */
+export async function eachLine(path, onLine) {
+  const handle = await open(path, 'r');
+  try {
+    const chunk = Buffer.allocUnsafe(1 << 20);
+    let parts = [], i = 0;
+    const emit = tail => {
+      const line = (parts.length ? Buffer.concat([...parts, tail]) : tail).toString('utf8');
+      parts = [];
+      return onLine(line, i++);
+    };
+    const stop = async r => (r && typeof r.then === 'function' ? await r : r) === true;
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (!bytesRead) break;
+      const data = chunk.subarray(0, bytesRead);
+      let start = 0;
+      for (let nl = data.indexOf(10); nl !== -1; nl = data.indexOf(10, start)) {
+        const r = emit(data.subarray(start, nl));
+        start = nl + 1;
+        if (r === true || (r && typeof r.then === 'function' && await stop(r))) return i;
+      }
+      if (start < bytesRead) parts.push(Buffer.from(data.subarray(start)));   // copied: the chunk is reused
     }
-    const sessionId = p.id || p.session_id || null;
-    return { sessionId, logSessionId: sessionId, parentSessionId: p.parent_thread_id || null, startsFromSummary };
-  }
-  let sessionId = null, startsFromSummary = false;
-  for (let i = 0; i < Math.min(lines.length, 5000); i++) {
-    const raw = lines[i];
-    if (!sessionId && raw.includes('"sessionId"')) sessionId = parse(raw)?.sessionId || null;
-    if (!/"type":"(?:user|assistant|summary)"/.test(raw)) continue;
-    const record = parse(raw);
-    if (!record || !['user', 'assistant', 'summary'].includes(record.type)) continue;
-    sessionId ||= record.sessionId || null;
-    startsFromSummary = record.type === 'summary' || record.isCompactSummary === true;
-    break;
-  }
-  // A Claude Code subagent's log carries the session ID of the session that started it, under its own file name.
-  const stem = fileName.replace(/\.jsonl$/, '');
-  const subagent = !!(stem && sessionId && stem !== sessionId);
-  return { sessionId, logSessionId: subagent ? stem : sessionId, parentSessionId: subagent ? sessionId : null, startsFromSummary };
+    await stop(emit(Buffer.alloc(0)));   // the last line, empty when the file ends with a newline
+    return i;
+  } finally { await handle.close(); }
+}
+
+/**
+ * SHA-256 of lines [first, last] joined with "\n", for several such ranges, fed one line at a time
+ * (the same digest as sha256(lines.slice(first, last + 1).join('\n'))). `digest(range)` once the last line is fed.
+ */
+export function sliceHasher(ranges) {
+  const hashes = new Map(ranges.map(r => [r, createHash('sha256')]));
+  const waiting = [...ranges].sort((a, b) => a.first - b.first), active = new Set();
+  let next = 0;
+  return {
+    push(line, i) {
+      while (next < waiting.length && waiting[next].first <= i) active.add(waiting[next++]);
+      for (const r of active) {
+        if (i > r.last) { active.delete(r); continue; }
+        hashes.get(r).update(i > r.first ? '\n' + line : line);
+      }
+    },
+    digest: r => hashes.get(r).digest('hex'),
+  };
 }
 
 // ── Cleaning ────────────────────────────────────────────────────────────────────────────

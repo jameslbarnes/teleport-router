@@ -154,7 +154,8 @@ try {
   for (const [path, why] of [[outside, 'outside the session folders'], [join(projects, 'missing.jsonl'), 'missing'], [projects, 'a folder'],
     ['relative/log.jsonl', 'relative'], ['--upload', 'flag-shaped and relative'], [42, 'not a string']]) {
     assert.equal(await checkedLog(path, roots), null, `refused: ${why}`);
-    assert.deepEqual(await plan('post', { transcript_path: path, tool_use_id: 'w0' }, { roots, waitMs: 0 }), ['--pointers-only', '--days', '1'], `falls back to the default scan: ${why}`);
+    assert.deepEqual(await plan('post', { transcript_path: path, tool_use_id: 'w0' }, { roots, waitMs: 0 }), ['--pointers-only', `--projects=${roots[0]}`, '--days', '1'], `falls back to a scan of Claude Code's folders: ${why}`);
+    assert.deepEqual(await plan('start', { transcript_path: path }, { roots }), ['--pointers-only', `--projects=${roots[0]}`], `start falls back to a scan of Claude Code's folders: ${why}`);
   }
   let linked = false;
   try { await symlink(outside, join(projects, 'link.jsonl')); linked = true; } catch { /* links need extra rights on Windows */ }
@@ -174,7 +175,7 @@ try {
     const e = await refusedRun(...args);
     assert(e && e.code === 1 && /Nothing was read or sent/.test(e.stderr), `refused: ${args.join(' ')}`);
   }
-  console.log(`PASS hook input outside the session folders${linked ? ' (links included)' : ' (links not tested: no right to make one here)'} falls back to the default scan; values are never read as options; --pointers-only refuses everything but pointers`);
+  console.log(`PASS hook input outside the session folders${linked ? ' (links included)' : ' (links not tested: no right to make one here)'} falls back to a scan of Claude Code's folders; values are never read as options; --pointers-only refuses everything but pointers`);
 
   // No environment variable redirects the key. With nothing to send, the run reports the address it would use.
   const emptyHome = join(work, 'home-empty'); await mkdir(join(emptyHome, '.claude', 'projects'), { recursive: true });
@@ -228,12 +229,13 @@ try {
   // The automatic path registers only posts made by this plugin's own Router server in Claude Code.
   const LOOKALIKE = 'mcp__another-server__router_write_entry';
   const codexRoot = join(home, '.codex', 'sessions');
-  const autoRoots = [join(home, '.claude', 'projects'), codexRoot];
   // A log where another server's look-alike write tool names one post, and this plugin's tool names another.
   const [lookPost, realPost] = [await write('A post a look-alike tool claims.'), await write('A post written with the Router plugin.')];
   const mixedLog = join(projects, '8c8c8c8c-mixed.jsonl');
   await writeFile(mixedLog, claudeLog('8c8c8c8c-mixed', [lookPost, realPost], ['IOTA', 'KAPPA'], [LOOKALIKE]));
-  const mixed = await runPlan(await plan('start', { transcript_path: mixedLog }, { roots: autoRoots }));
+  const mixedPlan = await plan('start', { transcript_path: mixedLog }, { roots });
+  assert(!mixedPlan.some(a => a.includes(codexRoot)), "The session-start plan does not read Codex's sessions folder");
+  const mixed = await runPlan(mixedPlan);
   assert.equal((await A.pointer(realPost, secretKey)).body.trace, 'held_locally', 'The plugin tool\'s post is registered');
   assert.equal((await A.pointer(lookPost, secretKey)).body.trace, null, 'The look-alike tool\'s post is not');
   assert(mixed.pointers_not_router_tool >= 1, JSON.stringify(mixed));
@@ -244,7 +246,7 @@ try {
   const indexedFirst = await capture();
   assert.equal(indexedFirst.mode, 'index only (nothing sent)');
   assert.equal(JSON.parse(await readFile(stateFile, 'utf8')).index[olderLook].tool, LOOKALIKE);
-  await runPlan(await plan('start', { transcript_path: olderLog }, { roots: autoRoots }));
+  await runPlan(await plan('start', { transcript_path: olderLog }, { roots }));
   await runPlan(['--pointers-only']);
   assert.equal((await A.pointer(olderLook, secretKey)).body.trace, null, 'An earlier index entry from a look-alike tool is not registered at session start');
   // Codex names its servers as each person configured them, so the automatic path leaves Codex posts alone.
@@ -255,6 +257,13 @@ try {
     cx('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'MARKER-MU post this' }] }),
     cx('event_msg', { type: 'item_completed', thread_id: 'cx-thread', item: { type: 'McpToolCall', server: 'router', tool: 'router_write_entry', status: 'completed',
       result: { content: [{ type: 'text', text: `Saved.\nEntry ID: ${codexPost}` }] } } })].join('\n') + '\n');
+  // A hook input naming a real log under Codex's sessions folder is not used: the hook falls back to Claude Code's folders.
+  const codexFile = join(codexRoot, '2026', 'rollout-pointer.jsonl');
+  assert.equal(await checkedLog(codexFile, roots), null, 'a log under the Codex root is refused');
+  assert.deepEqual(await plan('start', { transcript_path: codexFile }, { roots }), ['--pointers-only', `--projects=${roots[0]}`], 'start with a Codex log scans Claude Code\'s folders only');
+  assert.deepEqual(await plan('post', { transcript_path: codexFile, tool_use_id: 'w0' }, { roots, waitMs: 0 }), ['--pointers-only', `--projects=${roots[0]}`, '--days', '1']);
+  for (const p of [await plan('start', { transcript_path: codexFile }), await plan('post', { transcript_path: codexFile, tool_use_id: 'w0' }, { waitMs: 0 })])
+    assert(!p.some(a => a.includes(codexRoot) || /[\\/]\.codex[\\/]/.test(a)), 'with its default folders the hook never names a Codex folder');
   await runPlan(['--pointers-only', '--projects', codexRoot]);
   assert.equal((await A.pointer(codexPost, secretKey)).body.trace, null, 'The automatic path does not register Codex posts');
   // The manual command keeps its behaviour and registers it.

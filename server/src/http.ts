@@ -1151,7 +1151,7 @@ export const SYSTEM_SKILLS: Skill[] = [
 ];
 
 /** Reported to MCP clients. Kept in step with the plugin manifests by tool-surface.test.ts. */
-export const ROUTER_MCP_VERSION = '0.6.0';
+export const ROUTER_MCP_VERSION = '0.6.1';
 
 // What each built-in tool does to the world, for clients that show or gate tools by effect.
 // read: changes nothing. write: changes Router state and can be undone. destructive: removes something.
