@@ -199,6 +199,23 @@ try {
   }
   console.log('PASS the hook process is quiet, never fails, and does nothing without a key');
 
+  // A plugin folder reached through a link (a symlink, or a junction on Windows) must still run the hook: Node resolves
+  // links in import.meta.url but not in argv. Before 0.6.2 such a hook silently did nothing.
+  {
+    const { isEntry } = await import(pathToFileURL(hook).href);
+    const linkDir = join(await mkdtemp(join(tmpdir(), 'hook-link-')), 'hooks');
+    let made = true;
+    await symlink(dirname(hook), linkDir, process.platform === 'win32' ? 'junction' : 'dir').catch(() => { made = false; });
+    if (made) {
+      assert.equal(isEntry(join(linkDir, 'register-pointers.mjs'), hook), true, 'Run through a linked folder, the hook knows it was run directly');
+      assert.equal(isEntry(join(linkDir, 'session-start.md'), hook), false, 'Another file is not the hook');
+    }
+    assert.equal(isEntry(hook, hook), true);
+    assert.equal(isEntry(undefined, hook), false);
+    assert.equal(isEntry(join(home, 'no-such-file.mjs'), hook), false);
+    console.log(`PASS the hook runs when its folder is reached through a link${made ? '' : ' (link not tested: no right to make one here)'}`);
+  }
+
   // No pointer for a post whose copy could not be written; the next run writes the copy, then registers.
   const sixth = await write('Sixth synthetic note, whose copy cannot be written at first.');
   await writeFile(join(projects, '7b7b7b7b-synthetic.jsonl'), claudeLog('7b7b7b7b-synthetic', [sixth], ['THETA']));
