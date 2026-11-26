@@ -369,7 +369,7 @@ try {
     const heldInCopy = new Map();
     for (const ids of byLog.values()) for (const [id, held] of await copyCheck(ids, { tools: onlyRouterTool })) heldInCopy.set(id, held);
     for (const entryId of seen) {
-      const item = state.index[entryId];
+      const item = state.index[entryId], known = state.pointers[entryId];
       if (item.withheld) { if (!state.pointers[entryId]) totals.pointers_withheld++; continue; }
       if (!wanting(entryId)) continue;
       const held = heldInCopy.get(entryId);
