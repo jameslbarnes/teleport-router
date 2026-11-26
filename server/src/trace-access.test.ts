@@ -188,6 +188,19 @@ describe('trace requests that carry an app', () => {
     await expect(f.call(author, { action: 'prepare', request_id: first.request_id, revision: first.revision, nonce: 'aa'.repeat(32) })).rejects.toThrow('changed');
   });
 
+  it('lets the owner check, before uploading anything, that a request is still open and its requester can still read the post', async () => {
+    const f = fixture(), r = await f.ask();
+    const check = (who: any, revision = r.revision) => f.call(who, { action: 'check', request_id: r.request_id, revision });
+    expect(await check(author)).toMatchObject({ open: true, requester_can_read: true });
+    await expect(check(agent)).rejects.toThrow(/not found/i);
+    await expect(check(author, 'another-revision')).rejects.toThrow('changed');
+    f.restrict();
+    await expect(check(author)).rejects.toThrow('can no longer see');
+    const g = fixture(), s = await g.ask();
+    await g.call(agent, { action: 'withdraw', request_id: s.request_id });
+    await expect(g.call(author, { action: 'check', request_id: s.request_id, revision: s.revision })).rejects.toThrow('no longer open');
+  });
+
   it('answers the requester the same way before and after the app has run, so they cannot tell when it ran', async () => {
     const f = fixture(), r = await f.ask();
     const before = { retry: await f.ask(), status: await f.call(agent, { action: 'status', request_id: r.request_id }),

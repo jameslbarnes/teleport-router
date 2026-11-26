@@ -14,7 +14,18 @@
 //   --approved-file <file>  default subhost/approved.json in this checkout
 //   --trace-key-file <file> the key your traces are sealed to, when it is not your storage key
 //   --records <dir>         where reviewed runs are remembered, default ~/.router/trace-apps
+//   --capture-state <file>  the capture script's index (default ~/.router/traces/state.json; your rules file sits beside it)
+//   --capture-projects <dir> a folder of session logs for the capture script to read (repeat for several; default its own)
+//   --yes                   lets `run` upload a trace for the first time; without it, `run` says it would and stops
 //   --simulated             local test servers only: accepts a simulated attestation; refuses any HTTPS Router
+//
+// A post whose trace is not in your storage yet (Router may have only its pointer) is uploaded by `run --yes`,
+// after the pin check: the tool calls plugins/teleport-router/scripts/capture-traces.mjs --upload <post>, which
+// cleans the trace under your saved rules and encrypts it to your storage key, as an upload you start yourself
+// would. That needs your rules file and the post's session log, or the script's own copy of it, on this machine.
+// `show` and `run` always say when approving would upload a trace for the first time, and stop if they cannot
+// tell. `run` uploads only when your storage answers that no trace is stored, and only after Router confirms that
+// the request is still open and its requester can still read the post. Without --yes it says so and stops.
 //
 // `show` prints the code's hash computed here and a pin covering the request as shown: its version,
 // requester, note, purpose, code, the requester's key and what the app may do with a model. It writes
@@ -28,6 +39,7 @@
 // the answer and, for an app that could call a model, what the run says it sent there, and remembers
 // what you reviewed. Nothing reaches the requester until you `release`,
 // which refuses unless the run, the answer and the requester's key are still the ones you reviewed.
+import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -41,15 +53,18 @@ import { canonicalJson, checkRunBundle, checkRunResult, openResult, runHash, sea
 import { APP_RUNTIME, appHash } from '../dist/trace-app.js';
 import { checkModelDeclaration, describeModelUse, modelDeclarationHash } from '../dist/trace-model.js';
 import { readerDid } from '../dist/trace-access.js';
+import { traceRecordState } from './trace-owner-storage.mjs';
 import { verifyRunBundle } from '../../subhost/verify.mjs';
 import { runnerSpec, sandboxSpec } from '../../subhost/embed.mjs';
 import { grantTraceRead, traceReadSession } from '../../browser/src/trace-permission.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const CAPTURE = join(ROOT, 'plugins', 'teleport-router', 'scripts', 'capture-traces.mjs');
 const { values: v, positionals: [action, requestId] } = parseArgs({ allowPositionals: true, options: {
   'router-key-file': { type: 'string' }, 'owner-key-file': { type: 'string' }, 'trace-key-file': { type: 'string' },
   router: { type: 'string', default: 'https://router.teleport.computer' }, 'tinycloud-host': { type: 'string', default: 'https://tee.node.tinycloud.xyz' }, space: { type: 'string', default: 'router' }, pin: { type: 'string' },
   'approved-file': { type: 'string' }, records: { type: 'string', default: join(homedir(), '.router', 'trace-apps') }, simulated: { type: 'boolean', default: false },
+  'capture-state': { type: 'string' }, 'capture-projects': { type: 'string', multiple: true }, yes: { type: 'boolean', default: false },
 } });
 // The tool ends by letting its work finish rather than calling process.exit: on Windows, exiting while a
 // network connection is still closing trips an assertion in Node after the work has succeeded.
@@ -110,6 +125,39 @@ const showApp = r => {
   say(`Code (hash computed here: ${codeHash(r.app)}):\n${quoted(r.app.code, '  | ')}`);
 };
 const recordFile = id => join(v.records, `${id}.json`);
+const FIRST_UPLOAD = 'The trace of this note is not in your storage yet. Approving this run uploads it for the first time: cleaned on this machine under your saved rules, encrypted to your storage key and stored in your own storage, where it stays after the run.';
+/** What your own storage said about a trace record: stored, or none (the SDK's exact answer for a missing key). Any other answer stops the tool. */
+function storedState(got, key) {
+  const state = traceRecordState(got, key);
+  if (state === 'unknown') fail(`Could not tell from your storage whether this note's trace is stored (${visible(String(got?.ok ? 'an answer with no record in it' : got?.error?.code || 'no answer'))}). Nothing was uploaded or run.`);
+  return state;
+}
+/** For `show`, which has no storage key: whether Router finds the trace in your storage. A failed answer stops the tool. */
+async function storedViaRouter(entryId) {
+  const res = await fetch(new URL('/api/traces/metadata', base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60_000),
+    headers: { Authorization: 'Bearer ' + routerKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_id: entryId }) }).catch(() => null);
+  const body = res ? await res.json().catch(() => ({})) : {};
+  if (res?.ok && body?.full) return true;
+  if (res?.status === 404 && body?.error === 'Not found') return false;
+  fail(`Could not tell whether this note's trace is already in your storage (${res ? visible(String(body?.error || 'HTTP ' + res.status)) : 'Router did not answer'}). Approving might upload it for the first time; stopping here.`);
+}
+/** Upload one post's trace with the capture script, under your saved rules. Stops the tool if nothing was stored. */
+function uploadFromThisMachine(entryId) {
+  const keyFile = v['trace-key-file'] || v['owner-key-file'];
+  const args = [CAPTURE, '--router', v.router, '--key-file', v['router-key-file'], '--owner-key-file', keyFile, '--upload', entryId,
+    ...(v['capture-state'] ? ['--state', v['capture-state']] : []), ...(v['capture-projects'] || []).flatMap(dir => ['--projects', dir])];
+  const out = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 5 * 60_000, windowsHide: true });
+  let summary = null;
+  try { summary = JSON.parse(out.stdout); } catch { /* reported below */ }
+  if (summary && (summary.uploaded === 1 || summary.already_uploaded === 1) && !summary.failed) {
+    const item = summary.traces?.find(t => t.entry === entryId);
+    say(summary.uploaded ? `  ok  uploaded${item?.from_copy ? ' from this machine\'s copy of the session log' : ''}${item?.withheld ? ' (withheld by your rules: the record says so and holds nothing else)' : ''}`
+      : '  ok  it was uploaded before');
+    return;
+  }
+  const why = summary?.traces?.find(t => t.entry === entryId)?.error || (out.stderr || '').trim().split('\n').slice(-3).join(' ') || `the capture script exited ${out.status}`;
+  fail(`Could not upload the trace from this machine: ${visible(why)}\nNothing ran.`);
+}
 
 if (action === 'inbox') {
   const { requests } = await access({ action: 'inbox' });
@@ -120,6 +168,8 @@ if (action === 'inbox') {
 const r = await access({ action: 'status', request_id: requestId });
 if (action === 'show') {
   showApp(r);
+  if (await storedViaRouter(r.entry_id)) say('\nThe trace of this note is already in your storage.');
+  else say(`\n${FIRST_UPLOAD}`);
   if (r.app && (r.state === 'pending' || r.state === 'answered')) say(`\nTo run exactly the request above: run ${r.request_id} --pin ${reviewPin(r)}`);
   return;
 }
@@ -162,8 +212,20 @@ const owner = new TinyCloudNode({ privateKey: ownerKey, host: v['tinycloud-host'
 await owner.signIn();
 try {
   // The trace's record, read from your own storage rather than taken from Router.
-  const got = await owner.kv.get(`router/traces/${r.entry_id}/meta`, { source: 'network' });
-  if (!got.ok || got.data?.data == null) fail('No trace is stored for this note in your storage.');
+  const metaKey = `router/traces/${r.entry_id}/meta`;
+  const readMeta = () => owner.kv.get(metaKey, { source: 'network' });
+  let got = await readMeta();
+  if (storedState(got, metaKey) === 'none') {
+    // Your storage says no trace is stored: approving this run is what uploads it, from this machine, encrypted to your key.
+    say(`\n${FIRST_UPLOAD}`);
+    try { await access({ action: 'check', request_id: r.request_id, revision: r.revision }); }
+    catch (err) { fail(`Nothing was uploaded or run: ${visible(err.message)}`); }
+    if (!v.yes) { say('Run the same command with --yes to upload it and run the app. Nothing was uploaded or run.'); return; }
+    say('Uploading it from this machine, encrypted to your storage key...');
+    uploadFromThisMachine(r.entry_id);
+    got = await readMeta();
+    if (traceRecordState(got, metaKey) !== 'stored') fail('The upload finished but no trace can be read for this note in your storage. Nothing ran.');
+  }
   const record = typeof got.data.data === 'string' ? JSON.parse(got.data.data) : got.data.data;
   if (record?.v !== 1 || record.entryId !== r.entry_id || !record.full?.sha256 || String(record.ownerDid).toLowerCase() !== owner.did.toLowerCase())
     fail('The trace record in your storage is not this note\'s, or not yours.');
