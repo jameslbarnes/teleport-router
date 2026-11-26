@@ -14,6 +14,7 @@ import { canonical } from './author-records.js';
 import { linkMessage, networkRecovery } from './openkey-recovery.js';
 import { tracePointer } from './trace-pointer.js';
 import { traceAccess, traceRequestStore, TraceRequestError } from './trace-access.js';
+import { tracePointerStore, tracePointers, TracePointerError } from './trace-pointer-store.js';
 import { answerCustody, simulatedRunnerClient, subhostRunnerClient, tinyCloudTraceSource, traceRunner, workerExecutor } from './trace-run.js';
 import { modelKeyVault } from './trace-model.js';
 import { enabledTraceModels, traceAccessTool } from './trace-access-tool.js';
@@ -1282,6 +1283,29 @@ const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStor
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
 if (keyRecovery) storage.stop();
 const traceRequests = traceRequestStore(useFirestore ? getFirestore() : undefined);
+/** A post as this reader may see it now, with the feed's rules: a waiting post for its author only, a private group's for current members. */
+async function visibleToReader(id: string, actor: { pseudonym: string; user: User | null }): Promise<JournalEntry | null> {
+  const entry = await storage.getEntry(id);
+  if (!entry) return null;
+  const author = isEntryAuthor(entry, actor.pseudonym, actor.user?.handle);
+  if (isHiddenWhilePending(id, author)) return null;
+  return await canView(normalizeEntry(entry), actor.user?.handle, verifiedEmail(actor.user), author, storage, new Map()) ? entry : null;
+}
+// That a post's trace exists, and whether it is uploaded or still on its author's machine. Readers of the post may
+// learn this; nobody else. Needs no linked storage: an author registers a pointer with their Router key alone.
+const tracePointerService = tracePointers({
+  store: tracePointerStore(useFirestore ? getFirestore() : undefined),
+  getEntry: id => storage.getEntry(id),
+  visible: async (id, actor) => visibleToReader(id, { pseudonym: actor.pseudonym,
+    user: actor.handle ? await storage.getUser(actor.handle) : null }),
+  // A trace stored before pointers existed: asked only when its author registers, never by a reader.
+  async storedTrace(entry) {
+    if (!insights || !entry.handle) return false;
+    const author = await storage.getUser(entry.handle);
+    if (!author?.tinycloud) return false;
+    return !!(await insights.traceMetadata(author, entry.id) as any)?.full;
+  },
+});
 const handleTraceAccess = traceAccess({
   store: traceRequests,
   // Answers to requesters who gave no key are released to a key only this enclave holds.
@@ -1300,13 +1324,9 @@ const handleTraceAccess = traceAccess({
   },
   getUser: keyHash => storage.getUserByKeyHash(keyHash),
   host: authorCloud?.host || 'https://tee.node.tinycloud.xyz',
-  async visible(id, actor) {
-    const entry = await storage.getEntry(id);
-    if (!entry) return null;
-    const author = isEntryAuthor(entry, actor.pseudonym, actor.user?.handle);
-    if (isHiddenWhilePending(id, author)) return null;
-    return await canView(normalizeEntry(entry), actor.user?.handle, verifiedEmail(actor.user), author, storage, new Map()) ? entry : null;
-  },
+  visible: (id, actor) => visibleToReader(id, actor),
+  // A post whose trace is still on its author's machine: their owner tool uploads it when they approve a run.
+  async traceHeldLocally(entryId) { return await tracePointerService.stateOf(entryId) === 'held_locally'; },
   // What Router knows of a stored trace: never its contents, only its owner, its ciphertext hash and the owner's public key.
   async traceInfo(user, entryId) {
     if (!insights) return null;
@@ -3422,13 +3442,17 @@ async function createMCPServer(secretKey: string) {
         const type = entry.skill ? `skill ("${entry.skill.name}": ${oneLine(entry.skill.whenToUse)})` : entry.isReflection ? 'reflection' : 'note';
         const author = entry.handle ? `@${entry.handle}` : entry.pseudonym;
         const traceHelp = keyRecovery ? 'requests are paused during key recovery' : 'request with router_trace_access';
+        // Readers of the post may learn whether its trace exists and where it is; the check above has passed.
+        const traceState = await tracePointerService.stateOf(entry.id).catch(() => null);
+        const traceWhere = traceState === 'uploaded' ? 'uploaded, encrypted to its author; '
+          : traceState === 'held_locally' ? 'held on the author\'s machine until they approve a run; ' : '';
 
         return {
           content: [{
             type: 'text' as const,
-            text: `[${date}] ${author} posted a ${type}:\n\n${entry.content}\n\nPrivate trace: ${BASE_URL}${tracePointer(entry.id)} (${traceHelp})`,
+            text: `[${date}] ${author} posted a ${type}:\n\n${entry.content}\n\nPrivate trace: ${BASE_URL}${tracePointer(entry.id)} (${traceWhere}${traceHelp})`,
           }],
-          structuredContent: { entry_id: entry.id, content: entry.content, trace_url: BASE_URL + tracePointer(entry.id), ...(isAuthor ? { receipt: sharingReceipt(entry, BASE_URL, storage.isPending(entry.id)) } : {}) },
+          structuredContent: { entry_id: entry.id, content: entry.content, trace_url: BASE_URL + tracePointer(entry.id), trace_state: traceState, ...(isAuthor ? { receipt: sharingReceipt(entry, BASE_URL, storage.isPending(entry.id)) } : {}) },
         };
       }
 
@@ -8205,6 +8229,28 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    // Trace pointers. POST: the author says the trace behind one of their posts is held on their machine; the key
+    // goes in the Authorization header, and nothing of the trace is sent. GET ?entry=<id>: whether a post has a
+    // trace and where it is, for anyone who can read the post (key optional, in the header).
+    if (url.pathname === '/api/trace-pointers' && (req.method === 'POST' || req.method === 'GET')) {
+      res.setHeader('Cache-Control', 'no-store');
+      const key = req.headers.authorization?.replace(/^Bearer /i, '');
+      const signedIn = !!key && isValidSecretKey(key);
+      if (req.method === 'POST' && !signedIn) { res.writeHead(401); res.end(JSON.stringify({ error: 'Send your Router key in the Authorization header.' })); return; }
+      try {
+        const user = signedIn ? await storage.getUserByKeyHash(hashSecretKey(key!)) : null;
+        const actor = { pseudonym: signedIn ? derivePseudonym(key!) : '', handle: user?.handle ?? null, registered: !!user };
+        const result = req.method === 'POST'
+          ? await tracePointerService.register(actor, JSON.parse(await readBody(req, 4096)))
+          : await tracePointerService.status(actor, url.searchParams.get('entry'));
+        res.writeHead(200); res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(err instanceof TracePointerError ? err.status : 400);
+        res.end(JSON.stringify({ error: err instanceof TracePointerError ? err.message : 'Invalid trace pointer request.' }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/trace-access') {
       res.setHeader('Cache-Control', 'no-store');
       const key = req.headers.authorization?.replace(/^Bearer /i, '');
@@ -8277,7 +8323,21 @@ const server = createServer(async (req, res) => {
           case '/api/insights/consent/revoke': result = await insights.revokeConsent(user); break;
           case '/api/insights/consent/status': result = insights.consentStatus(user); break;
           case '/api/traces/owner': result = insights.ownerKey(user); break;
-          case '/api/traces': result = await insights.putTrace(user, body); break;
+          case '/api/traces': {
+            // The post's pointer, if any, now says the trace is uploaded; a post without one gets one. Also when the post
+            // already had its trace. putTrace has checked that the post is the caller's.
+            const markUploaded = async () => {
+              const entry = await storage.getEntry(body.entry_id);
+              if (entry && entry.handle === user!.handle) await tracePointerService.markUploaded(entry);
+            };
+            try { result = await insights.putTrace(user, body); }
+            catch (err) {
+              if (err instanceof Error && /already has its trace/.test(err.message)) await markUploaded().catch(() => {});
+              throw err;
+            }
+            await markUploaded().catch(e => console.warn('[Traces] could not record the upload on its pointer:', e?.message));
+            break;
+          }
           case '/api/traces/metadata': result = await insights.traceMetadata(user, body.entry_id); break;
           case '/api/traces/get': result = await insights.getTrace(user, body.entry_id, body.part); break;
           case '/api/traces/list': result = { entry_ids: await insights.listTraces(user) }; break;

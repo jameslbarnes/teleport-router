@@ -135,6 +135,8 @@ function entryIdFrom(text, structured) {
  * One item per successful Router write in a session log, in order.
  * `lines` are the raw JSONL lines. A post's slice is lines [firstLine, lastLine], inclusive.
  *
+ * `tool` is the full name of the write tool that made the post, for example
+ * "mcp__plugin_teleport-router_router__router_write_entry" (Claude Code) or "mcp__router__router_write_entry" (Codex).
  * `withheld` marks posts whose trace must not be uploaded:
  *   - from the first call to a never-upload tool onward, because later slices may quote what it returned
  *   - the whole log, when it belongs to a session started by one that made such a call (`excludedSessions`)
@@ -165,7 +167,7 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
         const bad = call.status !== 'completed' || call.error || call.result?.isError || call.result?.is_error;
         const entryId = bad ? null : entryIdFrom(text, call.result?.structuredContent);
         if (!entryId) { bad ? failed++ : unrecognized++; continue; }
-        posts.push({ entryId, agent: 'codex', firstLine: first, lastLine: i, previousEntryId: previous, sessionId: record.payload.thread_id || origin.sessionId,
+        posts.push({ entryId, agent: 'codex', tool: name, firstLine: first, lastLine: i, previousEntryId: previous, sessionId: record.payload.thread_id || origin.sessionId,
           postedAt: record.timestamp || null, withheld });
         first = i + 1; previous = entryId;
       }
@@ -174,12 +176,13 @@ export function findPosts(lines, { neverUpload = NEVER_UPLOAD_TOOLS, excludedSes
     for (const block of blocksOf(record)) {
       if (block.type === 'tool_use' && typeof block.name === 'string') {
         never(block.name);
-        if (isWrite(block.name, block.input) && typeof block.id === 'string') pending.set(block.id, { line: i });
+        if (isWrite(block.name, block.input) && typeof block.id === 'string') pending.set(block.id, { line: i, tool: block.name });
       } else if (block.type === 'tool_result' && pending.has(block.tool_use_id)) {
+        const tool = pending.get(block.tool_use_id).tool;
         pending.delete(block.tool_use_id);
         const entryId = block.is_error ? null : entryIdFrom(resultText(block), record.mcpMeta?.structuredContent ?? record.toolUseResult?.structuredContent);
         if (!entryId) { block.is_error ? failed++ : unrecognized++; continue; }
-        posts.push({ entryId, agent: 'claude-code', firstLine: first, lastLine: i, previousEntryId: previous, sessionId: record.sessionId || origin.sessionId,
+        posts.push({ entryId, agent: 'claude-code', tool, firstLine: first, lastLine: i, previousEntryId: previous, sessionId: record.sessionId || origin.sessionId,
           postedAt: record.timestamp || null, withheld });
         first = i + 1; previous = entryId;
       }

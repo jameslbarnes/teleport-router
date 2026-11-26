@@ -6,6 +6,25 @@
           {
             "type": "command",
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.md\""
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/register-pointers.mjs\" start >/dev/null 2>&1 || true",
+            "async": true,
+            "timeout": 150
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__plugin_teleport-router_router__(router_write_entry|write_to_shared_notebook|channel_[A-Za-z0-9_-]+|skill_[A-Za-z0-9_-]+)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/register-pointers.mjs\" post 2>/dev/null || true",
+            "async": true,
+            "timeout": 150
           }
         ]
       }

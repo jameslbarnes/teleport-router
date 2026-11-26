@@ -130,6 +130,8 @@ interface Dependencies {
   host: string;
   runner?: TraceRunnerClient;
   traceInfo?: TraceInfo;
+  /** Whether the author has said the trace of this post is held on their machine and not uploaded yet. Optional. */
+  traceHeldLocally?: (entryId: string) => Promise<boolean>;
   /** Called once for each new request, and again when the requester replaces the app before the owner runs it. */
   onRequest?: (request: { id: string; owner: string; entryId: string; requesterName: string; purpose: string }) => void;
   /** Router's own key for answers to requesters who gave none. Without it, requests must name a key. */
@@ -140,7 +142,7 @@ interface Dependencies {
   models?: readonly AttestedProvider[];
   now?: () => number;
 }
-export function traceAccess({ store, visible, getUser, host, runner, traceInfo, onRequest, custody, modelKeys, models = [], now = Date.now }: Dependencies) {
+export function traceAccess({ store, visible, getUser, host, runner, traceInfo, traceHeldLocally, onRequest, custody, modelKeys, models = [], now = Date.now }: Dependencies) {
   /** Why this server cannot take a request that calls this provider, or null when it can. */
   const modelRefusal = (provider: AttestedProvider) => !modelKeys || !models.length ? 'This server does not run apps that call a model yet. Send the app without a model declaration.'
     : !models.includes(provider) ? `This server does not run apps that call ${PROVIDER_NAMES[provider]} yet.` : null;
@@ -263,7 +265,12 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       if (!r.modelKey) throw new TraceRequestError(NO_KEY, 409);
     }
     const trace = await traceInfo(actor.user, r.entryId);
-    if (!trace) throw new TraceRequestError('No trace is stored for this note.', 409);
+    if (!trace) {
+      // The trace is still on the author's machine: their owner tool uploads it when they approve the run.
+      const local = traceHeldLocally ? await traceHeldLocally(r.entryId).catch(() => false) : false;
+      throw new TraceRequestError(local ? 'The trace of this note is still on your machine. Approve the run with your owner tool (trace-app-owner.mjs run), which uploads it first.'
+        : 'No trace is stored for this note.', 409);
+    }
     // Without a model the description stays version 1, field for field, so runners built before model calls still run it.
     const fields = {
       request_id: r.id, revision: r.revision, requester: r.requesterName, owner_did: trace.ownerDid, entry_id: r.entryId, part: 'full',
@@ -375,6 +382,15 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       }), 'requester');
     }
     if (!isOwner(r, actor)) throw missing();
+    // Asked by the owner's tool before it uploads a trace for this request: is it still open, unchanged, and can the
+    // requester still read the post? Nothing is uploaded for a request that would be refused anyway.
+    if (input.action === 'check') {
+      revised(r, input);
+      if (!r.app) throw new TraceRequestError('This request was made before apps were required. Decline it; the requester can ask again with an app.', 409);
+      if (r.state !== 'pending' && r.state !== 'answered') throw new TraceRequestError('This request is no longer open.', 409);
+      if (!await visible(r.entryId, await requester(r))) throw new TraceRequestError('The requester can no longer see this post.', 409);
+      return { request_id: r.id, revision: r.revision, state: r.state, open: true, requester_can_read: true };
+    }
     if (input.action === 'prepare') return prepare(actor, r, input);
     if (input.action === 'approve') {
       if (!r.app) throw new TraceRequestError('This request was made before apps were required. Decline it; the requester can ask again with an app.', 409);
