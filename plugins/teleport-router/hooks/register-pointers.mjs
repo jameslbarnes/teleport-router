@@ -24,10 +24,11 @@
 // plugin, which Claude Code hands this hook as CLAUDE_PLUGIN_OPTION_ROUTER_KEY; without a key it does nothing.
 // "pointers": false in ~/.router/traces/rules.json stops the registering; the local index and copy are still kept.
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const LIMIT_MS = 120_000;
 const SCRIPT_HEAP_MB = 512;
@@ -125,7 +126,14 @@ async function main() {
   if (args) await capture(args);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** True when this file was run directly. Compares real paths: Node resolves links in import.meta.url but not in argv,
+ *  so a plugin folder reached through a link (a symlink or junction) would otherwise never run. */
+export function isEntry(argv1 = process.argv[1], self = fileURLToPath(import.meta.url)) {
+  if (!argv1) return false;
+  try { return realpathSync(argv1) === realpathSync(self); } catch { return false; }
+}
+
+if (isEntry()) {
   // On the time limit, stop the script too, so nothing outlives the hook.
   const quit = () => { try { current?.kill(); } catch { /* already gone */ } process.exit(0); };
   setTimeout(quit, LIMIT_MS).unref();
