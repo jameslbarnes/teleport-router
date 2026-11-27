@@ -108,6 +108,43 @@ try {
   assert.equal(resent.pointers_registered, 0); assert.equal(resent.pointers_already, 2, 'Registering again is a no-op on Router');
   console.log('PASS a second run sends nothing, and a repeated registration changes nothing');
 
+  // A post Router does not know as this account's (another account's, or deleted) is set aside, and the posts after it
+  // still get pointers. In 0.6.1 and 0.6.2 the refusal threw and ended the run, on every later run too.
+  {
+    const homeR = join(work, 'home-refused'), projectsR = join(homeR, '.claude', 'projects', '-work-refused');
+    await mkdir(projectsR, { recursive: true });
+    const mine = await write('A note after a refused one.');
+    await writeFile(join(projectsR, '3c3c3c3c-synthetic.jsonl'), claudeLog('3c3c3c3c-synthetic', ['mzzzzzzz-nosuch', mine], ['DELTA', 'EPSILON']));
+    const stateR = join(homeR, '.router', 'traces', 'state.json');
+    const captureR = async () => JSON.parse((await run(process.execPath, [cli, '--router', A.base, '--key-file', keyFile, '--projects', join(homeR, '.claude', 'projects'), '--state', stateR, '--pointers-only'], { env: cleanEnv(homeR) })).stdout);
+    for (let pass = 1; pass <= 2; pass++) {
+      const r = await captureR();
+      assert.equal(r.pointers_failed, 0, JSON.stringify(r));
+      assert.equal((await A.pointer(mine, secretKey)).body.trace, 'held_locally', 'The post after the refused one has its pointer');
+      const saved = JSON.parse(await readFile(stateR, 'utf8')).pointers['mzzzzzzz-nosuch'];
+      assert.equal(saved.skipped, 'not your post, or deleted'); assert.equal(saved.tries, pass, 'Each run counts one more try');
+    }
+    console.log('PASS a post Router refuses is set aside, counted per run, and does not stop the posts after it');
+  }
+
+  // A note's receipt can appear twice in one log, for example when a later call returns the same note. The index keeps
+  // the first; the copy and the pointers must still go ahead. In 0.6.0 to 0.6.3 the whole log was refused instead.
+  {
+    const homeD = join(work, 'home-repeat'), projectsD = join(homeD, '.claude', 'projects', '-work-repeat');
+    await mkdir(projectsD, { recursive: true });
+    const once = await write('A note whose receipt repeats.'), next = await write('The note after it.');
+    const logD = join(projectsD, '4d4d4d4d-synthetic.jsonl');
+    await writeFile(logD, claudeLog('4d4d4d4d-synthetic', [once, once, next], ['ZETA', 'ETA', 'THETA']));
+    const stateD = join(homeD, '.router', 'traces', 'state.json');
+    const r = JSON.parse((await run(process.execPath, [cli, '--router', A.base, '--key-file', keyFile, '--projects', join(homeD, '.claude', 'projects'), '--state', stateD, '--pointers-only'], { env: cleanEnv(homeD) })).stdout);
+    assert.equal(r.copies_written, 1, JSON.stringify(r)); assert.equal(r.pointers_registered, 2, JSON.stringify(r));
+    assert(!(r.traces || []).some(t => t.error), JSON.stringify(r.traces));
+    const saved = JSON.parse(await readFile(stateD, 'utf8'));
+    assert.equal(saved.index[once].first_line, 0, 'The index keeps the first appearance');
+    for (const id of [once, next]) assert.equal((await A.pointer(id, secretKey)).body.trace, 'held_locally');
+    console.log('PASS a receipt that repeats in a log keeps its first slice, and the log is still copied and pointed to');
+  }
+
   // The copy holds exactly the log's lines up to the last post, readable by the owner only.
   const copy = state.copies[logPath];
   assert(copy, 'A copy is recorded for the log');
