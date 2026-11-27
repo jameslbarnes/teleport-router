@@ -24,7 +24,7 @@ const sorted = value => JSON.stringify(value, (_, v) => v && typeof v === 'objec
 const digest = async value => hexlify(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sorted(value))))).slice(2);
 
 /** OpenKey handles signing. Only the browser's recovery session gets the named decrypt permission. */
-export async function openKeyOwner(host, { traceSession, expectedDid } = {}) {
+export async function openKeyOwner(host, { traceSession, expectedDid, agentSpace } = {}) {
   const origin = location.origin;
   const manifest = keyManifest(origin);
   const openkey = new OpenKey({ appName: 'Router', mode: 'iframe' });
@@ -32,9 +32,13 @@ export async function openKeyOwner(host, { traceSession, expectedDid } = {}) {
   const did = 'did:pkh:eip155:1:' + account.address;
   if (expectedDid && expectedDid.toLowerCase() !== did.toLowerCase()) throw Error('Choose the OpenKey account that owns this storage.');
   const manifestDigest = await digest(manifest);
-  const space = traceSession?.spacePrefix || 'router';
+  const space = traceSession?.spacePrefix || (agentSpace ? agentSpace.split(':').slice(5).join(':') : 'router');
   const traceScope = traceSession?.manifest.permissions[0];
   const permissions = traceScope ? [{ ...traceScope, path: 'router/recovery-v1' }, traceScope]
+    : agentSpace ? [
+      { service: 'tinycloud.kv', space: agentSpace, path: 'router/recovery-v1', actions: ['get'] },
+      { service: 'tinycloud.kv', space: agentSpace, path: 'router/traces/', actions: ['get'] },
+    ]
     : [{ service: 'tinycloud.kv', space, path: 'router/', actions: ['get', 'put', 'list', 'del'] }];
   const options = {
     openkey: { mode: 'iframe', client: {
@@ -46,9 +50,9 @@ export async function openKeyOwner(host, { traceSession, expectedDid } = {}) {
   };
   const owner = new TinyCloudWeb({
     ...options, provider: new OpenKeyProvider(openkey, account),
-    manifest: { ...manifest, keys: [{ path: recoveryKeyPath(origin), abilities: traceSession ? ['decrypt'] : ['key.create', 'decrypt'] }],
+    manifest: { ...manifest, keys: [{ path: recoveryKeyPath(origin), abilities: (traceSession || agentSpace) ? ['decrypt'] : ['key.create', 'decrypt'] }],
       defaults: false, prefix: '', space, includePublicSpace: false, expiry: traceSession ? '2d' : '366d', permissions },
-    autoCreateSpace: !traceSession, sessionExpirationMs: (traceSession ? 2 : 366) * DAY,
+    autoCreateSpace: !traceSession && !agentSpace, sessionExpirationMs: (traceSession ? 2 : 366) * DAY,
   });
   // Account setup is a separate short-lived approval. It cannot decrypt data and is never delegated to Router.
   async function initializeNetwork() {

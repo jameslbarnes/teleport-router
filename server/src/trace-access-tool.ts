@@ -9,7 +9,7 @@ export function enabledTraceModels(value: string | undefined = process.env.TRACE
 }
 
 const BEFORE = 'Ask to run a small app on the private trace behind a note you can read. You never get the trace: the owner, or an agent the owner set up to do it, reads your app\'s code, runs it in an attested enclave, reads its answer and decides whether to release that answer to you. The app is JavaScript defining function analyze(trace, info) that returns a string of at most 8 KB; it has no network, files or timers, 256 MB and 10 seconds. trace is JSON text: {kind: "router-post-trace", entry_id, agent ("claude-code" or "codex"), session_id, posted_at, records}, where records are the session\'s log entries in that agent\'s own format, cleaned of credentials (for agent "claude-code", {type: "user" or "assistant", timestamp, message: {role, content}}, content being text or a list of {type: "text", text}, {type: "tool_use", name, input} and {type: "tool_result", content, is_error when it failed}; an assistant message also has model and usage, its token counts); info is {entry_id, bytes}. Try the function with plain Node on a small trace of that shape before sending it. The released answer comes back from status as answer_text. To have it sealed to a key of your own instead, so that Router cannot read it, give answer_public_key.';
-const AFTER = ' Use withdraw to take a request back (needed before sending a different app). Use inbox for requests to you (with each app\'s code, so you can review it for your person), decline or withhold to refuse. A pointer alone grants no access.';
+const AFTER = ' Use withdraw to take a request back (needed before sending a different app). Use inbox for requests to you (with each app\'s code, so you can review it for your person), decline or withhold to refuse. To authorize this machine\'s owner tool in the browser without handling recovery files, use pair_start with its agent_public_key and pair_poll with pair_token (returns ciphertext only the local tool can open). A pointer alone grants no access.';
 
 export function traceAccessTool(providers: readonly AttestedProvider[]) {
   const models = providers.length > 0;
@@ -19,8 +19,10 @@ export function traceAccessTool(providers: readonly AttestedProvider[]) {
       + ' The key you send stays in your own conversation log, so make a key for this with a small spending limit. The owner sees the declaration, and Router never shows or logs the key.'
     : '') + AFTER;
   const inputSchema = { type: 'object', properties: {
-    action: { type: 'string', enum: ['request', 'inbox', 'status', 'withdraw', 'decline', 'withhold'] },
+    action: { type: 'string', enum: ['request', 'inbox', 'status', 'withdraw', 'decline', 'withhold', 'pair_start', 'pair_poll'] },
     entry_id: { type: 'string' },
+    agent_public_key: { type: 'string', description: 'For pair_start: compressed secp256k1 public key printed by the local owner tool (pair-init).' },
+    pair_token: { type: 'string', description: 'For pair_poll: the pairing token returned by pair_start.' },
     app: { type: 'object', description: 'Required when requesting.', properties: {
       code: { type: 'string', description: 'JavaScript defining function analyze(trace, info), returning a string. At most 32 KB.' },
       purpose: { type: 'string', description: 'One line, at most 280 characters: what the app is for. The owner reads it.' },
