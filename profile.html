@@ -394,6 +394,10 @@
         <section class="feed" id="feed" aria-label="Notes">
             <p class="r-status loading" role="status">Loading notes…</p>
         </section>
+        <div class="r-actions" id="older-notes" hidden>
+            <button type="button" class="r-btn" id="show-older-btn">Show older</button>
+            <p class="r-status" id="older-status" role="status"></p>
+        </div>
 
         <footer class="r-footer">
             <a href="/docs">How Router works</a>
@@ -812,6 +816,49 @@ Use router_get_entry to fetch each one, then let's talk about what's interesting
             else if (trigger.dataset.action === 'toggle-summary') toggleSummary(id);
         });
 
+        // The notes loaded so far, oldest page last, and the cursor for the next page (null at the end)
+        let profileNotes = null;
+
+        // Draw the notes loaded so far. While older notes remain, summaries older than the oldest loaded note wait for them.
+        function renderLoadedNotes() {
+            const { handle, entries, nextCursor, summaries } = profileNotes;
+            const oldest = entries.length ? entries[entries.length - 1].timestamp : 0;
+            const shownSummaries = nextCursor
+                ? summaries.filter(s => (s.endTime || s.timestamp) >= oldest)
+                : summaries;
+            const summarizedEntryIds = new Set();
+            shownSummaries.forEach(s => (s.entryIds || []).forEach(id => summarizedEntryIds.add(id)));
+            document.getElementById('feed').innerHTML = renderProfileFeed(handle, entries, shownSummaries, summarizedEntryIds);
+            document.getElementById('older-notes').hidden = !nextCursor;
+        }
+
+        // Load the next page of older notes with the cursor the last page returned
+        async function showOlderNotes() {
+            if (!profileNotes || !profileNotes.nextCursor) return;
+            const button = document.getElementById('show-older-btn');
+            const status = document.getElementById('older-status');
+            button.disabled = true;
+            status.classList.remove('r-status--error');
+            status.textContent = 'Loading older notes…';
+            try {
+                const res = await fetch(`/api/users/${encodeURIComponent(profileNotes.handle)}/entries?cursor=${encodeURIComponent(profileNotes.nextCursor)}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const known = new Set(profileNotes.entries.map(e => e.id));
+                profileNotes.entries.push(...(data.entries || []).filter(e => !known.has(e.id)));
+                profileNotes.nextCursor = data.nextCursor || null;
+                status.textContent = '';
+                renderLoadedNotes();
+            } catch (err) {
+                console.error('Error loading older notes:', err);
+                status.classList.add('r-status--error');
+                status.textContent = 'Could not load older notes. Try again.';
+            } finally {
+                button.disabled = false;
+            }
+        }
+        document.getElementById('show-older-btn').addEventListener('click', showOlderNotes);
+
         // Load profile
         async function loadProfile() {
             const handle = getHandleFromPath();
@@ -920,6 +967,7 @@ Use router_get_entry to fetch each one, then let's talk about what's interesting
 
                 const entriesData = await entriesRes.json();
                 const entries = entriesData.entries || [];
+                profileNotes = { handle, entries, nextCursor: entriesData.nextCursor || null, summaries: [] };
 
                 const summariesData = await summariesRes.json();
                 const allSummaries = summariesData.summaries || [];
@@ -939,12 +987,8 @@ Use router_get_entry to fetch each one, then let's talk about what's interesting
                     return;
                 }
 
-                // Build entries that are covered by summaries
-                const summarizedEntryIds = new Set();
-                summaries.forEach(s => (s.entryIds || []).forEach(id => summarizedEntryIds.add(id)));
-
-                // Render feed
-                feed.innerHTML = renderProfileFeed(handle, entries, summaries, summarizedEntryIds);
+                profileNotes.summaries = summaries;
+                renderLoadedNotes();
 
             } catch (err) {
                 console.error('Error loading profile:', err);
@@ -1047,7 +1091,8 @@ Use router_get_entry to fetch each one, then let's talk about what's interesting
                     throw new Error(data.error || 'Could not delete this note. Try again.');
                 }
 
-                // Remove from DOM
+                // Remove from the loaded notes and the DOM
+                if (profileNotes) profileNotes.entries = profileNotes.entries.filter(e => e.id !== entryId);
                 if (entryEl) {
                     entryEl.style.opacity = '0';
                     setTimeout(() => entryEl.remove(), 300);

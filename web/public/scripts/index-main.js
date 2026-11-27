@@ -258,7 +258,7 @@
             try {
                 // If filtering by pseudonym, use simple view (no daily grouping)
                 if (filterPseudonym) {
-                    await loadFilteredFeed(feed);
+                    await loadFilteredFeed(feed, loadMore);
                     isLoadingFeed = false;
                     return;
                 }
@@ -735,22 +735,43 @@
             `;
         }
 
-        async function loadFilteredFeed(feed) {
-            const entriesUrl = `/api/entries/${encodeURIComponent(filterPseudonym)}`;
+        // One person's notes loaded so far, newest first, and the cursor for the next page (null at the end)
+        let filteredEntries = [];
+        let filteredNextCursor = null;
+
+        async function loadFilteredFeed(feed, loadMore = false) {
+            const baseUrl = `/api/entries/${encodeURIComponent(filterPseudonym)}`;
+            const olderPage = loadMore && !!filteredNextCursor;
+            const entriesUrl = olderPage ? `${baseUrl}?cursor=${encodeURIComponent(filteredNextCursor)}` : baseUrl;
 
             const [entriesRes, summariesRes] = await Promise.all([
                 fetch(entriesUrl, { headers: authHeaders(userKey) }),
                 fetch('/api/summaries')
             ]);
+            if (!entriesRes.ok) throw new Error(`HTTP ${entriesRes.status}`);
 
             const entriesData = await entriesRes.json();
             const summariesData = await summariesRes.json();
 
-            let entries = entriesData.entries || [];
+            const page = entriesData.entries || [];
+            if (olderPage) {
+                const known = new Set(filteredEntries.map(e => e.id));
+                filteredEntries = [...filteredEntries, ...page.filter(e => !known.has(e.id))];
+                filteredNextCursor = entriesData.nextCursor || null;
+            } else {
+                // A refresh starts again from the newest page and drops older pages, so notes the reader may no longer
+                // see, or that were deleted, never stay on screen.
+                filteredEntries = page;
+                filteredNextCursor = entriesData.nextCursor || null;
+            }
+
+            const entries = filteredEntries;
             const allSummaries = summariesData.summaries || [];
 
-            // Filter summaries to this pseudonym
-            const summaries = allSummaries.filter(s => s.pseudonym === filterPseudonym);
+            // Filter summaries to this pseudonym. While older notes remain, summaries older than the oldest shown note wait for them.
+            const oldest = entries.length ? entries[entries.length - 1].timestamp : 0;
+            const summaries = allSummaries.filter(s => s.pseudonym === filterPseudonym
+                && (!filteredNextCursor || (s.endTime || s.timestamp) >= oldest));
 
             // Merge and sort
             const feedItems = [
@@ -765,13 +786,19 @@
                 return;
             }
 
+            const older = filteredNextCursor ? `
+                <div class="load-more-container">
+                    <button type="button" class="r-btn load-more-btn" id="show-older-btn" onclick="loadFeed(true, true)">Show older</button>
+                </div>
+            ` : '';
+
             feed.innerHTML = header + feedItems.map(item => {
                 if (item.type === 'summary') {
                     return renderSummary(item.data);
                 } else {
                     return renderEntry(item.data);
                 }
-            }).join('');
+            }).join('') + older;
         }
 
         // Load channels for sidebar
