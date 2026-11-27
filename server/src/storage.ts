@@ -324,6 +324,50 @@ export function encodePageCursor(item: { timestamp: number; id: string }): strin
   return Buffer.from(JSON.stringify({ t: item.timestamp, id: item.id }), 'utf8').toString('base64url');
 }
 
+/** A place in newest-first order, (timestamp, id). A page that starts after it holds only notes that sort after it. */
+export interface EntryBound {
+  timestamp: number;
+  id: string;
+}
+
+/** Options for one person's notes: `before` returns only notes older than that place in newest-first order. */
+export interface EntryPageOptions {
+  before?: EntryBound;
+}
+
+/** Whether an id could be one Firestore document id: no '/', not '.' or '..', not __reserved__, at most 512 bytes. */
+export function isSingleDocumentId(id: unknown): id is string {
+  return typeof id === 'string' && id.length > 0 && Buffer.byteLength(id, 'utf8') <= 512 && !id.includes('/')
+    && id !== '.' && id !== '..' && !/^__.*__$/.test(id);
+}
+
+/** The place a person's-notes cursor names, or null when it is missing or malformed. */
+export function decodePersonCursor(cursor?: string | null): EntryBound | null {
+  if (!cursor || cursor.length > 1024) return null;
+  const decoded = decodePageCursorInternal(cursor);
+  return decoded && isSingleDocumentId(decoded.id) ? { timestamp: decoded.t, id: decoded.id } : null;
+}
+
+/** Ids in Firestore's order: by UTF-8 bytes. For ASCII ids that is plain code-unit order. */
+export function compareIdBytes(a: string, b: string): number {
+  if (/^[\x00-\x7f]*$/.test(a) && /^[\x00-\x7f]*$/.test(b)) return a < b ? -1 : a > b ? 1 : 0;
+  return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
+/**
+ * The order of one person's notes, the same in every storage and in Firestore: timestamp descending, then id
+ * descending by bytes. Negative when `a` comes first. The main feed keeps its own order.
+ */
+export function compareByPersonOrder(a: { timestamp: number; id: string }, b: { timestamp: number; id: string }): number {
+  if (a.timestamp !== b.timestamp) return b.timestamp - a.timestamp;
+  return compareIdBytes(b.id, a.id);
+}
+
+/** Whether a note comes after this place in a person's order (older, or as old with a lower id). */
+export function isOlderThan(entry: { timestamp: number; id: string }, bound?: EntryBound): boolean {
+  return !bound || compareByPersonOrder(entry, bound) > 0;
+}
+
 function compareByFeedOrder(a: { timestamp: number; id: string }, b: { timestamp: number; id: string }): number {
   if (a.timestamp !== b.timestamp) return b.timestamp - a.timestamp;
   return b.id.localeCompare(a.id);
@@ -339,11 +383,11 @@ export interface Storage {
   /** Get recent entries (newest first) */
   getEntries(limit?: number, offset?: number, cursor?: string): Promise<JournalEntry[]>;
 
-  /** Get entries by pseudonym */
-  getEntriesByPseudonym(pseudonym: string, limit?: number): Promise<JournalEntry[]>;
+  /** Get entries by pseudonym, newest first by (timestamp, id); `options.before` starts after that place */
+  getEntriesByPseudonym(pseudonym: string, limit?: number, options?: EntryPageOptions): Promise<JournalEntry[]>;
 
-  /** Get entries by handle */
-  getEntriesByHandle(handle: string, limit?: number, since?: number): Promise<JournalEntry[]>;
+  /** Get entries by handle, newest first by (timestamp, id); `before` starts after that place */
+  getEntriesByHandle(handle: string, limit?: number, since?: number, before?: EntryBound): Promise<JournalEntry[]>;
 
   /** Every stored post, imported conversation and summary that carries this handle or one of these pseudonyms.
    * Linking an account to its own storage uses it to find that account's records without reading everyone's. */
@@ -522,16 +566,17 @@ export class MemoryStorage implements Storage {
     return this.entries.slice(offset, offset + limit);
   }
 
-  async getEntriesByPseudonym(pseudonym: string, limit = 50): Promise<JournalEntry[]> {
+  async getEntriesByPseudonym(pseudonym: string, limit = 50, options?: EntryPageOptions): Promise<JournalEntry[]> {
     return this.entries
-      .filter(e => e.pseudonym === pseudonym)
+      .filter(e => e.pseudonym === pseudonym && isOlderThan(e, options?.before))
+      .sort(compareByPersonOrder)
       .slice(0, limit);
   }
 
-  async getEntriesByHandle(handle: string, limit = 50, since?: number): Promise<JournalEntry[]> {
+  async getEntriesByHandle(handle: string, limit = 50, since?: number, before?: EntryBound): Promise<JournalEntry[]> {
     return this.entries
-      .filter(e => e.handle === handle && (!since || e.timestamp >= since))
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .filter(e => e.handle === handle && (!since || e.timestamp >= since) && isOlderThan(e, before))
+      .sort(compareByPersonOrder)
       .slice(0, limit);
   }
 
@@ -1022,13 +1067,16 @@ export class FirestoreStorage implements Storage {
     } as JournalEntry));
   }
 
-  async getEntriesByPseudonym(pseudonym: string, limit = 50): Promise<JournalEntry[]> {
-    const snapshot = await this.db
+  async getEntriesByPseudonym(pseudonym: string, limit = 50, options?: EntryPageOptions): Promise<JournalEntry[]> {
+    // The (pseudonym, timestamp desc) index ends in the document id in the same direction, so it serves this order
+    // and a start after a (timestamp, id) place without another index.
+    let query = this.db
       .collection(this.collection)
       .where('pseudonym', '==', pseudonym)
       .orderBy('timestamp', 'desc')
-      .limit(limit)
-      .get();
+      .orderBy('__name__', 'desc');
+    if (options?.before) query = query.startAfter(options.before.timestamp, options.before.id);
+    const snapshot = await query.limit(limit).get();
 
     return snapshot.docs.map(doc => ({
       id: doc.id,
@@ -1036,15 +1084,17 @@ export class FirestoreStorage implements Storage {
     } as JournalEntry));
   }
 
-  async getEntriesByHandle(handle: string, limit = 50, since?: number): Promise<JournalEntry[]> {
+  async getEntriesByHandle(handle: string, limit = 50, since?: number, before?: EntryBound): Promise<JournalEntry[]> {
     let query = this.db
       .collection(this.collection)
       .where('handle', '==', handle);
     if (since) {
       query = query.where('timestamp', '>=', since);
     }
+    // Same index as before: (handle, timestamp desc) ends in the document id in the same direction.
+    query = query.orderBy('timestamp', 'desc').orderBy('__name__', 'desc');
+    if (before) query = query.startAfter(before.timestamp, before.id);
     const snapshot = await query
-      .orderBy('timestamp', 'desc')
       .limit(limit)
       .get();
 
@@ -1935,8 +1985,13 @@ export class StagedStorage implements Storage {
   /**
    * Get entries by pseudonym. If includePending is true, includes unpublished entries.
    */
-  async getEntriesByPseudonym(pseudonym: string, limit = 50, includePending = false): Promise<JournalEntry[]> {
-    const published = await this.published.getEntriesByPseudonym(pseudonym, limit);
+  async getEntriesByPseudonym(
+    pseudonym: string,
+    limit = 50,
+    options: boolean | (EntryPageOptions & { includePending?: boolean }) = false,
+  ): Promise<JournalEntry[]> {
+    const { includePending = false, before } = typeof options === 'boolean' ? { includePending: options, before: undefined } : options;
+    const published = await this.published.getEntriesByPseudonym(pseudonym, limit, before ? { before } : undefined);
 
     if (!includePending) {
       return published;
@@ -1945,14 +2000,14 @@ export class StagedStorage implements Storage {
     // Include pending entries for this pseudonym
     const pendingEntries: JournalEntry[] = [];
     for (const entry of this.pending.values()) {
-      if (entry.pseudonym === pseudonym) {
+      if (entry.pseudonym === pseudonym && isOlderThan(entry, before)) {
         pendingEntries.push(entry);
       }
     }
 
-    // Merge and sort by timestamp (newest first)
+    // Merge in a person's order: newest first by (timestamp, id bytes)
     return [...pendingEntries, ...published]
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort(compareByPersonOrder)
       .slice(0, limit);
   }
 
@@ -1969,8 +2024,8 @@ export class StagedStorage implements Storage {
     return entries.sort((a, b) => b.timestamp - a.timestamp);
   }
 
-  async getEntriesByHandle(handle: string, limit = 50, since?: number): Promise<JournalEntry[]> {
-    return this.published.getEntriesByHandle(handle, limit, since);
+  async getEntriesByHandle(handle: string, limit = 50, since?: number, before?: EntryBound): Promise<JournalEntry[]> {
+    return this.published.getEntriesByHandle(handle, limit, since, before);
   }
 
   async getEntriesSince(since: number, limit = 50): Promise<JournalEntry[]> {

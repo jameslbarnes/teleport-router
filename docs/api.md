@@ -34,6 +34,12 @@ with `Cache-Control: no-store`.
 | 503 | A dependency is unavailable; try again |
 
 **Lists.** `limit` is clamped to 1–200. The notebook and conversation lists also take `cursor` (preferred) or `offset`.
+A person's notes (`GET /api/entries/:handle` and `GET /api/users/:handle/entries`) take `cursor` only. Each answer
+carries `nextCursor`: pass it back as `cursor` for the next, older page; it is `null` on the last page. Pages run newest
+first by timestamp, then by id compared byte by byte, so notes with the same timestamp are never skipped or repeated.
+Every page applies the same visibility as the first, is full unless it is the last, and its cursor names the last note
+on it, so pages and cursors are the same for a reader whether or not notes they cannot see exist. A malformed `cursor`
+gets 400. If the notes cannot be read, the answer is 503: try again; it is never a short last page.
 
 **Names.** The API says `entry` for a note and `channel` for a group; the product and the docs say note and group.
 Request and response fields are a mix of `snake_case` and `camelCase`. New fields are `snake_case`.
@@ -57,7 +63,7 @@ Key column: **H** header (or `?key=`), **B** JSON body `secret_key`, **H-only** 
 | `DELETE /api/entries/:id` | H | Delete your own note, waiting or published |
 | `POST /api/entries/:id/publish` | H | Publish your own waiting note now |
 | `POST /api/entries/:id/notice` | H-only | Record that the sharing notice was shown (client-reported) |
-| `GET /api/entries/:handle` | H, optional | A person's notes |
+| `GET /api/entries/:handle` | H, optional | A person's notes, a page at a time (`cursor`, `nextCursor`) |
 | `GET /api/search?q=` | H, optional | Search notes you may read |
 | `GET /api/inbox` | H | Notes addressed to you |
 
@@ -96,7 +102,7 @@ Key column: **H** header (or `?key=`), **B** JSON body `secret_key`, **H-only** 
 | `POST /api/identity/lookup` | B | Who this key is |
 | `POST /api/identity/update` | B | Change display name, bio, waiting period, display settings |
 | `GET /api/identity/check/:handle` | – | Whether a handle is free |
-| `GET /api/users/search`, `GET /api/users/:handle`, `GET /api/users/:handle/entries` | – | Public profiles and their public notes |
+| `GET /api/users/search`, `GET /api/users/:handle`, `GET /api/users/:handle/entries` | – | Public profiles and their public notes, a page at a time (`cursor`, `nextCursor`) |
 | `GET /api/following`, `POST /api/follow`, `POST /api/unfollow`, `POST /api/following/note` | H / B | Who you follow |
 | `GET /api/posting-rules`, `POST /api/posting-rules` | H-only | Read or save your posting rules, with `expected_revision` |
 | `GET /api/posting-rules-guide` | – | The rule-writing guide and the block to install in an agent's instructions |

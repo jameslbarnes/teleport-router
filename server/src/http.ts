@@ -37,6 +37,7 @@ import MarkdownIt from 'markdown-it';
 import sanitizeHtml from 'sanitize-html';
 import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, isValidHandle, normalizeHandle } from './identity.js';
 import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
+import { personPage, personPageAnswer, personPageCursor, mergePersonNotes, personNotesSource, PERSON_SCAN_ALL } from './person-paging.js';
 import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
 import type { tinyCloudGroups } from './tinycloud-group-store.js';
 import { authorStorage, recordCodec } from './author-store.js';
@@ -1406,6 +1407,10 @@ function isEntryAuthor(
 function isHiddenWhilePending(entryId: string, isAuthor: boolean): boolean {
   return !isAuthor && storage instanceof StagedStorage && storage.isPending(entryId);
 }
+
+/** Notes per storage read while filling a person's page: Firestore reads in small batches; storage held in memory
+ * (the author store, or memory in tests) reads the whole request at once, so it filters and sorts once per request. */
+const PERSON_SCAN_BATCH = useFirestore && !authorLayer ? 200 : PERSON_SCAN_ALL;
 
 /** Held by moderation: marked held, or pushed ~forever (automated HOLDs before moderationHeldBy existed). */
 const HELD_THRESHOLD_MS = 365.25 * 24 * 60 * 60 * 1000 * 100; // ~100 years
@@ -6917,8 +6922,14 @@ const server = createServer(async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     if (req.method === 'GET' && url.pathname.startsWith('/api/entries/')) {
       const identifier = decodeURIComponent(url.pathname.slice('/api/entries/'.length));
-      const limit = parseInt(url.searchParams.get('limit') || '50');
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
       const secretKey = url.searchParams.get('key');
+      const cursor = personPageCursor(url);
+      if (!cursor) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid cursor' }));
+        return;
+      }
 
       // Check if user is viewing their own entries (include pending)
       let includePending = false;
@@ -6934,23 +6945,24 @@ const server = createServer(async (req, res) => {
         includePending = authorPseudonym === identifier || authorHandle === identifier;
       }
 
-      // Try as handle first, fall back to pseudonym
-      let entries = await storage.getEntriesByHandle(identifier, limit);
-      if (entries.length === 0) {
-        entries = await storage.getEntriesByPseudonym(identifier, limit, includePending);
-      }
-
-      const visibleEntries: JournalEntry[] = [];
       const channelAccessCache = new Map<string, boolean>();
-      for (const e of entries.map(normalizeEntry)) {
-        const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
-        if (await canView(e, authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache)) {
-          visibleEntries.push(stripHiddenContent(e, isAuthor));
-        }
-      }
+      const isReaderAuthor = (e: JournalEntry) => e.pseudonym === authorPseudonym || (!!authorHandle && e.handle === authorHandle);
+      const answer = await personPageAnswer(async () => {
+        const { entries, nextCursor } = await personPage({
+          fetch: await personNotesSource(storage, identifier, includePending),
+          visible: async e => {
+            const isAuthor = isReaderAuthor(e);
+            return !isHiddenWhilePending(e.id, isAuthor)
+              && await canView(normalizeEntry(e), authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache);
+          },
+          limit, start: cursor.start, batch: PERSON_SCAN_BATCH,
+        });
+        const visibleEntries = entries.map(normalizeEntry).map(e => stripHiddenContent(e, isReaderAuthor(e)));
+        return { pseudonym: identifier, entries: visibleEntries, nextCursor };
+      });
 
-      res.writeHead(200);
-      res.end(JSON.stringify({ pseudonym: identifier, entries: visibleEntries }));
+      res.writeHead(answer.status);
+      res.end(JSON.stringify(answer.body));
       return;
     }
 
@@ -9597,11 +9609,17 @@ const server = createServer(async (req, res) => {
     const entriesByHandleMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/entries$/);
     if (req.method === 'GET' && entriesByHandleMatch) {
       const handle = normalizeHandle(entriesByHandleMatch[1]);
-      const limit = parseInt(url.searchParams.get('limit') || '100', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 1), 200);
+      const cursor = personPageCursor(url);
 
       if (!handle) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: 'Handle required' }));
+        return;
+      }
+      if (!cursor) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid cursor' }));
         return;
       }
 
@@ -9612,43 +9630,34 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // Fetch entries by handle AND by legacy pseudonym (if they have one)
-      let entries: JournalEntry[] = [];
-      try {
-        entries = await storage.getEntriesByHandle(handle, limit);
-      } catch (e) {
-        // Index might not exist yet, continue with pseudonym lookup
-        console.error('getEntriesByHandle failed:', e);
-      }
+      // Notes by handle AND by legacy pseudonym (if they have one), merged in a person's order.
+      // Public notes only, whoever asks; waiting notes never. A failed read is a 503, never a short last page.
+      const answer = await personPageAnswer(async () => {
+        const { entries, nextCursor } = await personPage({
+          fetch: async (before, n) => {
+            const byHandle = await storage.getEntriesByHandle(handle, n, undefined, before);
+            if (!user.legacyPseudonym) return byHandle;
+            return mergePersonNotes(byHandle, await storage.getEntriesByPseudonym(user.legacyPseudonym, n, { before }), n);
+          },
+          visible: async e => !isHiddenWhilePending(e.id, false) && isPublicNotebookEntry(e),
+          limit, start: cursor.start, batch: PERSON_SCAN_BATCH,
+        });
+        return {
+          handle,
+          nextCursor,
+          entries: entries.map(e => ({
+            id: e.id,
+            content: e.content,
+            timestamp: e.timestamp,
+            isReflection: e.isReflection,
+            client: e.client,
+            model: e.model,
+          })),
+        };
+      });
 
-      // Also fetch by legacy pseudonym and merge
-      if (user.legacyPseudonym) {
-        const pseudonymEntries = await storage.getEntriesByPseudonym(user.legacyPseudonym, limit);
-        // Merge, dedupe by id, sort by timestamp desc
-        const allEntries = [...entries, ...pseudonymEntries];
-        const seen = new Set<string>();
-        entries = allEntries
-          .filter(e => {
-            if (seen.has(e.id)) return false;
-            seen.add(e.id);
-            return true;
-          })
-          .sort((a, b) => b.timestamp - a.timestamp)
-          .slice(0, limit);
-      }
-
-      res.writeHead(200);
-      res.end(JSON.stringify({
-        handle,
-        entries: entries.filter(isPublicNotebookEntry).map(e => ({
-          id: e.id,
-          content: e.content,
-          timestamp: e.timestamp,
-          isReflection: e.isReflection,
-          client: e.client,
-          model: e.model,
-        })),
-      }));
+      res.writeHead(answer.status);
+      res.end(JSON.stringify(answer.body));
       return;
     }
 

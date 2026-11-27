@@ -2,7 +2,7 @@
  * The in-memory index never falls back to legacy copies for a linked author.
  * A grant check gives a short read lease; failed/expired checks evict that author.
  */
-import { tokenize, encodePageCursor, generateEntryId, type Storage, type User,
+import { tokenize, encodePageCursor, generateEntryId, type Storage, type User, type EntryBound, type EntryPageOptions, compareByPersonOrder, isOlderThan,
   type JournalEntry, type Conversation, type Summary, type DailySummary, type OwnRecords } from './storage.js';
 import { moveAuthorFolder } from './author-move.js';
 import { GroupStoreRevokedError, type GroupStore } from './group-store.js';
@@ -396,6 +396,12 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     for (const state of authors.values()) if (state.available && state.expires <= now()) hide(state);
   }
   async function list<T extends RecordValue>(kind: Kind): Promise<T[]> { await ready(); return [...index(kind).values()].sort(order); }
+  async function personNotes(match: (e: JournalEntry) => boolean): Promise<JournalEntry[]> {
+    await ready();
+    const mine: JournalEntry[] = [];
+    for (const e of index('posts').values()) if (match(e as JournalEntry)) mine.push(e as JournalEntry);
+    return mine.sort(compareByPersonOrder);
+  }
   const search = (query: string, value: { content: string; keywords?: string[] }) => {
     const words = value.keywords || tokenize(value.content);
     return tokenize(query).some(word => words.includes(word));
@@ -464,8 +470,11 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     getConversation: async (id: string) => { await ready(); return conversations.get(id) || null; },
     getEntries: async (n=50,o=0,c?:string) => paginate(await list<JournalEntry>('posts'),n,o,c),
     getConversations: async (n=50,o=0,c?:string) => paginate(await list<Conversation>('conversations'),n,o,c),
-    getEntriesByPseudonym: async (p:string,n=50) => (await list<JournalEntry>('posts')).filter(e=>e.pseudonym===p).slice(0,n),
-    getEntriesByHandle: async (h:string,n=50,s=0) => (await list<JournalEntry>('posts')).filter(e=>e.handle===h&&e.timestamp>=s).slice(0,n),
+    // One person's notes: filtered once, then only those sorted, in the order Firestore uses; `before` starts after it.
+    getEntriesByPseudonym: async (p:string,n=50,o?:EntryPageOptions) =>
+      (await personNotes(e=>e.pseudonym===p&&isOlderThan(e,o?.before))).slice(0,n),
+    getEntriesByHandle: async (h:string,n=50,s=0,b?:EntryBound) =>
+      (await personNotes(e=>e.handle===h&&e.timestamp>=(s||0)&&isOlderThan(e,b))).slice(0,n),
     getConversationsByPseudonym: async (p:string,n=50) => (await list<Conversation>('conversations')).filter(e=>e.pseudonym===p).slice(0,n),
     searchEntries: async (q:string,n=50,s=0) => (await list<JournalEntry>('posts')).filter(e=>e.timestamp>=s&&search(q,e)).slice(0,n),
     searchConversations: async (q:string,n=50,s=0) => (await list<Conversation>('conversations')).filter(e=>e.timestamp>=s&&search(q,e)).slice(0,n),
