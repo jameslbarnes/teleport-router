@@ -95,6 +95,10 @@ export interface Conversation {
 
 /** One account's stored records, by kind. */
 export interface OwnRecords { posts: JournalEntry[]; conversations: Conversation[]; summaries: Summary[] }
+/** Whether a stored record is this account's: by its handle when it has one, else by its derived name. */
+function ownRecord(v: { handle?: string; pseudonym?: string }, handle: string, pseudonyms: string[]): boolean {
+  return v.handle ? v.handle === handle : !!v.pseudonym && pseudonyms.includes(v.pseudonym);
+}
 
 export interface EmailPrefs {
   comments: boolean;         // Receive comment notifications
@@ -426,13 +430,14 @@ export interface Storage {
   /** Check if handle is available */
   isHandleAvailable(handle: string): Promise<boolean>;
 
-  /** Migrate entries from pseudonym to handle (when user claims handle) */
+  /** Give a handle to the notes with no handle written under this name (when the key's owner claims the handle).
+   *  A note that already has a handle keeps it. Returns how many notes moved. */
   migrateEntriesToHandle(pseudonym: string, handle: string): Promise<number>;
 
   /** Get all users with a legacyPseudonym (for migration) */
   getUsersWithLegacyPseudonym(): Promise<User[]>;
 
-  /** Count entries with pseudonym but without handle (unmigrated) */
+  /** Count notes with no handle written under this name (not yet moved to the handle) */
   countUnmigratedEntries(pseudonym: string, handle: string): Promise<number>;
 
   /** Get all users with email addresses (for digest sending) */
@@ -581,7 +586,7 @@ export class MemoryStorage implements Storage {
   }
 
   async getRecordsOf(handle: string, pseudonyms: string[]): Promise<OwnRecords> {
-    const mine = (v: { handle?: string; pseudonym?: string }) => v.handle === handle || (!!v.pseudonym && pseudonyms.includes(v.pseudonym));
+    const mine = (v: { handle?: string; pseudonym?: string }) => ownRecord(v, handle, pseudonyms);
     return { posts: this.entries.filter(mine), conversations: this.conversations.filter(mine), summaries: [...this.summaries.values()].filter(mine) };
   }
 
@@ -663,7 +668,7 @@ export class MemoryStorage implements Storage {
   async migrateEntriesToHandle(pseudonym: string, handle: string): Promise<number> {
     let count = 0;
     this.entries = this.entries.map(e => {
-      if (e.pseudonym === pseudonym) {
+      if (e.pseudonym === pseudonym && !e.handle) {
         count++;
         return { ...e, handle };
       }
@@ -677,7 +682,7 @@ export class MemoryStorage implements Storage {
   }
 
   async countUnmigratedEntries(pseudonym: string, handle: string): Promise<number> {
-    return this.entries.filter(e => e.pseudonym === pseudonym && e.handle !== handle).length;
+    return this.entries.filter(e => e.pseudonym === pseudonym && !e.handle).length;
   }
 
   async getUsersWithEmail(): Promise<User[]> {
@@ -1111,7 +1116,7 @@ export class FirestoreStorage implements Storage {
       const found = new Map<string, T>();
       for (const snapshot of await Promise.all(fields.map(([field, value]) => this.db.collection(collection).where(field, '==', value).get())))
         for (const doc of snapshot.docs) found.set(doc.id, { id: doc.id, ...doc.data() } as T);
-      return [...found.values()];
+      return [...found.values()].filter(v => ownRecord(v as { handle?: string; pseudonym?: string }, handle, pseudonyms));
     };
     const [posts, conversations, summaries] = await Promise.all([
       owned<JournalEntry>(this.collection), owned<Conversation>(this.conversationsCollection), owned<Summary>('summaries'),
@@ -1275,22 +1280,23 @@ export class FirestoreStorage implements Storage {
       return 0;
     }
 
-    // Firestore batches are limited to 500 operations
-    // Process in chunks if needed
-    const BATCH_SIZE = 500;
+    // Only notes with no handle move. Each note is re-read inside its own transaction and left alone if it has a
+    // handle by then, so two migrations running at once cannot change a note that already has one.
+    const candidates = snapshot.docs.filter(doc => !doc.data().handle);
+    const CONCURRENCY = 20;
     let totalMigrated = 0;
-
-    for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
-      const chunk = snapshot.docs.slice(i, i + BATCH_SIZE);
-      const batch = this.db.batch();
-
-      chunk.forEach(doc => {
-        batch.update(doc.ref, { handle });
-      });
-
-      await batch.commit();
-      totalMigrated += chunk.length;
-      console.log(`[FirestoreStorage] Migrated batch ${Math.floor(i / BATCH_SIZE) + 1}: ${chunk.length} entries`);
+    for (let i = 0; i < candidates.length; i += CONCURRENCY) {
+      const moved = await Promise.allSettled(candidates.slice(i, i + CONCURRENCY).map(doc => this.db.runTransaction(async tx => {
+        const current = await tx.get(doc.ref);
+        if (!current.exists || current.data()?.handle || current.data()?.pseudonym !== pseudonym) return false;
+        tx.update(doc.ref, { handle });
+        return true;
+      })));
+      // Finish the batch before the caller reads back ownership, including after a partial failure.
+      for (const result of moved) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value) totalMigrated++;
+      }
     }
 
     console.log(`[FirestoreStorage] Migration complete: ${totalMigrated} total entries migrated to @${handle}`);
@@ -1322,7 +1328,7 @@ export class FirestoreStorage implements Storage {
       .where('pseudonym', '==', pseudonym)
       .get();
 
-    return snapshot.docs.filter(doc => doc.data().handle !== handle).length;
+    return snapshot.docs.filter(doc => !doc.data().handle).length;
   }
 
   async getUsersWithEmail(): Promise<User[]> {

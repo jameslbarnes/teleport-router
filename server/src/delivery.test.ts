@@ -1157,3 +1157,25 @@ describe('deliverEntry group email batching', () => {
     expect(emailClient.calls[0].html).toContain('https://router.test/settings');
   });
 });
+
+describe('canView for an older note marked private with no destination', () => {
+  const storage = new MemoryStorage();
+  const shapes: [string, Partial<JournalEntry>][] = [
+    ['no to', {}], ['an empty to', { to: [] }], ['private and AI-only stub', { aiOnly: true }],
+  ];
+  for (const [label, extra] of shapes) {
+    it(`shows it to its author only (${label})`, async () => {
+      const entry = normalizeEntry({ id: 'p1', pseudonym: 'Test#123', handle: 'author', client: 'code', content: 'Mine',
+        timestamp: 1, visibility: 'private', ...extra } as JournalEntry);
+      expect(await canView(entry, 'author', undefined, true, storage)).toBe(true);
+      expect(await canView(entry, 'someone', 'someone@example.com', false, storage)).toBe(false);
+      expect(await canView(entry, undefined, undefined, false, storage)).toBe(false);
+    });
+  }
+  it('still shows public and AI-only notes with no destination to everyone', async () => {
+    for (const visibility of [undefined, 'public', 'ai-only'] as const) {
+      const entry = normalizeEntry({ id: 'p2', pseudonym: 'Test#123', client: 'code', content: 'Open', timestamp: 1, visibility } as JournalEntry);
+      expect(await canView(entry, undefined, undefined, false, storage)).toBe(true);
+    }
+  });
+});

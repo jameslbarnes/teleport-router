@@ -3,6 +3,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 import { computeAddress, SigningKey } from 'ethers';
 import { tracePointer } from './trace-pointer.js';
 import type { JournalEntry, User } from './storage.js';
+import { isNoteAuthor } from './identity.js';
 import type { KeyWrap } from './trace-envelope.js';
 import { APP_LIMITS, appHash, checkApp, checkAppParses, TraceAppError } from './trace-app.js';
 import { RUN_GRANT_MS, RUN_PREPARE_MS, RunError, checkRunDescription, type AnswerCustody, type RunBundle, type RunDescription, type SealedAnswer } from './trace-run.js';
@@ -146,7 +147,12 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
   /** Why this server cannot take a request that calls this provider, or null when it can. */
   const modelRefusal = (provider: AttestedProvider) => !modelKeys || !models.length ? 'This server does not run apps that call a model yet. Send the app without a model declaration.'
     : !models.includes(provider) ? `This server does not run apps that call ${PROVIDER_NAMES[provider]} yet.` : null;
-  const isOwner = (r: Request, actor: Actor) => identities(actor).includes(r.owner);
+  /** Whether the actor owns a request. A request names its owner as "@handle", or, for a note with no handle, by the
+   *  the name derived from its key. Once the note is known, its owner is whoever owns the note now (isNoteAuthor):
+   *  a note that has since moved to a handle belongs to that handle's account. */
+  const isOwner = (r: Request, actor: Actor, entry?: Pick<JournalEntry, 'handle' | 'pseudonym'> | null) =>
+    (r.owner.startsWith('@') ? !!actor.user && r.owner === '@' + actor.user.handle : r.owner === actor.pseudonym)
+    && (!entry || isNoteAuthor(entry, { pseudonym: actor.pseudonym, handle: actor.user?.handle }));
   /** What the requester sees before release: no timing or failure detail. */
   const requesterState = (r: Request): string => {
     if (r.state === 'answered') return 'pending';
@@ -361,7 +367,10 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     if (input.action === 'request') return request(actor, input);
     if (input.action === 'inbox') {
       const records = (await Promise.all(identities(actor).map(owner => store.pending(owner)))).flat();
-      const current = await Promise.all(records.map(async r => await visible(r.entryId, actor) ? r : null));
+      const current = await Promise.all(records.map(async r => {
+        const entry = await visible(r.entryId, actor);
+        return entry && isOwner(r, actor, entry) ? r : null;
+      }));
       return { requests: current.filter((r): r is Request => r !== null).sort((a, b) => a.created - b.created).map(r => view(r, 'owner')) };
     }
     if (typeof input.request_id !== 'string' || !/^[a-f0-9]{64}$/.test(input.request_id)) throw missing();
@@ -369,19 +378,21 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
     if (!r || !isOwner(r, actor) && actor.keyHash !== r.requester) throw missing();
     const entry = await visible(r.entryId, actor);
     if (!entry || (entry.handle ? '@' + entry.handle : entry.pseudonym) !== r.owner && entry.pseudonym !== r.owner) throw missing();
+    const owner = isOwner(r, actor, entry);
+    if (!owner && actor.keyHash !== r.requester) throw missing();
     if (input.action === 'status') {
-      if (!isOwner(r, actor) && r.app && (r.state === 'released' || r.state === 'declined' || r.state === 'withheld') && !r.collected)
+      if (!owner && r.app && (r.state === 'released' || r.state === 'declined' || r.state === 'withheld') && !r.collected)
         await store.change(r.id, current => current && !current.collected ? { ...current, collected: true } : current!).catch(() => {});
-      return view(r, isOwner(r, actor) ? 'owner' : 'requester');
+      return view(r, owner ? 'owner' : 'requester');
     }
-    if (input.action === 'withdraw' && actor.keyHash === r.requester && !isOwner(r, actor)) {
+    if (input.action === 'withdraw' && actor.keyHash === r.requester && !owner) {
       return view(await store.change(r.id, current => {
         if (!current) throw missing();
         if (current.state !== 'pending' && current.state !== 'answered') return current;
         return { ...dropKeyAndTag(current), state: 'withdrawn', run: undefined, running: undefined, answer: undefined };
       }), 'requester');
     }
-    if (!isOwner(r, actor)) throw missing();
+    if (!owner) throw missing();
     // Asked by the owner's tool before it uploads a trace for this request: is it still open, unchanged, and can the
     // requester still read the post? Nothing is uploaded for a request that would be refused anyway.
     if (input.action === 'check') {

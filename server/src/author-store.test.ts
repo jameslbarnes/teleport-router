@@ -32,6 +32,41 @@ async function fixture() {
 }
 
 describe('Each author owns their published records',()=>{
+  it('refuses to confirm deletion until a withheld note can be read again', async () => {
+    const { base, layer } = await fixture();
+    const note = await layer.storage.addEntry({ ...post('alice'), handle: undefined });
+    vi.spyOn(base, 'getEntry').mockRejectedValueOnce(new Error('read interrupted'));
+    await expect(layer.storage.migrateEntriesToHandle('alice#123', 'alice')).rejects.toThrow('read interrupted');
+    await expect(layer.storage.deleteEntry(note.id)).rejects.toThrow('Retry the deletion');
+    expect((await base.getEntry(note.id))?.handle).toBe('alice');
+
+    expect(await layer.storage.migrateEntriesToHandle('alice#123', 'alice')).toBe(0);
+    await layer.storage.deleteEntry(note.id);
+    expect(await base.getEntry(note.id)).toBeNull();
+  });
+
+  it('finishes saving a legacy post before moving its ownership in storage and the index', async () => {
+    const { base, layer } = await fixture();
+    const add = base.addEntry.bind(base);
+    let started!: () => void, release!: () => void;
+    const saving = new Promise<void>(resolve => { started = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(base, 'addEntry').mockImplementationOnce(async note => {
+      const saved = await add(note);
+      started();
+      await resume;
+      return saved;
+    });
+    const writing = layer.storage.addEntry({ ...post('alice'), handle: undefined });
+    await saving;
+    const moving = layer.storage.migrateEntriesToHandle('alice#123', 'alice');
+    try { await layer.storage.addEntry(post('bob')); } finally { release(); }
+    const saved = await writing;
+    expect(await moving).toBe(1);
+    expect((await base.getEntry(saved.id))?.handle).toBe('alice');
+    expect((await layer.storage.getEntry(saved.id))?.handle).toBe('alice');
+  });
+
   it('serves unlinked records while locked and keeps legacy copies of linked records out of every read', async () => {
     const f = await fixture();
     const linked = await f.base.addEntry(post('alice', 'research from linked storage'));

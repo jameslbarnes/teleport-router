@@ -276,8 +276,9 @@ function getVerifiedLinkedAccount(user: User | null | undefined, platformName: s
   )?.platformUserId || null;
 }
 
+/** A note with a handle belongs to that handle's account; one with no handle to the account whose key wrote it. */
 function entryBelongsToUser(entry: JournalEntry, user: User): boolean {
-  if (entry.handle && normalizeHandle(entry.handle) === normalizeHandle(user.handle)) return true;
+  if (entry.handle) return normalizeHandle(entry.handle) === normalizeHandle(user.handle);
   return !!user.legacyPseudonym && entry.pseudonym === user.legacyPseudonym;
 }
 
@@ -639,7 +640,7 @@ async function onPlatformMessage(ctx: HookContext): Promise<void> {
       const parent = await storage.getEntry(replyToEntryId);
       // Platform replies remain automatic copies, subject to the writer's rules
       // and the parent's audience. Never turn a private thread into a public post.
-      const isAuthor = !!parent && (parent.handle === sender_handle || !!writer?.legacyPseudonym && parent.pseudonym === writer.legacyPseudonym);
+      const isAuthor = !!parent && !!writer && entryBelongsToUser(parent, writer);
       if (writer && parent && getVerifiedLinkedAccount(writer, platformName) === sender_id
         && (!hasPendingEntryApi(storage) || !storage.isPending(parent.id) || isAuthor)
         && await canView(normalizeEntry(parent), writer.handle, writer.email, isAuthor, storage, new Map())) {

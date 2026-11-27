@@ -36,7 +36,7 @@ import {
 import Anthropic from '@anthropic-ai/sdk';
 import MarkdownIt from 'markdown-it';
 import sanitizeHtml from 'sanitize-html';
-import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, isValidHandle, normalizeHandle } from './identity.js';
+import { derivePseudonym, generateSecretKey, isValidSecretKey, hashSecretKey, isValidHandle, normalizeHandle, isNoteAuthor } from './identity.js';
 import { FirestoreStorage, MemoryStorage, StagedStorage, type Storage, type JournalEntry, type Summary, type DailySummary, type Conversation, type User, type Skill, type SkillParameter, type Channel, type ChannelInvite, tokenize, isValidChannelId, generateEntryId, encodePageCursor } from './storage.js';
 import { personPage, personPageAnswer, personPageCursor, mergePersonNotes, personNotesSource, PERSON_SCAN_ALL } from './person-paging.js';
 import { withGroupStore, MemoryGroupStore, GroupStoreRevokedError, groupPrefix, GROUP_GRANT_ACTIONS, type GroupStoreResolver } from './group-store.js';
@@ -1393,16 +1393,16 @@ const runDiscordFeeds = () => { discordGroupService?.feed().then(results => {
 if (discordGroupService) setInterval(runDiscordFeeds, 180_000).unref();
 
 /**
- * True only when the viewer wrote the entry. Each side must be present: a viewer
- * without a handle must not "match" an entry without one (undefined === undefined).
+ * True only when the viewer wrote the entry. A note with a handle belongs to that handle's account; a note with no
+ * handle belongs to the key whose derived name matches it (see isNoteAuthor). Each side must be present: a viewer without a handle
+ * must not "match" an entry without one (undefined === undefined).
  */
 function isEntryAuthor(
   entry: { pseudonym?: string; handle?: string },
-  viewerPseudonym: string | undefined,
+  viewerPseudonym: string | null | undefined,
   viewerHandle: string | null | undefined,
 ): boolean {
-  return (!!viewerPseudonym && entry.pseudonym === viewerPseudonym)
-    || (!!viewerHandle && entry.handle === viewerHandle);
+  return isNoteAuthor(entry, { pseudonym: viewerPseudonym, handle: viewerHandle });
 }
 
 /**
@@ -3206,7 +3206,7 @@ async function createMCPServer(secretKey: string) {
       const skipped: string[] = [];
       for (const id of entryIds) {
         const entry = await storage.getEntry(id);
-        const own = entry && (entry.pseudonym === pseudonym || (!!labelUser?.handle && entry.handle === labelUser.handle));
+        const own = entry && isEntryAuthor(entry, pseudonym, labelUser?.handle);
         if (!entry || !own) { skipped.push(id); continue; }
         try { await setEntryLabels(entry, labels); done.push(id); }
         catch (err) { console.error('[Labels] failed for', id, (err as Error).message); skipped.push(id); }
@@ -3241,8 +3241,8 @@ async function createMCPServer(secretKey: string) {
         };
       }
 
-      // Verify the entry belongs to this pseudonym
-      if (entry.pseudonym !== pseudonym) {
+      // Verify the entry is this caller's: by handle when it has one, else by the key whose derived name matches it
+      if (!isEntryAuthor(entry, pseudonym, await getHandle())) {
         return {
           content: [{ type: 'text' as const, text: 'You can only delete your own entries.' }],
           isError: true,
@@ -6468,7 +6468,8 @@ const server = createServer(async (req, res) => {
           followedHandleSet = new Set(user.following.map(f => f.handle));
         }
         if (storage instanceof StagedStorage) {
-          const pendingEntries = await storage.getPendingEntriesByPseudonym(authorPseudonym);
+          const pendingEntries = (await storage.getPendingEntriesByPseudonym(authorPseudonym))
+            .filter(e => isEntryAuthor(e, authorPseudonym, authorHandle));
           // Merge pending entries and sort by timestamp
           entries = [...pendingEntries, ...entries].sort((a, b) => b.timestamp - a.timestamp);
         }
@@ -6479,7 +6480,7 @@ const server = createServer(async (req, res) => {
       let visibleEntries: JournalEntry[] = [];
       const channelAccessCache = new Map<string, boolean>();
       for (const e of normalizedEntries) {
-        const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
+        const isAuthor = isEntryAuthor(e, authorPseudonym, authorHandle);
         if (await canView(e, authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache)) {
           visibleEntries.push(e);
         }
@@ -6496,7 +6497,7 @@ const server = createServer(async (req, res) => {
 
       // Strip content from hidden entries (except for author's own entries)
       const strippedEntries = visibleEntries.map(e => {
-        const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
+        const isAuthor = isEntryAuthor(e, authorPseudonym, authorHandle);
         return stripHiddenContent(e, isAuthor);
       });
 
@@ -6781,7 +6782,7 @@ const server = createServer(async (req, res) => {
       let pending: JournalEntry[] = [];
       if (storage instanceof StagedStorage) {
         const pseudonym = derivePseudonym(secretKey);
-        pending = await storage.getPendingEntriesByPseudonym(pseudonym);
+        pending = (await storage.getPendingEntriesByPseudonym(pseudonym)).filter(e => isEntryAuthor(e, pseudonym, user.handle));
       }
 
       res.writeHead(200);
@@ -6828,13 +6829,11 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      if (entry.pseudonym !== userPseudonym) {
-        const user = await storage.getUserByKeyHash(hashSecretKey(secretKey));
-        if (!isEntryAuthor(entry, userPseudonym, user?.handle)) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: 'You can only delete your own entries' }));
-          return;
-        }
+      const deleteUser = await storage.getUserByKeyHash(hashSecretKey(secretKey));
+      if (!isEntryAuthor(entry, userPseudonym, deleteUser?.handle)) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: 'You can only delete your own entries' }));
+        return;
       }
 
       await storage.deleteEntry(entryId);
@@ -6865,7 +6864,7 @@ const server = createServer(async (req, res) => {
         return;
       }
       const labelUser = await storage.getUserByKeyHash(hashSecretKey(secretKey));
-      const ownsEntry = entry.pseudonym === derivePseudonym(secretKey) || (!!labelUser?.handle && entry.handle === labelUser.handle);
+      const ownsEntry = isEntryAuthor(entry, derivePseudonym(secretKey), labelUser?.handle);
       if (!ownsEntry) {
         res.writeHead(403);
         res.end(JSON.stringify({ error: 'You can only label your own entries' }));
@@ -6905,7 +6904,8 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      if (entry.pseudonym !== userPseudonym) {
+      const publishUser = await storage.getUserByKeyHash(hashSecretKey(secretKey));
+      if (!isEntryAuthor(entry, userPseudonym, publishUser?.handle)) {
         res.writeHead(403);
         res.end(JSON.stringify({ error: 'You can only publish your own entries' }));
         return;
@@ -6964,7 +6964,7 @@ const server = createServer(async (req, res) => {
       }
 
       const channelAccessCache = new Map<string, boolean>();
-      const isReaderAuthor = (e: JournalEntry) => e.pseudonym === authorPseudonym || (!!authorHandle && e.handle === authorHandle);
+      const isReaderAuthor = (e: JournalEntry) => isEntryAuthor(e, authorPseudonym, authorHandle);
       const answer = await personPageAnswer(async () => {
         const { entries, nextCursor } = await personPage({
           fetch: await personNotesSource(storage, identifier, includePending),
@@ -9854,7 +9854,7 @@ const server = createServer(async (req, res) => {
       const channelAccessCache = new Map<string, boolean>();
       for (const e of candidates) {
         if (results.length >= limit) break;
-        const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
+        const isAuthor = isEntryAuthor(e, authorPseudonym, authorHandle);
         if (await canView(e, authorHandle || undefined, authorEmail, isAuthor, storage, channelAccessCache)) {
           results.push(e);
         }
@@ -9862,7 +9862,7 @@ const server = createServer(async (req, res) => {
 
       // Strip content from hidden entries (except for author's own)
       const strippedResults = results.map(e => {
-        const isAuthor = e.pseudonym === authorPseudonym || e.handle === authorHandle;
+        const isAuthor = isEntryAuthor(e, authorPseudonym, authorHandle);
         return stripHiddenContent(e, isAuthor);
       });
 

@@ -7,6 +7,7 @@ import {
   hashSecretKey,
   isValidHandle,
   normalizeHandle,
+  isNoteAuthor,
 } from './identity.js';
 
 describe('identity', () => {
@@ -171,5 +172,24 @@ describe('identity', () => {
       expect(normalizeHandle('james@doe')).toBe('james@doe');
       expect(normalizeHandle('@@james')).toBe('@james');
     });
+  });
+});
+
+describe('isNoteAuthor', () => {
+  const name = 'Quiet Feather#79c30b';
+  it("gives a note with a handle to that handle's account only, whatever name the caller's key has", () => {
+    const note = { handle: 'alice', pseudonym: name };
+    expect(isNoteAuthor(note, { handle: 'alice', pseudonym: name })).toBe(true);
+    expect(isNoteAuthor(note, { handle: 'alice', pseudonym: 'Other Name#000000' })).toBe(true);
+    expect(isNoteAuthor(note, { handle: 'bob', pseudonym: name })).toBe(false);
+    expect(isNoteAuthor(note, { handle: null, pseudonym: name })).toBe(false);
+    expect(isNoteAuthor(note, { pseudonym: name })).toBe(false);
+  });
+  it('gives a note with no handle to the key whose derived name matches it', () => {
+    const note = { pseudonym: name };
+    expect(isNoteAuthor(note, { pseudonym: name })).toBe(true);
+    expect(isNoteAuthor(note, { handle: 'alice', pseudonym: name })).toBe(true);
+    expect(isNoteAuthor(note, { handle: 'alice', pseudonym: 'Other Name#000000' })).toBe(false);
+    expect(isNoteAuthor({ pseudonym: undefined }, { pseudonym: undefined, handle: undefined })).toBe(false);
   });
 });

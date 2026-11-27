@@ -629,3 +629,52 @@ describe('a requester\'s key pays for one run, which ends by its deadline', () =
     expect(result).toMatchObject({ ok: false, error: 'The run ran out of time (0.3 seconds).', model: { calls: 2 } });
   });
 });
+
+describe('who answers a trace request', () => {
+  // `sameName` has the author's name but another handle; `nameOnly` has the name and no handle.
+  const sameName = { keyHash: 'same-name-key-hash', pseudonym: author.pseudonym, user: { handle: 'someone-else' } as User };
+  const nameOnly = { keyHash: 'name-only-key-hash', pseudonym: author.pseudonym, user: null };
+  function setup(entry: JournalEntry) {
+    const call = traceAccess({ store: traceRequestStore(), host, now: () => clock, getUser: async () => null,
+      visible: async id => id === entry.id ? entry : null }) as (actor: any, input: any) => Promise<any>;
+    const ask = () => call(agent, { action: 'request', entry_id: entry.id, app: APP, answer_public_key: requesterKey.signingKey.compressedPublicKey });
+    return { call, ask };
+  }
+  async function refusedOwnerActions(call: (actor: any, input: any) => Promise<any>, shown: any, actor: any) {
+    expect((await call(actor, { action: 'inbox' })).requests).toEqual([]);
+    await expect(call(actor, { action: 'status', request_id: shown.request_id })).rejects.toThrow('not found');
+    await expect(call(actor, { action: 'check', request_id: shown.request_id, revision: shown.revision })).rejects.toThrow('not found');
+    await expect(call(actor, { action: 'decline', request_id: shown.request_id, revision: shown.revision })).rejects.toThrow('not found');
+  }
+
+  it('on a note with a handle, is that handle\'s account only', async () => {
+    const entry = { id: 'a-note', handle: 'author', pseudonym: author.pseudonym } as JournalEntry;
+    const { call, ask } = setup(entry);
+    const shown = await ask();
+    for (const actor of [sameName, nameOnly]) await refusedOwnerActions(call, shown, actor);
+    expect((await call(author, { action: 'inbox' })).requests.map((r: any) => r.request_id)).toEqual([shown.request_id]);
+    expect((await call(author, { action: 'status', request_id: shown.request_id })).app).toBeTruthy();
+    expect((await call(author, { action: 'decline', request_id: shown.request_id, revision: shown.revision })).state).toBe('declined');
+  });
+
+  it('on a note that moved to a handle after the request, is the account it moved to', async () => {
+    const entry = { id: 'a-note', pseudonym: author.pseudonym } as JournalEntry;
+    const { call, ask } = setup(entry);
+    const shown = await ask();
+    expect(shown.owner).toBe(author.pseudonym);
+    entry.handle = 'author';
+    for (const actor of [sameName, nameOnly]) await refusedOwnerActions(call, shown, actor);
+    expect((await call(author, { action: 'inbox' })).requests.map((r: any) => r.request_id)).toEqual([shown.request_id]);
+    expect((await call(author, { action: 'check', request_id: shown.request_id, revision: shown.revision })).open).toBe(true);
+  });
+
+  it('on a note with no handle, is the key whose derived name matches it', async () => {
+    const writer = { keyHash: 'writer-key-hash', pseudonym: 'Legacy Writer#abcdef', user: null };
+    const entry = { id: 'a-note', pseudonym: writer.pseudonym } as JournalEntry;
+    const { call, ask } = setup(entry);
+    const shown = await ask();
+    await refusedOwnerActions(call, shown, stranger);
+    expect((await call(writer, { action: 'inbox' })).requests.map((r: any) => r.request_id)).toEqual([shown.request_id]);
+    expect((await call(writer, { action: 'decline', request_id: shown.request_id, revision: shown.revision })).state).toBe('declined');
+  });
+});

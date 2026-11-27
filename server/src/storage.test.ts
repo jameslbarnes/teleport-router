@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { MemoryStorage, StagedStorage, isValidChannelId, encodePageCursor } from './storage.js';
-import type { Channel, ChannelInvite } from './storage.js';
+import { MemoryStorage, StagedStorage, FirestoreStorage, isValidChannelId, encodePageCursor } from './storage.js';
+import { authorStorage } from './author-store.js';
+import type { Channel, ChannelInvite, JournalEntry } from './storage.js';
 import { hashSecretKey } from './identity.js';
 
 // Check if Firestore is configured
@@ -1205,5 +1206,180 @@ describe('StagedStorage holds and releases', () => {
     }
 
     storage.stop();
+  });
+});
+
+describe('MemoryStorage getRecordsOf', () => {
+  it('returns notes with the account\'s handle, and notes with no handle written under its key\'s name', async () => {
+    const storage = new MemoryStorage();
+    const name = 'Quiet Feather#79c30b';
+    const base = { client: 'code' as const, content: 'x', timestamp: 1 };
+    const own = await storage.addEntry({ ...base, pseudonym: name, handle: 'alice' });
+    const older = await storage.addEntry({ ...base, pseudonym: name });
+    const theirs = await storage.addEntry({ ...base, pseudonym: name, handle: 'bob' });
+    const ids = (await storage.getRecordsOf('alice', [name])).posts.map(p => p.id);
+    expect(ids).toContain(own.id);
+    expect(ids).toContain(older.id);
+    expect(ids).not.toContain(theirs.id);
+  });
+});
+
+describe('moving notes to a handle when its owner claims it', () => {
+  const name = 'Quiet Feather#79c30b';
+  const base = { client: 'code' as const, content: 'x', timestamp: 1 };
+
+  it('moves only notes with no handle, in memory, and a second run changes nothing', async () => {
+    const storage = new MemoryStorage();
+    const theirs = await storage.addEntry({ ...base, pseudonym: name, handle: 'bob' });
+    const older = await storage.addEntry({ ...base, pseudonym: name });
+    expect(await storage.countUnmigratedEntries(name, 'alice')).toBe(1);
+    expect(await storage.migrateEntriesToHandle(name, 'alice')).toBe(1);
+    expect((await storage.getEntry(theirs.id))?.handle).toBe('bob');
+    expect((await storage.getEntry(older.id))?.handle).toBe('alice');
+    expect(await storage.countUnmigratedEntries(name, 'alice')).toBe(0);
+    expect(await storage.migrateEntriesToHandle(name, 'alice')).toBe(0);
+    expect((await storage.getEntry(theirs.id))?.handle).toBe('bob');
+  });
+
+  it('moves only notes with no handle through the author store, cache and base alike', async () => {
+    const backing = new MemoryStorage();
+    const theirs = await backing.addEntry({ ...base, pseudonym: name, handle: 'bob' });
+    const older = await backing.addEntry({ ...base, pseudonym: name });
+    const layer = authorStorage(backing, null, null).storage;
+    expect(await layer.migrateEntriesToHandle(name, 'alice')).toBe(1);
+    for (const s of [layer, backing]) {
+      expect((await s.getEntry(theirs.id))?.handle).toBe('bob');
+      expect((await s.getEntry(older.id))?.handle).toBe('alice');
+    }
+    expect(await layer.migrateEntriesToHandle(name, 'alice')).toBe(0);
+    expect(await layer.countUnmigratedEntries(name, 'alice')).toBe(0);
+  });
+
+  /** A stand-in for the parts of Firestore the move uses: an equality query, single reads and one transaction per note.
+   *  `meanwhile` runs after the query and before the writes, as another move would. */
+  function firestoreStandIn(meanwhile: (docs: Map<string, Record<string, unknown>>) => void,
+    beforeCommit?: (id: string) => Promise<void>) {
+    const docs = new Map<string, Record<string, unknown>>([
+      ['theirs', { ...base, pseudonym: name, handle: 'bob' }],
+      ['older', { ...base, pseudonym: name }],
+      ['claimed-meanwhile', { ...base, pseudonym: name }],
+    ]);
+    const read = (id: string) => ({ id, exists: docs.has(id), data: () => docs.has(id) ? { ...docs.get(id)! } : undefined });
+    const db = {
+      collection: () => ({
+        where: (_f: string, _op: string, value: string) => ({ get: async () => {
+          const found = [...docs].filter(([, d]) => d.pseudonym === value).map(([id, d]) => ({ id, ref: { id }, data: () => ({ ...d }) }));
+          meanwhile(docs);
+          return { size: found.length, docs: found };
+        } }),
+        doc: (id: string) => ({ get: async () => read(id) }),
+      }),
+      runTransaction: async (fn: (tx: any) => Promise<unknown>) => {
+        let write: { id: string; patch: Record<string, unknown> } | undefined;
+        const result = await fn({
+          get: async (r: { id: string }) => read(r.id),
+          update: (r: { id: string }, patch: Record<string, unknown>) => { write = { id: r.id, patch }; },
+        });
+        if (write) {
+          await beforeCommit?.(write.id);
+          docs.set(write.id, { ...docs.get(write.id)!, ...write.patch });
+        }
+        return result;
+      },
+    };
+    const storage = Object.assign(Object.create(FirestoreStorage.prototype), { db, collection: 'entries',
+      // What the author store reads when it starts: every note, and nothing else.
+      getAllUsers: async () => [], getConversations: async () => [], getSummaries: async () => [], getDailySummaries: async () => [],
+      getEntries: async (_n: number, offset = 0) => offset ? [] : [...docs].map(([id, d]) => ({ id, ...d }) as JournalEntry),
+    }) as FirestoreStorage;
+    return { docs, storage };
+  }
+  const anotherMove = (docs: Map<string, Record<string, unknown>>) => {
+    docs.set('claimed-meanwhile', { ...docs.get('claimed-meanwhile')!, handle: 'carol' });
+  };
+
+  it('moves only notes with no handle in Firestore, re-reading each note as it writes', async () => {
+    const { docs, storage } = firestoreStandIn(anotherMove);
+    expect(await storage.migrateEntriesToHandle(name, 'alice')).toBe(1);
+    expect(docs.get('theirs')!.handle).toBe('bob');
+    expect(docs.get('older')!.handle).toBe('alice');
+    expect(docs.get('claimed-meanwhile')!.handle).toBe('carol');
+    expect(await storage.migrateEntriesToHandle(name, 'alice')).toBe(0);
+    expect(await storage.countUnmigratedEntries(name, 'alice')).toBe(0);
+  });
+
+  it("keeps the author store's notes the same as Firestore's when another move runs at the same time", async () => {
+    const { docs, storage } = firestoreStandIn(anotherMove);
+    const layer = authorStorage(storage, null, null).storage;
+    expect((await layer.getEntry('claimed-meanwhile'))?.handle).toBeUndefined();
+    expect(await layer.migrateEntriesToHandle(name, 'alice')).toBe(1);
+    for (const id of docs.keys()) expect((await layer.getEntry(id))?.handle).toBe(docs.get(id)!.handle);
+    expect((await layer.getEntry('claimed-meanwhile'))?.handle).toBe('carol');
+    expect((await layer.getEntry('older'))?.handle).toBe('alice');
+    expect((await layer.getEntry('theirs'))?.handle).toBe('bob');
+  });
+
+  it('changes no note in the author store when storage moved none', async () => {
+    const { docs, storage } = firestoreStandIn(d => { for (const [id, v] of d) if (!v.handle) d.set(id, { ...v, handle: 'carol' }); });
+    const layer = authorStorage(storage, null, null).storage;
+    await layer.getEntry('older');
+    expect(await layer.migrateEntriesToHandle(name, 'alice')).toBe(0);
+    for (const id of docs.keys()) expect((await layer.getEntry(id))?.handle).toBe(docs.get(id)!.handle);
+    expect((await layer.getEntry('older'))?.handle).toBe('carol');
+  });
+
+  it('shows each note again only after storage confirms it, including on a retry that moves none', async () => {
+    const { docs, storage } = firestoreStandIn(d => { d.delete('claimed-meanwhile'); });
+    for (let i = 0; i < 20; i++) docs.set(`note-${i}`, { ...base, pseudonym: name });
+    const layer = authorStorage(storage, null, null).storage;
+    expect(await layer.getEntry('claimed-meanwhile')).toBeTruthy();
+    const read = storage.getEntry.bind(storage);
+    let started!: () => void, release!: () => void;
+    const reading = new Promise<void>(resolve => { started = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    let active = 0, peak = 0;
+    const reads = vi.spyOn(storage, 'getEntry').mockImplementation(async id => {
+      peak = Math.max(peak, ++active);
+      try {
+        if (id === 'older') {
+          started();
+          await resume;
+          throw new Error('read interrupted');
+        }
+        await new Promise<void>(resolve => setImmediate(resolve));
+        return await read(id);
+      } finally { active--; }
+    });
+    const finished = expect(layer.migrateEntriesToHandle(name, 'alice')).rejects.toThrow('read interrupted');
+    try {
+      await reading;
+      expect(docs.get('older')?.handle).toBe('alice');
+      expect(await layer.getEntry('older')).toBeNull();
+      expect((await layer.getEntry('theirs'))?.handle).toBe('bob');
+    } finally { release(); }
+    await finished;
+    reads.mockRestore();
+
+    expect(peak).toBeLessThanOrEqual(8);
+    expect(await layer.getEntry('older')).toBeNull();
+    expect(await layer.getEntry('claimed-meanwhile')).toBeNull();
+    const visible = await layer.getEntries(100);
+    expect(visible.map(note => note.id)).not.toContain('older');
+    expect(visible).toHaveLength(21);
+    expect(await layer.migrateEntriesToHandle(name, 'alice')).toBe(0);
+    expect((await layer.getEntry('older'))?.handle).toBe('alice');
+    expect(await layer.getEntry('claimed-meanwhile')).toBeNull();
+  });
+
+  it('reads back a partially committed batch after all its writes have settled', async () => {
+    const { storage } = firestoreStandIn(() => {}, async id => {
+      if (id === 'older') throw new Error('write interrupted');
+      await new Promise<void>(resolve => setImmediate(resolve));
+    });
+    const layer = authorStorage(storage, null, null).storage;
+    await expect(layer.migrateEntriesToHandle(name, 'alice')).rejects.toThrow('write interrupted');
+    expect((await storage.getEntry('claimed-meanwhile'))?.handle).toBe('alice');
+    expect((await layer.getEntry('claimed-meanwhile'))?.handle).toBe('alice');
+    expect((await layer.getEntry('older'))?.handle).toBeUndefined();
   });
 });

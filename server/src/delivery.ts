@@ -527,7 +527,8 @@ export function isEntryAiOnly(entry: JournalEntry): boolean {
  * Unified access control: check if a user can view an entry.
  *
  * Rule: `to` determines access.
- *   - Empty `to` (or undefined) = public
+ *   - Empty `to` (or undefined) = public, except an older record marked `visibility: 'private'`,
+ *     which is its author's alone
  *   - Non-empty `to` = private to author + listed destinations
  *
  * Channel destinations (#channel) require a storage lookup to check membership.
@@ -550,8 +551,9 @@ export async function canView(
   // Authors can always see their own entries
   if (isAuthor) return true;
 
-  // No `to` = public
-  if (!entry.to || entry.to.length === 0) return true;
+  // No `to` = public, unless an older record was marked private with nowhere to go: then it is its author's alone,
+  // as on public pages (hasPublicAudience).
+  if (!entry.to || entry.to.length === 0) return entry.visibility !== 'private';
 
   // Check each destination
   for (const dest of entry.to) {

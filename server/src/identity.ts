@@ -101,3 +101,15 @@ export function isValidHandle(handle: string): boolean {
 export function normalizeHandle(handle: string): string {
   return handle.toLowerCase().replace(/^@/, '');
 }
+/**
+ * Whether a caller wrote a note. A note with a handle belongs only to the account with that handle. A note with no
+ * handle belongs to the key whose derived name matches the note's. Claiming a handle moves the notes with no handle
+ * under that key's name to it (see migrateEntriesToHandle); notes that already have a handle keep it.
+ */
+export function isNoteAuthor(
+  note: { handle?: string | null; pseudonym?: string | null },
+  caller: { pseudonym?: string | null; handle?: string | null },
+): boolean {
+  if (note.handle) return !!caller.handle && note.handle === caller.handle;
+  return !!caller.pseudonym && note.pseudonym === caller.pseudonym;
+}

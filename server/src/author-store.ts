@@ -168,6 +168,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     log = (message: string) => console.error(message) }: AuthorStorageOptions = {}) {
   const extra = base as Storage & Record<string, any>;
   const entries = new Map<string, JournalEntry>();
+  // Keep IDs that still need a confirmed storage read across migration retries.
+  const unconfirmedNotes = new Map<string, Set<string>>();
   const conversations = new Map<string, Conversation>();
   const summaries = new Map<string, Summary>();
   const daily = new Map<string, DailySummary>();
@@ -180,14 +182,20 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
   const index = (kind: Kind): Map<string, any> => kind === 'posts' ? entries : kind === 'conversations' ? conversations : summaries;
   const ownerOf = (value: {handle?: string; pseudonym: string}) => value.handle && authors.has(value.handle)
     ? value.handle : [...authors].find(([, s]) => belongs(value, s.user))?.[0];
-  const belongs = (value: {handle?: string; pseudonym: string}, user: BindingUser) =>
-    value.handle === user.handle || value.pseudonym === user.tinycloud.pseudonym
-    || (!!user.legacyPseudonym && value.pseudonym === user.legacyPseudonym);
+  /** A record with a handle belongs to that handle's account; one without belongs to the key whose derived name matches it. */
+  const belongs = (value: {handle?: string; pseudonym: string}, user: BindingUser) => value.handle
+    ? value.handle === user.handle
+    : value.pseudonym === user.tinycloud.pseudonym || (!!user.legacyPseudonym && value.pseudonym === user.legacyPseudonym);
   async function exclusive<T>(handle: string, action: () => Promise<T>): Promise<T> {
     const prior = locks.get(handle) || Promise.resolve();
     const task = prior.catch(() => {}).then(action);
     locks.set(handle, task);
     try { return await task; } finally { if (locks.get(handle) === task) locks.delete(handle); }
+  }
+  function withRecordLock<T>(kind: Kind, value: { handle?: string; pseudonym: string }, action: () => Promise<T>) {
+    const byAccount = () => exclusive(value.handle || handlesByPseudonym.get(value.pseudonym) || '__legacy', action);
+    // Finish a legacy post's write or deletion on one side of its ownership change.
+    return kind === 'posts' && !value.handle ? exclusive(`assets:${value.pseudonym}`, byAccount) : byAccount();
   }
   function evict(user: BindingUser) {
     for (const map of [entries, conversations, summaries]) for (const [id, value] of map) if (belongs(value, user)) map.delete(id);
@@ -417,8 +425,6 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
   async function write(kind: Kind, value: NewRecord): Promise<any> {
     if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
     await init();
-    const lockHandle = ('handle' in value && typeof value.handle === 'string' && value.handle)
-      || handlesByPseudonym.get(value.pseudonym) || '__legacy';
     const save = async () => {
       const handle = ownerOf(value);
       const state = handle ? authors.get(handle) : undefined;
@@ -444,22 +450,70 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
       index(kind).set(saved.id, saved);
       return saved;
     };
-    return exclusive(lockHandle, save);
+    return withRecordLock(kind, value, save);
   }
   async function remove(kind: Kind, id: string) {
     if (!codec || !resolveStore) throw new Error('Author storage keys are unavailable');
+    function currentRecord() {
+      const record = index(kind).get(id);
+      if (!record && kind === 'posts' && [...unconfirmedNotes.values()].some(ids => ids.has(id))) {
+        throw new Error('The note could not be checked. Retry the deletion.');
+      }
+      return record;
+    }
     await ready('all');
     // A read may have stopped serving an account while its check ran. Load it again before taking the record as gone.
     if (!index(kind).has(id) && [...authors.values()].some(s => s.hidden && !s.available && !s.activationPending
       && !linking.has(s.user.handle) && (s.retryAt || 0) <= now())) await ready('all');
-    const value = index(kind).get(id);
+    const value = currentRecord();
     if (!value) return;
-    const lockHandle = value.handle || handlesByPseudonym.get(value.pseudonym) || '__legacy';
-    await exclusive(lockHandle, async () => {
-      const handle = ownerOf(value);
+    await withRecordLock(kind, value, async () => {
+      const current = currentRecord();
+      if (!current) return;
+      if (value.handle !== current.handle || value.pseudonym !== current.pseudonym) throw new Error('The owner changed. Try again.');
+      const handle = ownerOf(current);
       if (handle) await (await resolveStore(authors.get(handle)!.user.tinycloud)).delete(`${kind}/${id}`);
       else await (kind === 'posts' ? base.deleteEntry(id) : kind === 'conversations' ? base.deleteConversation(id) : extra.deleteSummary?.(id));
       index(kind).delete(id);
+    });
+  }
+  async function migrateEntriesToHandle(pseudonym: string, handle: string): Promise<number> {
+    await init();
+    return exclusive(`assets:${pseudonym}`, async () => {
+      const ids = unconfirmedNotes.get(pseudonym) ?? new Set<string>();
+      if (authors.has(handle) && !ids.size) return 0;
+
+      // Linked notes come from their author's store. Withhold only the legacy notes
+      // whose ownership may change, starting before the first database write.
+      for (const [id, note] of entries) {
+        if (note.pseudonym === pseudonym && !note.handle && !ownerOf(note)) {
+          ids.add(id);
+          entries.delete(id);
+        }
+      }
+      unconfirmedNotes.set(pseudonym, ids);
+
+      let count = 0;
+      let failure: { reason: unknown } | undefined;
+      try {
+        if (!authors.has(handle)) count = await base.migrateEntriesToHandle(pseudonym, handle);
+      } catch (err) {
+        // Some transactions may already have committed.
+        failure = { reason: err };
+      }
+      await parallel([...ids], async id => {
+        try {
+          const stored = await base.getEntry(id);
+          if (stored && !ownerOf(stored) && !entries.has(id)) entries.set(id, stored);
+          ids.delete(id);
+        } catch (err) {
+          // Leave this ID out of the index until a retry confirms it. Other notes can be restored.
+          failure ??= { reason: err };
+        }
+      });
+      if (!ids.size) unconfirmedNotes.delete(pseudonym);
+      if (failure) throw failure.reason;
+      return count;
     });
   }
   const overrides: Record<string, any> = {
@@ -499,9 +553,8 @@ export function authorStorage(base: Storage, resolveStore: AuthorStoreResolver |
     getDailySummaries: async (n=30) => { await ready(); return [...daily.values()].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,n); },
     getDailySummary: async (date:string) => { await ready(); return daily.get(date)||null; },
     deleteDailySummary: async (date:string) => { await init(); daily.delete(date); },
-    migrateEntriesToHandle: async (p:string,h:string) => { await init(); if (authors.has(h)) return 0;
-      const count=await base.migrateEntriesToHandle(p,h); for (const e of entries.values()) if(e.pseudonym===p)e.handle=h; return count; },
-    countUnmigratedEntries: async (p:string,h:string) => (await list<JournalEntry>('posts')).filter(e=>e.pseudonym===p&&e.handle!==h).length,
+    migrateEntriesToHandle,
+    countUnmigratedEntries: async (p:string,_h:string) => (await list<JournalEntry>('posts')).filter(e=>e.pseudonym===p&&!e.handle).length,
   };
   const storage = new Proxy(base, { get(target, prop, receiver) {
     if (typeof prop === 'string' && prop in overrides) return overrides[prop];
