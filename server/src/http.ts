@@ -14,6 +14,7 @@ import { canonical } from './author-records.js';
 import { linkMessage, networkRecovery } from './openkey-recovery.js';
 import { tracePointer } from './trace-pointer.js';
 import { traceAccess, traceRequestStore, TraceRequestError } from './trace-access.js';
+import { traceAgentPairing, traceAgentPairStore, TraceAgentPairError } from './trace-agent-pair.js';
 import { tracePointerStore, tracePointers, TracePointerError } from './trace-pointer-store.js';
 import { answerCustody, simulatedRunnerClient, subhostRunnerClient, tinyCloudTraceSource, traceRunner, workerExecutor } from './trace-run.js';
 import { modelKeyVault } from './trace-model.js';
@@ -1151,7 +1152,7 @@ export const SYSTEM_SKILLS: Skill[] = [
 ];
 
 /** Reported to MCP clients. Kept in step with the plugin manifests by tool-surface.test.ts. */
-export const ROUTER_MCP_VERSION = '0.6.3';
+export const ROUTER_MCP_VERSION = '0.6.4';
 
 // What each built-in tool does to the world, for clients that show or gate tools by effect.
 // read: changes nothing. write: changes Router state and can be undone. destructive: removes something.
@@ -1283,6 +1284,11 @@ const publishedStorage = authorLayer ? authorLayer.storage : withGroups(baseStor
 const storage = new StagedStorage(STAGING_DELAY_MS, publishedStorage, BASE_URL);
 if (keyRecovery) storage.stop();
 const traceRequests = traceRequestStore(useFirestore ? getFirestore() : undefined);
+const traceAgentPair = traceAgentPairing({
+  store: traceAgentPairStore(),
+  baseUrl: BASE_URL,
+  host: process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz',
+});
 /** A post as this reader may see it now, with the feed's rules: a waiting post for its author only, a private group's for current members. */
 async function visibleToReader(id: string, actor: { pseudonym: string; user: User | null }): Promise<JournalEntry | null> {
   const entry = await storage.getEntry(id);
@@ -2859,9 +2865,21 @@ async function createMCPServer(secretKey: string) {
       try {
         // Running and releasing need the owner's storage key and trace key, which never reach Router or the agent.
         if (['prepare', 'approve', 'release'].includes(args?.action as string)) throw new TraceRequestError('Run and release from the owner\'s own tool, which checks the enclave\'s attestation and holds the owner\'s keys.');
-        const result = await handleTraceAccess({ user: await getToolUser(), pseudonym, keyHash }, args || {});
+        const user = await getToolUser();
+        if (args?.action === 'pair_start') {
+          const result = traceAgentPair.start({ user, keyHash }, args || {});
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
+        }
+        if (args?.action === 'pair_poll') {
+          const result = traceAgentPair.poll({ user, keyHash }, args || {});
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
+        }
+        const result = await handleTraceAccess({ user, pseudonym, keyHash }, args || {});
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
-      } catch (err) { return { content: [{ type: 'text' as const, text: err instanceof TraceRequestError ? err.message : 'Trace request unavailable.' }], isError: true }; }
+      } catch (err) {
+        const message = err instanceof TraceRequestError || err instanceof TraceAgentPairError ? err.message : 'Trace request unavailable.';
+        return { content: [{ type: 'text' as const, text: message }], isError: true };
+      }
     }
 
     if (name === 'router_posting_rules') {
@@ -8247,6 +8265,28 @@ const server = createServer(async (req, res) => {
       } catch (err) {
         res.writeHead(err instanceof TracePointerError ? err.status : 400);
         res.end(JSON.stringify({ error: err instanceof TracePointerError ? err.message : 'Invalid trace pointer request.' }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname.startsWith('/api/trace-agent/pair/')) {
+      res.setHeader('Cache-Control', 'no-store');
+      const key = req.headers.authorization?.replace(/^Bearer /i, '');
+      if (!key || !isValidSecretKey(key)) { res.writeHead(401); res.end(JSON.stringify({ error: 'Sign in to Router.' })); return; }
+      const op = url.pathname.slice('/api/trace-agent/pair/'.length);
+      if (!['start', 'info', 'complete', 'poll'].includes(op)) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return; }
+      try {
+        const input = JSON.parse(await readBody(req, 150000));
+        const keyHash = hashSecretKey(key);
+        const actor = { user: await storage.getUserByKeyHash(keyHash), keyHash };
+        const result = op === 'start' ? traceAgentPair.start(actor, input)
+          : op === 'info' ? traceAgentPair.info(actor, input)
+          : op === 'complete' ? traceAgentPair.complete(actor, input)
+          : traceAgentPair.poll(actor, input);
+        res.writeHead(200); res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(err instanceof TraceAgentPairError ? err.status : 400);
+        res.end(JSON.stringify({ error: err instanceof TraceAgentPairError ? err.message : 'Trace agent authorization unavailable.' }));
       }
       return;
     }

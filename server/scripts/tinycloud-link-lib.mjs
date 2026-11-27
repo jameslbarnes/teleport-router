@@ -17,16 +17,17 @@ export async function request(base,path,body) {
 
 /** Caller keeps both keys local. Prove recovery works before any record is migrated.
  * Stops waiting after timeoutMs; Router's own deadline for a link is shorter, so by then it has finished or failed. */
-export async function linkOwner({base,secretKey,signMessage,confirmRecovery,grant,onProgress=()=>{},timeoutMs=25*60_000}) {
+export async function linkOwner({base,secretKey,signMessage,confirmRecovery,grant,networkRecovery,onProgress=()=>{},timeoutMs=25*60_000}) {
   if(typeof confirmRecovery!=='function')throw new Error('A client that can decrypt the owner recovery key is required before linking.');
   const delegation=serializeDelegation(grant);
-  const challenge=await request(base,'/api/tinycloud/challenge',{secret_key:secretKey,delegation});
+  const net = networkRecovery ? { network_recovery: networkRecovery } : {};
+  const challenge=await request(base,'/api/tinycloud/challenge',{secret_key:secretKey,delegation,...net});
   const signature=await signMessage(challenge.message);
-  const prepared=await request(base,'/api/tinycloud/recovery',{secret_key:secretKey,delegation,signature});
+  const prepared=await request(base,'/api/tinycloud/recovery',{secret_key:secretKey,delegation,signature,...net});
   if(prepared.message!==challenge.message||prepared.context.space!==grant.spaceId||prepared.context.prefix!==grant.path)
     throw new Error('Recovery confirmation does not match this link request.');
   const recovery_proof=await confirmRecovery(prepared);
-  await request(base,'/api/tinycloud/link',{secret_key:secretKey,delegation,signature,recovery_proof});
+  await request(base,'/api/tinycloud/link',{secret_key:secretKey,delegation,signature,recovery_proof,...net});
   const deadline=Date.now()+timeoutMs;
   let last='';
   for(;;) {

@@ -1,53 +1,26 @@
 // The owner's side of trace requests that carry an app (docs/attested-trace-apps.md). Run it on
-// your own machine, or have your agent run it there for you; it needs your Router key and your
-// storage key, and neither leaves the machine.
+// your own machine, or have your agent run it there for you; keys never leave this machine.
 //
-//   node scripts/trace-app-owner.mjs inbox             --router-key-file <file>
-//   node scripts/trace-app-owner.mjs show <request>    --router-key-file <file>
-//   node scripts/trace-app-owner.mjs run <request> --pin <pin> --router-key-file <file> --owner-key-file <file> [--trace-key-file <file>]
-//   node scripts/trace-app-owner.mjs release <request> --router-key-file <file> --owner-key-file <file> [--trace-key-file <file>]
-//   node scripts/trace-app-owner.mjs withhold <request> --router-key-file <file>
-//
-//   --router <url>          default https://router.teleport.computer
-//   --tinycloud-host <url>  default https://tee.node.tinycloud.xyz
-//   --space <name>          the name of your storage space, default router
-//   --approved-file <file>  default subhost/approved.json in this checkout
-//   --trace-key-file <file> the key your traces are sealed to, when it is not your storage key
-//   --records <dir>         where reviewed runs are remembered, default ~/.router/trace-apps
-//   --capture-state <file>  the capture script's index (default ~/.router/traces/state.json; your rules file sits beside it)
-//   --capture-projects <dir> a folder of session logs for the capture script to read (repeat for several; default its own)
-//   --yes                   lets `run` upload a trace for the first time; without it, `run` says it would and stops
-//   --simulated             local test servers only: accepts a simulated attestation; refuses any HTTPS Router
-//
-// A post whose trace is not in your storage yet (Router may have only its pointer) is uploaded by `run --yes`,
-// after the pin check: the tool calls plugins/teleport-router/scripts/capture-traces.mjs --upload <post>, which
-// cleans the trace under your saved rules and encrypts it to your storage key, as an upload you start yourself
-// would. That needs your rules file and the post's session log, or the script's own copy of it, on this machine.
-// `show` and `run` always say when approving would upload a trace for the first time, and stop if they cannot
-// tell. `run` uploads only when your storage answers that no trace is stored, and only after Router confirms that
-// the request is still open and its requester can still read the post. Without --yes it says so and stops.
-//
-// `show` prints the code's hash computed here and a pin covering the request as shown: its version,
-// requester, note, purpose, code, the requester's key and what the app may do with a model. It writes
-// the lines about model use here, from the declaration's fixed fields, rather than taking Router's.
-// `run` takes that pin and refuses if any of them changed, so what runs is what was read. It checks the enclave on this machine before granting anything. Phala's verifier must accept the
-// TDX quote; the OS, the compose file and the deploy manifest must be approved (subhost/verify.mjs);
-// the runner and sandbox must be the ones in this checkout; and the run must bind this request, the
-// code shown here, the requester's key, the model declaration shown here (or none), the trace version
-// read from your own storage, your key and a fresh nonce. Only then does it rewrap the trace's key to the run's key and grant that key a
-// 10-minute read of that one trace. It checks that the result was signed by the attested run, prints
-// the answer and, for an app that could call a model, what the run says it sent there, and remembers
-// what you reviewed. Nothing reaches the requester until you `release`,
-// which refuses unless the run, the answer and the requester's key are still the ones you reviewed.
+//   node trace-app-owner.mjs pair-init
+//   node trace-app-owner.mjs pair-finish --pair-id <id> --owner-did <did> [--sealed-file <file>]
+//   node trace-app-owner.mjs rules [--never-upload <prefix>...]
+//   node trace-app-owner.mjs inbox
+//   node trace-app-owner.mjs show <request>
+//   node trace-app-owner.mjs run <request> --pin <pin> [--yes]
+//   node trace-app-owner.mjs release <request>
+//   node trace-app-owner.mjs withhold <request>
+//   node trace-app-owner.mjs review [request] [--recovery-file <file>]
+//   node trace-app-owner.mjs setup --recovery-file <file>
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { Wallet } from 'ethers';
-import { TinyCloudNode, serializeDelegation } from '@tinycloud/node-sdk';
+import { TinyCloudNode, deserializeDelegation, serializeDelegation } from '@tinycloud/node-sdk';
 import { compressPublicKey, unwrapKey, wrapKey } from '../dist/trace-envelope.js';
 import { canonicalJson, checkRunBundle, checkRunResult, openResult, runHash, sealForRequester } from '../dist/trace-run.js';
 import { APP_RUNTIME, appHash } from '../dist/trace-app.js';
@@ -55,249 +28,557 @@ import { checkModelDeclaration, describeModelUse, modelDeclarationHash } from '.
 import { readerDid } from '../dist/trace-access.js';
 import { traceRecordState } from './trace-owner-storage.mjs';
 import { verifyRunBundle } from '../../subhost/verify.mjs';
-import { runnerSpec, sandboxSpec } from '../../subhost/embed.mjs';
 import { grantTraceRead, traceReadSession } from '../../browser/src/trace-permission.mjs';
+import { loadAttestationDefaults } from './trace-owner-attestation.mjs';
+import {
+  createPendingAgent, ensureUploadRules, loadAgentGrant, loadPendingAgent, openAgentGrant,
+  promptPassword, readHexKeyFile, readLineFromStdin, resolveRouterKey, saveAgentGrant,
+  saveOwnerKeys, saveUploadRules, unlockRecoveryFile,
+} from './trace-owner-auth.mjs';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CAPTURE = join(ROOT, 'plugins', 'teleport-router', 'scripts', 'capture-traces.mjs');
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SIBLING_CAPTURE = join(HERE, 'capture-traces.mjs');
+const CAPTURE = existsSync(SIBLING_CAPTURE) ? SIBLING_CAPTURE : join(HERE, '..', '..', 'plugins', 'teleport-router', 'scripts', 'capture-traces.mjs');
+
 const { values: v, positionals: [action, requestId] } = parseArgs({ allowPositionals: true, options: {
   'router-key-file': { type: 'string' }, 'owner-key-file': { type: 'string' }, 'trace-key-file': { type: 'string' },
-  router: { type: 'string', default: 'https://router.teleport.computer' }, 'tinycloud-host': { type: 'string', default: 'https://tee.node.tinycloud.xyz' }, space: { type: 'string', default: 'router' }, pin: { type: 'string' },
-  'approved-file': { type: 'string' }, records: { type: 'string', default: join(homedir(), '.router', 'trace-apps') }, simulated: { type: 'boolean', default: false },
-  'capture-state': { type: 'string' }, 'capture-projects': { type: 'string', multiple: true }, yes: { type: 'boolean', default: false },
+  'recovery-file': { type: 'string' }, 'password-stdin': { type: 'boolean', default: false },
+  'pair-id': { type: 'string' }, 'owner-did': { type: 'string' }, 'sealed-file': { type: 'string' }, 'pair-token': { type: 'string' },
+  'never-upload': { type: 'string', multiple: true },
+  router: { type: 'string', default: 'https://router.teleport.computer' }, 'tinycloud-host': { type: 'string' },
+  space: { type: 'string', default: 'router' }, pin: { type: 'string' }, 'approved-file': { type: 'string' },
+  records: { type: 'string', default: join(homedir(), '.router', 'trace-apps') }, simulated: { type: 'boolean', default: false },
+  'capture-state': { type: 'string' }, rules: { type: 'string' }, 'init-rules': { type: 'boolean', default: false },
+  'capture-projects': { type: 'string', multiple: true }, yes: { type: 'boolean', default: false },
 } });
+
 // The tool ends by letting its work finish rather than calling process.exit: on Windows, exiting while a
 // network connection is still closing trips an assertion in Node after the work has succeeded.
 class Stop extends Error {}
 const fail = message => { throw new Stop(message); };
+
+const VALID_ACTIONS = ['pair-init', 'pair-finish', 'rules', 'setup', 'review', 'inbox', 'show', 'run', 'release', 'withhold'];
+const NO_REQ_ID_ACTIONS = ['pair-init', 'pair-finish', 'rules', 'setup', 'inbox', 'review'];
+
 async function main() {
-if (!['inbox', 'show', 'run', 'release', 'withhold'].includes(action) || (action !== 'inbox' && !/^[a-f0-9]{64}$/.test(requestId || '')))
-  fail('Use inbox, show <request>, run <request> --pin <pin>, release <request> or withhold <request>; see the top of this file.');
-if (action === 'run' && !/^[a-f0-9]{64}$/.test(v.pin || '')) fail('Give --pin with the pin `show` printed for the request you read. `run` refuses a request that changed since.');
-if (!v['router-key-file']) fail('Give --router-key-file <file holding your Router key>.');
-const base = new URL(v.router);
-const local = base.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(base.hostname);
-if (base.protocol !== 'https:' && !local) fail('Use an HTTPS Router.');
-if (v.simulated && !local) fail('--simulated works only against a local test server.');
-const routerKey = readFileSync(v['router-key-file'], 'utf8').trim();
-const readKey = file => { const k = readFileSync(file, 'utf8').trim(); if (!/^0x[0-9a-fA-F]{64}$/.test(k)) fail(`${file} must hold 0x and 64 hex characters.`); return k; };
-const sha256 = text => createHash('sha256').update(text, 'utf8').digest('hex');
+  if (!VALID_ACTIONS.includes(action) || (!NO_REQ_ID_ACTIONS.includes(action) && !/^[a-f0-9]{64}$/.test(requestId || '')))
+    fail('Use pair-init, pair-finish, rules, inbox, show <request>, run <request> --pin <pin>, release <request>, withhold <request>, review or setup.');
+  if (action === 'review' && requestId && !/^[a-f0-9]{64}$/.test(requestId))
+    fail('Request ID must be 64 hex characters.');
+  if (action === 'run' && !/^[a-f0-9]{64}$/.test(v.pin || ''))
+    fail('Give --pin with the pin `show` printed for the request you read. `run` refuses a request that changed since.');
 
-// Code, purposes and answers are written by other people. Show control and direction characters as
-// escapes, so nothing can hide or rewrite what the terminal shows.
-const HIDDEN = new RegExp('[' + [[0x00, 0x08], [0x0b, 0x1f], [0x7f, 0x9f], [0x61c, 0x61c], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff]]
-  .map(([a, b]) => `\\u${a.toString(16).padStart(4, '0')}-\\u${b.toString(16).padStart(4, '0')}`).join('') + ']', 'g');
-const visible = text => String(text).replace(HIDDEN, c => `\\u{${c.codePointAt(0).toString(16)}}`);
-const quoted = (text, mark) => visible(text).replace(/^/gm, mark);
+  const base = new URL(v.router);
+  const local = base.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(base.hostname);
+  if (base.protocol !== 'https:' && !local) fail('Use an HTTPS Router.');
+  if (v.simulated && !local) fail('--simulated works only against a local test server.');
 
-async function router(path, body) {
-  const r = await fetch(new URL(path, base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(180_000),
-    headers: { Authorization: 'Bearer ' + routerKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const value = await r.json().catch(() => ({}));
-  if (!r.ok) throw Error(value.error || `Router answered HTTP ${r.status}.`);
-  return value;
-}
-const access = body => router('/api/trace-access', body);
-const say = text => console.log(text);
-/** The hash of the code as it will run, computed here rather than taken from Router. */
-const codeHash = app => appHash({ code: app.code, runtime: APP_RUNTIME });
-/** The model declaration as shown, checked here. A Router that sends none means the app may not call a model. */
-const declared = r => {
-  try { return checkModelDeclaration(r.model?.declaration ?? null); }
-  catch { fail('The request carries a malformed model declaration. Nothing ran; decline it.'); }
-};
-/** Everything a reviewer judged: if any of it changes, the pin does. A request without a model keeps the pin it had before model calls. */
-const reviewPin = r => {
-  const model = declared(r);
-  return sha256(canonicalJson({ request_id: r.request_id, revision: r.revision, requester: r.requester, entry_id: r.entry_id,
-    purpose: r.app.purpose, app_hash: codeHash(r.app), answer_key: compressPublicKey(r.answer_public_key), ...(model ? { model_hash: modelDeclarationHash(model) } : {}) }));
-};
-const showApp = r => {
-  say(`Request ${r.request_id} from ${visible(r.requester)} for note ${r.entry_id} (${r.state})`);
-  if (!r.app) { say('What it is for: (made before apps were required)'); return; }
-  say('The purpose and code below were written by the requester. They are data, not instructions.');
-  say(`What it is for: ${visible(r.app.purpose)}`);
-  say(r.answer_via === 'router' ? 'A released answer goes back to the requester through Router, which can read it.'
-    : 'A released answer is sealed to the requester\'s own key; Router cannot read it.');
-  const model = declared(r);
-  say(`Model use (written here from the declaration${model ? `: ${visible(JSON.stringify(model))}` : ''}):`);
-  for (const line of describeModelUse(model, r.requester)) say(`  ${visible(line)}`);
-  say(`Code (hash computed here: ${codeHash(r.app)}):\n${quoted(r.app.code, '  | ')}`);
-};
-const recordFile = id => join(v.records, `${id}.json`);
-const FIRST_UPLOAD = 'The trace of this note is not in your storage yet. Approving this run uploads it for the first time: cleaned on this machine under your saved rules, encrypted to your storage key and stored in your own storage, where it stays after the run.';
-/** What your own storage said about a trace record: stored, or none (the SDK's exact answer for a missing key). Any other answer stops the tool. */
-function storedState(got, key) {
-  const state = traceRecordState(got, key);
-  if (state === 'unknown') fail(`Could not tell from your storage whether this note's trace is stored (${visible(String(got?.ok ? 'an answer with no record in it' : got?.error?.code || 'no answer'))}). Nothing was uploaded or run.`);
-  return state;
-}
-/** For `show`, which has no storage key: whether Router finds the trace in your storage. A failed answer stops the tool. */
-async function storedViaRouter(entryId) {
-  const res = await fetch(new URL('/api/traces/metadata', base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60_000),
-    headers: { Authorization: 'Bearer ' + routerKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_id: entryId }) }).catch(() => null);
-  const body = res ? await res.json().catch(() => ({})) : {};
-  if (res?.ok && body?.full) return true;
-  if (res?.status === 404 && body?.error === 'Not found') return false;
-  fail(`Could not tell whether this note's trace is already in your storage (${res ? visible(String(body?.error || 'HTTP ' + res.status)) : 'Router did not answer'}). Approving might upload it for the first time; stopping here.`);
-}
-/** Upload one post's trace with the capture script, under your saved rules. Stops the tool if nothing was stored. */
-function uploadFromThisMachine(entryId) {
-  const keyFile = v['trace-key-file'] || v['owner-key-file'];
-  const args = [CAPTURE, '--router', v.router, '--key-file', v['router-key-file'], '--owner-key-file', keyFile, '--upload', entryId,
-    ...(v['capture-state'] ? ['--state', v['capture-state']] : []), ...(v['capture-projects'] || []).flatMap(dir => ['--projects', dir])];
-  const out = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 5 * 60_000, windowsHide: true });
-  let summary = null;
-  try { summary = JSON.parse(out.stdout); } catch { /* reported below */ }
-  if (summary && (summary.uploaded === 1 || summary.already_uploaded === 1) && !summary.failed) {
-    const item = summary.traces?.find(t => t.entry === entryId);
-    say(summary.uploaded ? `  ok  uploaded${item?.from_copy ? ' from this machine\'s copy of the session log' : ''}${item?.withheld ? ' (withheld by your rules: the record says so and holds nothing else)' : ''}`
-      : '  ok  it was uploaded before');
+  const sha256 = text => createHash('sha256').update(text, 'utf8').digest('hex');
+
+  // Code, purposes and answers are written by other people. Show control and direction characters as
+  // escapes, so nothing can hide or rewrite what the terminal shows.
+  const HIDDEN = new RegExp('[' + [[0x00, 0x08], [0x0b, 0x1f], [0x7f, 0x9f], [0x61c, 0x61c], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff]]
+    .map(([a, b]) => `\\u${a.toString(16).padStart(4, '0')}-\\u${b.toString(16).padStart(4, '0')}`).join('') + ']', 'g');
+  const visible = text => String(text).replace(HIDDEN, c => `\\u{${c.codePointAt(0).toString(16)}}`);
+  const quoted = (text, mark) => visible(text).replace(/^/gm, mark);
+  const say = text => console.log(text);
+
+  const statePath = v['capture-state'] || join(homedir(), '.router', 'traces', 'state.json');
+  const stateDir = dirname(statePath);
+  const rulesPath = v.rules || join(stateDir, 'rules.json');
+  const defaultRouterKeyFile = join(stateDir, 'router.key');
+  const defaultOwnerKeyFile = join(stateDir, 'owner.key');
+
+  // ── Zero-key local commands: pair-init, pair-finish, rules ──────────────────────────────────
+  if (action === 'pair-init') {
+    const created = createPendingAgent(stateDir);
+    say(JSON.stringify(created, null, 2));
     return;
   }
-  const why = summary?.traces?.find(t => t.entry === entryId)?.error || (out.stderr || '').trim().split('\n').slice(-3).join(' ') || `the capture script exited ${out.status}`;
-  fail(`Could not upload the trace from this machine: ${visible(why)}\nNothing ran.`);
-}
 
-if (action === 'inbox') {
-  const { requests } = await access({ action: 'inbox' });
-  if (!requests.length) say('No requests are waiting.');
-  for (const r of requests) say(`${r.request_id}  ${r.state.padEnd(8)}  ${visible(r.requester)}  ${r.entry_id}  ${r.app ? visible(r.app.purpose) : '(no app)'}${r.model?.declaration ? `  [calls a model: ${visible(r.model.declaration.provider)}]` : ''}`);
-  return;
-}
-const r = await access({ action: 'status', request_id: requestId });
-if (action === 'show') {
-  showApp(r);
-  if (await storedViaRouter(r.entry_id)) say('\nThe trace of this note is already in your storage.');
-  else say(`\n${FIRST_UPLOAD}`);
-  if (r.app && (r.state === 'pending' || r.state === 'answered')) say(`\nTo run exactly the request above: run ${r.request_id} --pin ${reviewPin(r)}`);
-  return;
-}
-if (action === 'withhold') {
-  const done = await access({ action: 'withhold', request_id: r.request_id, revision: r.revision });
-  say(`Withheld. The requester sees: declined. (${done.state})`);
-  return;
-}
-
-const ownerKey = v['owner-key-file'] ? readKey(v['owner-key-file']) : null;
-const traceKey = v['trace-key-file'] ? readKey(v['trace-key-file']) : ownerKey;
-if (!traceKey) fail('Give --owner-key-file (and --trace-key-file if your traces are sealed to another key).');
-
-if (action === 'release') {
-  let reviewed;
-  try { reviewed = JSON.parse(readFileSync(recordFile(r.request_id), 'utf8')); } catch { fail('There is no reviewed run of this request on this machine. Run it first.'); }
-  if (r.state !== 'answered' || !r.answer) fail(`There is no answer waiting to release (the request is ${r.state}).`);
-  if (r.revision !== reviewed.revision || r.answer.run_id !== reviewed.run_id || compressPublicKey(r.answer_public_key) !== reviewed.answer_key
-    || r.answer.description.answer_key !== reviewed.answer_key)
-    fail('The request, its run or the requester\'s key changed since you reviewed it. Nothing was released; run it again.');
-  checkRunResult(r.answer.sealed, r.answer.signature, r.answer.description, reviewed.run_public_key);
-  const result = openResult(r.answer.sealed, r.answer.description, traceKey);
-  if (!result.ok) fail(`The app failed, so there is nothing to release: ${visible(result.error)}\nWithhold it, or run it again.`);
-  if (sha256(result.answer) !== reviewed.answer_sha256) fail('This is not the answer you reviewed. Nothing was released.');
-  say(r.answer_via === 'router'
-    ? `This exact text will be sealed to Router's enclave, which hands it to the requester (Router can read it):\n${quoted(result.answer, '  > ')}`
-    : `This exact text will be sealed to the requester's key:\n${quoted(result.answer, '  > ')}`);
-  const { sealed, sealed_sha256 } = sealForRequester(result.answer, r.answer.description, reviewed.answer_key);
-  await access({ action: 'release', request_id: r.request_id, revision: r.revision, run_id: r.answer.run_id, sealed });
-  say(`Released. Receipt (SHA-256 of the sealed answer): ${sealed_sha256}`);
-  return;
-}
-
-// run
-if (!ownerKey) fail('Give --owner-key-file: your storage key signs the read grant.');
-if (!r.app) fail('This request was made before apps were required. Decline it on the trace access page.');
-if (reviewPin(r) !== v.pin) fail('This request is not the one with the pin given: its version, requester, note, purpose, code or key changed. Nothing ran. Show it again.');
-showApp(r);
-const owner = new TinyCloudNode({ privateKey: ownerKey, host: v['tinycloud-host'], prefix: v.space, autoCreateSpace: false, enablePublicSpace: false });
-await owner.signIn();
-try {
-  // The trace's record, read from your own storage rather than taken from Router.
-  const metaKey = `router/traces/${r.entry_id}/meta`;
-  const readMeta = () => owner.kv.get(metaKey, { source: 'network' });
-  let got = await readMeta();
-  if (storedState(got, metaKey) === 'none') {
-    // Your storage says no trace is stored: approving this run is what uploads it, from this machine, encrypted to your key.
-    say(`\n${FIRST_UPLOAD}`);
-    try { await access({ action: 'check', request_id: r.request_id, revision: r.revision }); }
-    catch (err) { fail(`Nothing was uploaded or run: ${visible(err.message)}`); }
-    if (!v.yes) { say('Run the same command with --yes to upload it and run the app. Nothing was uploaded or run.'); return; }
-    say('Uploading it from this machine, encrypted to your storage key...');
-    uploadFromThisMachine(r.entry_id);
-    got = await readMeta();
-    if (traceRecordState(got, metaKey) !== 'stored') fail('The upload finished but no trace can be read for this note in your storage. Nothing ran.');
+  if (action === 'rules') {
+    try {
+      const saved = saveUploadRules(rulesPath, v['never-upload'] || []);
+      say(`  ok  saved ${rulesPath} (${saved.never_upload_tools.length ? `excluding: ${saved.never_upload_tools.join(', ')}` : 'no excluded tools'})`);
+      return;
+    } catch (err) {
+      fail(err.message);
+    }
   }
-  const record = typeof got.data.data === 'string' ? JSON.parse(got.data.data) : got.data.data;
-  if (record?.v !== 1 || record.entryId !== r.entry_id || !record.full?.sha256 || String(record.ownerDid).toLowerCase() !== owner.did.toLowerCase())
-    fail('The trace record in your storage is not this note\'s, or not yours.');
-  const sealedOwnerDid = record.sealedOwnerDid || record.ownerDid;
-  const ownerPublicKey = compressPublicKey(new Wallet(traceKey).signingKey.publicKey);
-  // The trace's key must open with yours before anything is asked of the enclave.
-  const contentKey = unwrapKey(record.full.wraps?.owner, { ownerDid: sealedOwnerDid, entryId: r.entry_id }, 'full', 'owner', traceKey);
 
-  say('\nPreparing a run and checking the enclave on this machine...');
-  const nonce = randomBytes(32).toString('hex');
-  const prepared = await access({ action: 'prepare', request_id: r.request_id, revision: r.revision, nonce });
-  const own = { ownerDid: record.ownerDid, ownerPublicKey, ciphertextSha256: record.full.sha256 };
-  const request = { request_id: r.request_id, revision: r.revision, entry_id: r.entry_id, answer_key: r.answer_public_key };
-  // The declaration shown, and pinned, above: the run must allow exactly this model use, or none.
-  const model = declared(r);
-  if (v.simulated) {
-    checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: prepared.runner, request, own, model },
-      { allowSimulated: true });
-    say('  --  SIMULATED attestation accepted (local test server only)');
-  } else {
-    const runner = runnerSpec(ROOT), sandbox = sandboxSpec(ROOT);
-    if (!runner || !sandbox) fail('This checkout has no pinned runner and sandbox, so it cannot check a real run. Update it.');
-    const facts = verifyRunBundle(prepared.bundle, {
-      nonce, runHash: runHash(prepared.description), publicKey: prepared.public_key, runnerSpec: runner, sandboxSpec: sandbox,
-      template: readFileSync(join(ROOT, 'docker-compose.template.yml'), 'utf8'),
-      approved: JSON.parse(readFileSync(v['approved-file'] || join(ROOT, 'subhost/approved.json'), 'utf8')),
+  if (action === 'pair-finish') {
+    const pending = loadPendingAgent(stateDir);
+    if (!pending) fail('No pending agent authorization found. Run `pair-init` first.');
+    let pairId = v['pair-id'];
+    const ownerDid = v['owner-did'];
+    if (!ownerDid) fail('Give --owner-did (from pair_start).');
+    let sealed;
+    if (v['pair-token']) {
+      const rk = resolveRouterKey({ routerKeyFile: v['router-key-file'], defaultRouterKeyFile });
+      if (!rk) fail('--pair-token requires a Router key (--router-key-file or ROUTER_KEY). Otherwise pass the sealed payload from pair_poll via stdin or --sealed-file.');
+      const res = await fetch(new URL('/api/trace-agent/pair/poll', base), {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60_000),
+        headers: { Authorization: 'Bearer ' + rk, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: v['pair-token'] }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) fail(body.error || `Router answered HTTP ${res.status}.`);
+      if (body.status !== 'completed' || !body.sealed) fail('Authorization is still waiting in your browser. Click Allow first, then try again.');
+      pairId = pairId || body.pair_id;
+      sealed = body.sealed;
+    } else {
+      let raw;
+      if (v['sealed-file']) {
+        raw = readFileSync(v['sealed-file'], 'utf8');
+      } else {
+        if (process.stdin.isTTY) fail('Pass the sealed payload from pair_poll on stdin or with --sealed-file <file>.');
+        raw = '';
+        process.stdin.setEncoding('utf8');
+        for await (const chunk of process.stdin) raw += chunk;
+      }
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch { fail('Sealed payload is not valid JSON.'); }
+      sealed = parsed.sealed || parsed;
+      pairId = pairId || parsed.pair_id;
+    }
+    if (!pairId) fail('Give --pair-id (or pass the full JSON returned by pair_poll).');
+    let opened;
+    try {
+      opened = openAgentGrant(sealed, { pairId, ownerDid, agentPrivateKey: pending.agentKey });
+    } catch (err) {
+      fail(`Could not open the sealed authorization: ${err.message}`);
+    }
+    // Check that the delegation targets this exact agent key on router/traces/ with get-only permission.
+    let d;
+    try { d = deserializeDelegation(opened.delegation); } catch { fail('The authorization carries an invalid TinyCloud delegation.'); }
+    if (String(d.delegateDID || '').toLowerCase() !== pending.agentDid.toLowerCase()
+        || d.path !== 'router/traces/'
+        || !Array.isArray(d.actions) || d.actions.length !== 1 || d.actions[0] !== 'tinycloud.kv/get'
+        || d.spaceId !== opened.space || !d.expiry || d.expiry.getTime() <= Date.now()) {
+      fail('The delegation does not match this agent or is not a valid read-only grant for router/traces/.');
+    }
+    saveAgentGrant(stateDir, {
+      v: 1,
+      handle: opened.handle,
+      routerKey: opened.routerKey,
+      agentKey: pending.agentKey,
+      agentDid: pending.agentDid,
+      traceKey: opened.traceKey,
+      delegation: opened.delegation,
+      ownerDid: opened.ownerDid,
+      space: opened.space,
+      host: opened.host,
+      expiresAt: d.expiry.toISOString(),
+      createdAt: new Date().toISOString(),
     });
-    say(`  ok  app ${facts.appId}; OS, compose file (Router ${facts.routerVersions.GIT_SHA}) and deploy manifest approved`);
-    say(`  ok  runner and sandbox are this checkout's (code hash ${facts.codeHash.slice(0, 16)}...)`);
-    const res = await fetch('https://cloud-api.phala.network/api/v1/attestations/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hex: prepared.bundle.quote }), signal: AbortSignal.timeout(60_000) });
-    const verdict = await res.json().catch(() => ({}));
-    const body = verdict?.quote?.body || {};
-    if (!res.ok || verdict.success !== true || verdict.quote?.verified !== true) fail('Phala\'s verifier did not accept the quote. Nothing was granted.');
-    if (String(body.reportdata).replace(/^0x/, '') !== facts.reportData || String(body.rtmr3).replace(/^0x/, '') !== facts.quote.rtmr3) fail('Phala\'s verifier checked a different quote. Nothing was granted.');
-    say(`  ok  TDX signature valid (Phala's verifier, record ${verdict.checksum})`);
-    checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: facts.runner, request, own, model },
-      { verifiedReportData: facts.reportData });
+    say(`  ok  authorized local agent for @${visible(opened.handle)} (read-only router/traces/, valid until ${d.expiry.toISOString().slice(0, 10)})`);
+    return;
   }
-  say(`  ok  the run binds this request, the code above, the requester's key, ${model ? 'the model declaration above' : 'no model'}, the trace in your storage, your key and a fresh nonce`);
 
-  const wrap = wrapKey(contentKey, { ownerDid: sealedOwnerDid, entryId: r.entry_id }, 'full', 'reader', prepared.public_key);
-  contentKey.fill(0);
-  // The grant comes from a session limited to this one trace, in the form Router checks: get only, this path, minutes.
-  const readSession = traceReadSession(owner.spaceId, r.entry_id, v.router);
-  const approver = new TinyCloudNode({ privateKey: ownerKey, host: v['tinycloud-host'], ...readSession, autoCreateSpace: false,
-    enablePublicSpace: false, autoBootstrapAccount: false, includeAccountRegistryPermissions: false });
-  let grant;
-  try { await approver.signIn(); grant = await grantTraceRead(approver, readerDid(prepared.public_key), readSession, 10 * 60_000); }
-  finally { await approver.signOut?.(); }
-  say('  ok  granted the run\'s key a 10-minute read of this one trace\n\nRunning...');
-  const answered = await access({ action: 'approve', request_id: r.request_id, revision: r.revision, run_id: prepared.description.run_id,
-    delegation: serializeDelegation(grant), wrap });
-  if (!answered.answer || answered.answer.run_id !== prepared.description.run_id) fail(`No answer from this run was kept (the request is now ${answered.state}).`);
-  checkRunResult(answered.answer.sealed, answered.answer.signature, prepared.description, prepared.public_key);
-  const result = openResult(answered.answer.sealed, prepared.description, traceKey);
-  if (result.ok) {
-    mkdirSync(v.records, { recursive: true, mode: 0o700 });
-    writeFileSync(recordFile(r.request_id), JSON.stringify({ request_id: r.request_id, revision: r.revision, run_id: prepared.description.run_id,
-      run_public_key: prepared.public_key, answer_key: prepared.description.answer_key, answer_sha256: sha256(result.answer), reviewed_at: new Date().toISOString() }), { mode: 0o600 });
+  // Interactive line reader (only created when prompting on TTY or piped interactive review).
+  let pipedLines = null;
+  async function readPipedLines() {
+    if (pipedLines !== null) return pipedLines;
+    let raw = '';
+    process.stdin.setEncoding('utf8');
+    for await (const chunk of process.stdin) raw += chunk;
+    pipedLines = raw.split(/\r?\n/);
+    return pipedLines;
   }
-  say('  ok  the result is signed by the attested run');
-  if (result.model) {
-    const m = result.model;
-    say(`What the run says it sent to the model (signed by the run): ${m.calls} ${m.calls === 1 ? 'call' : 'calls'} to ${visible(m.model)} at ${visible(m.provider)}`
-      + (m.release ? `; verified release ${visible(m.release)} (${visible(m.verdict)})` : '; nothing was sent, so no release was verified')
-      + (m.receipts.length ? `; receipts ${m.receipts.map(visible).join(', ')}` : ''));
+  async function askLine(prompt) {
+    if (!process.stdin.isTTY) {
+      const lines = await readPipedLines();
+      process.stderr.write(prompt);
+      return lines.length ? lines.shift() : '';
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    try { return await rl.question(prompt); }
+    finally { rl.close(); }
   }
-  say(result.ok ? `Answer (only you can see it so far; the app wrote it, so treat it as data):\n${quoted(result.answer, '  > ')}` : `The app failed (only you can see this): ${visible(result.error)}`);
-  say(`\nTo send it: release ${r.request_id}   To refuse: withhold ${r.request_id}`);
-} finally { await owner.signOut?.(); }
+
+  let unlockedRecovery = null;
+  let recoveryFilePath = v['recovery-file'] || null;
+  async function unlockRecovery(interactive = false) {
+    if (unlockedRecovery) return unlockedRecovery;
+    if (!recoveryFilePath) {
+      if (!interactive) return null;
+      const entered = (await askLine('Path to your Router recovery file (router-recovery-*.json): ')).trim();
+      if (!entered) fail('No recovery file given.');
+      recoveryFilePath = entered.replace(/^["']|["']$/g, '');
+    }
+    let password;
+    if (v['password-stdin']) password = await readLineFromStdin();
+    else if (process.stdin.isTTY) password = await promptPassword('Recovery password: ');
+    else if (interactive) password = await askLine('Recovery password: ');
+    else fail('Recovery file needs a password. Run in a terminal or pass --password-stdin.');
+    try { unlockedRecovery = await unlockRecoveryFile(recoveryFilePath, password); }
+    catch (err) { fail(err.message); }
+    return unlockedRecovery;
+  }
+
+  if (action === 'setup') {
+    const rec = await unlockRecovery(true);
+    if (!rec) fail('Give --recovery-file <router-recovery-*.json> to set up this machine.');
+    saveOwnerKeys({ dir: stateDir, routerKey: rec.routerKey, ownerKey: rec.tinycloudKey });
+    say(`  ok  saved owner-only keys for @${visible(rec.handle)} in ${stateDir} (router.key, owner.key)`);
+    const rulesCheck = await ensureUploadRules(rulesPath, {
+      interactive: !v['init-rules'] && !v['password-stdin'],
+      initRules: v['init-rules'],
+      ask: askLine,
+      say,
+    });
+    if (!rulesCheck.ready) fail(rulesCheck.reason);
+    say('Ready. Your agent can now run `inbox`, `show`, `run`, `release`, and `withhold` without asking for key files.');
+    return;
+  }
+
+  // Prefer the browser-authorized scoped agent grant when no explicit owner key or recovery file was passed.
+  const agentGrant = (!v['owner-key-file'] && !recoveryFilePath) ? loadAgentGrant(stateDir) : null;
+  const tinycloudHost = v['tinycloud-host'] || agentGrant?.host || 'https://tee.node.tinycloud.xyz';
+
+  let routerKey = resolveRouterKey({ routerKeyFile: v['router-key-file'], agentGrant, defaultRouterKeyFile });
+  if (!routerKey && recoveryFilePath) {
+    const rec = await unlockRecovery(action === 'review');
+    routerKey = resolveRouterKey({ routerKeyFile: v['router-key-file'], agentGrant, recovery: rec, defaultRouterKeyFile });
+  }
+  if (!routerKey) {
+    if (action === 'review') {
+      const rec = await unlockRecovery(true);
+      routerKey = resolveRouterKey({ recovery: rec, defaultRouterKeyFile });
+    } else {
+      fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start), or pass --router-key-file / --recovery-file.');
+    }
+  }
+
+  async function resolveAuth(interactive = false) {
+    if (agentGrant) {
+      const traceKey = v['trace-key-file'] ? readHexKeyFile(v['trace-key-file'], fail) : agentGrant.traceKey;
+      return { mode: 'delegated', agentGrant, ownerKey: null, traceKey };
+    }
+    let ownerKey = v['owner-key-file'] ? readHexKeyFile(v['owner-key-file'], fail) : null;
+    if (!ownerKey && !recoveryFilePath && existsSync(defaultOwnerKeyFile)) {
+      ownerKey = readHexKeyFile(defaultOwnerKeyFile, fail);
+    }
+    if (!ownerKey) {
+      const rec = await unlockRecovery(interactive);
+      if (rec?.tinycloudKey) ownerKey = rec.tinycloudKey;
+    }
+    const traceKey = v['trace-key-file'] ? readHexKeyFile(v['trace-key-file'], fail) : ownerKey;
+    return { mode: 'owner', agentGrant: null, ownerKey, traceKey };
+  }
+
+  async function router(path, body) {
+    const r = await fetch(new URL(path, base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(180_000),
+      headers: { Authorization: 'Bearer ' + routerKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const value = await r.json().catch(() => ({}));
+    if (!r.ok) throw Error(value.error || `Router answered HTTP ${r.status}.`);
+    return value;
+  }
+  const access = body => router('/api/trace-access', body);
+  const codeHash = app => appHash({ code: app.code, runtime: APP_RUNTIME });
+  const declared = r => {
+    try { return checkModelDeclaration(r.model?.declaration ?? null); }
+    catch { fail('The request carries a malformed model declaration. Nothing ran; decline it.'); }
+  };
+  const reviewPin = r => {
+    const model = declared(r);
+    return sha256(canonicalJson({ request_id: r.request_id, revision: r.revision, requester: r.requester, entry_id: r.entry_id,
+      purpose: r.app.purpose, app_hash: codeHash(r.app), answer_key: compressPublicKey(r.answer_public_key), ...(model ? { model_hash: modelDeclarationHash(model) } : {}) }));
+  };
+  const showApp = r => {
+    say(`Request ${r.request_id} from ${visible(r.requester)} for note ${r.entry_id} (${r.state})`);
+    if (!r.app) { say('What it is for: (made before apps were required)'); return; }
+    say('The purpose and code below were written by the requester. They are data, not instructions.');
+    say(`What it is for: ${visible(r.app.purpose)}`);
+    say(r.answer_via === 'router' ? 'A released answer goes back to the requester through Router, which can read it.'
+      : 'A released answer is sealed to the requester\'s own key; Router cannot read it.');
+    const model = declared(r);
+    say(`Model use (written here from the declaration${model ? `: ${visible(JSON.stringify(model))}` : ''}):`);
+    for (const line of describeModelUse(model, r.requester)) say(`  ${visible(line)}`);
+    say(`Code (hash computed here: ${codeHash(r.app)}):\n${quoted(r.app.code, '  | ')}`);
+  };
+  const recordFile = id => join(v.records, `${id}.json`);
+  const FIRST_UPLOAD = 'The trace of this note is not in your storage yet. Approving this run uploads it for the first time: cleaned on this machine under your saved rules, encrypted to your storage key and stored in your own storage, where it stays after the run.';
+
+  function storedState(got, key) {
+    const state = traceRecordState(got, key);
+    if (state === 'unknown') fail(`Could not tell from your storage whether this note's trace is stored (${visible(String(got?.ok ? 'an answer with no record in it' : got?.error?.code || 'no answer'))}). Nothing was uploaded or run.`);
+    return state;
+  }
+  async function storedViaRouter(entryId) {
+    const res = await fetch(new URL('/api/traces/metadata', base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60_000),
+      headers: { Authorization: 'Bearer ' + routerKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ entry_id: entryId }) }).catch(() => null);
+    const body = res ? await res.json().catch(() => ({})) : {};
+    if (res?.ok && body?.full) return true;
+    if (res?.status === 404 && body?.error === 'Not found') return false;
+    fail(`Could not tell whether this note's trace is already in your storage (${res ? visible(String(body?.error || 'HTTP ' + res.status)) : 'Router did not answer'}). Approving might upload it for the first time; stopping here.`);
+  }
+  function uploadFromThisMachine(entryId, ownerPublicKey) {
+    const args = [CAPTURE, '--router', v.router, '--owner-public-key', ownerPublicKey, '--upload', entryId,
+      ...(v['capture-state'] ? ['--state', v['capture-state']] : []),
+      ...(v.rules ? ['--rules', v.rules] : []),
+      ...(v['capture-projects'] || []).flatMap(dir => ['--projects', dir])];
+    const out = spawnSync(process.execPath, args, {
+      encoding: 'utf8', timeout: 5 * 60_000, windowsHide: true,
+      env: { ...process.env, ROUTER_KEY: routerKey },
+    });
+    let summary = null;
+    try { summary = JSON.parse(out.stdout); } catch { /* reported below */ }
+    if (summary && (summary.uploaded === 1 || summary.already_uploaded === 1) && !summary.failed) {
+      const item = summary.traces?.find(t => t.entry === entryId);
+      say(summary.uploaded ? `  ok  uploaded${item?.from_copy ? ' from this machine\'s copy of the session log' : ''}${item?.withheld ? ' (withheld by your rules: the record says so and holds nothing else)' : ''}`
+        : '  ok  it was uploaded before');
+      return;
+    }
+    const why = summary?.traces?.find(t => t.entry === entryId)?.error || (out.stderr || '').trim().split('\n').slice(-3).join(' ') || `the capture script exited ${out.status}`;
+    fail(`Could not upload the trace from this machine: ${visible(why)}\nNothing ran.`);
+  }
+
+  async function doRelease(r, traceKey) {
+    let reviewed;
+    try { reviewed = JSON.parse(readFileSync(recordFile(r.request_id), 'utf8')); } catch { fail('There is no reviewed run of this request on this machine. Run it first.'); }
+    if (r.state !== 'answered' || !r.answer) fail(`There is no answer waiting to release (the request is ${r.state}).`);
+    if (r.revision !== reviewed.revision || r.answer.run_id !== reviewed.run_id || compressPublicKey(r.answer_public_key) !== reviewed.answer_key
+      || r.answer.description.answer_key !== reviewed.answer_key)
+      fail('The request, its run or the requester\'s key changed since you reviewed it. Nothing was released; run it again.');
+    checkRunResult(r.answer.sealed, r.answer.signature, r.answer.description, reviewed.run_public_key);
+    const result = openResult(r.answer.sealed, r.answer.description, traceKey);
+    if (!result.ok) fail(`The app failed, so there is nothing to release: ${visible(result.error)}\nWithhold it, or run it again.`);
+    if (sha256(result.answer) !== reviewed.answer_sha256) fail('This is not the answer you reviewed. Nothing was released.');
+    say(r.answer_via === 'router'
+      ? `This exact text will be sealed to Router's enclave, which hands it to the requester (Router can read it):\n${quoted(result.answer, '  > ')}`
+      : `This exact text will be sealed to the requester's key:\n${quoted(result.answer, '  > ')}`);
+    const { sealed, sealed_sha256 } = sealForRequester(result.answer, r.answer.description, reviewed.answer_key);
+    await access({ action: 'release', request_id: r.request_id, revision: r.revision, run_id: r.answer.run_id, sealed });
+    say(`Released. Receipt (SHA-256 of the sealed answer): ${sealed_sha256}`);
+  }
+
+  async function doRun(r, pin, { mode, agentGrant: ag, ownerKey, traceKey, allowFirstUpload, interactive = false }) {
+    if (mode === 'owner' && !ownerKey) fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start), or pass --owner-key-file / --recovery-file.');
+    if (!r.app) fail('This request was made before apps were required. Decline it on the trace access page.');
+    if (reviewPin(r) !== pin) fail('This request is not the one with the pin given: its version, requester, note, purpose, code or key changed. Nothing ran. Show it again.');
+    if (!interactive) showApp(r);
+    const ownerPublicKey = compressPublicKey(new Wallet(traceKey).signingKey.publicKey);
+    const metaKey = `router/traces/${r.entry_id}/meta`;
+
+    let client = null;
+    let readMeta;
+    let readMetaKey = metaKey;
+    let expectedOwnerDid;
+    let issueRunGrant;
+
+    if (mode === 'delegated') {
+      const parent = deserializeDelegation(ag.delegation);
+      if (!parent.expiry || parent.expiry.getTime() <= Date.now()) {
+        fail('Your local agent authorization expired. Re-authorize in your browser (pair-init + router_trace_access pair_start).');
+      }
+      client = new TinyCloudNode({
+        privateKey: ag.agentKey, host: tinycloudHost, autoCreateSpace: false,
+        enablePublicSpace: false, autoBootstrapAccount: false, includeAccountRegistryPermissions: false,
+      });
+      await client.signIn();
+      const delegatedAccess = await client.useDelegation(parent);
+      expectedOwnerDid = ag.ownerDid;
+      readMetaKey = `${r.entry_id}/meta`;
+      readMeta = () => delegatedAccess.kv.get(readMetaKey, { source: 'network' });
+      issueRunGrant = async runPublicKey => {
+        const { delegation } = await client.delegateTo(
+          readerDid(runPublicKey),
+          [{ service: 'tinycloud.kv', space: ag.space, path: `router/traces/${r.entry_id}/`, actions: ['get'] }],
+          { expiry: 10 * 60_000, requireActivation: true },
+        );
+        return delegation;
+      };
+    } else {
+      client = new TinyCloudNode({ privateKey: ownerKey, host: tinycloudHost, prefix: v.space, autoCreateSpace: false, enablePublicSpace: false });
+      await client.signIn();
+      expectedOwnerDid = client.did;
+      readMeta = () => client.kv.get(metaKey, { source: 'network' });
+      issueRunGrant = async runPublicKey => {
+        const readSession = traceReadSession(client.spaceId, r.entry_id, v.router);
+        const approver = new TinyCloudNode({
+          privateKey: ownerKey, host: tinycloudHost, ...readSession, autoCreateSpace: false,
+          enablePublicSpace: false, autoBootstrapAccount: false, includeAccountRegistryPermissions: false,
+        });
+        try { await approver.signIn(); return await grantTraceRead(approver, readerDid(runPublicKey), readSession, 10 * 60_000); }
+        finally { await approver.signOut?.(); }
+      };
+    }
+
+    try {
+      let got = await readMeta();
+      if (storedState(got, readMetaKey) === 'none') {
+        if (!interactive) say(`\n${FIRST_UPLOAD}`);
+        try { await access({ action: 'check', request_id: r.request_id, revision: r.revision }); }
+        catch (err) { fail(`Nothing was uploaded or run: ${visible(err.message)}`); }
+        if (!allowFirstUpload) { say('Run the same command with --yes to upload it and run the app. Nothing was uploaded or run.'); return null; }
+        const rulesCheck = await ensureUploadRules(rulesPath, { interactive, initRules: v['init-rules'], ask: askLine, say });
+        if (!rulesCheck.ready) fail(rulesCheck.reason);
+        say('Uploading it from this machine, encrypted to your storage key...');
+        uploadFromThisMachine(r.entry_id, ownerPublicKey);
+        got = await readMeta();
+        if (traceRecordState(got, readMetaKey) !== 'stored') fail('The upload finished but no trace can be read for this note in your storage. Nothing ran.');
+      }
+      const record = typeof got.data.data === 'string' ? JSON.parse(got.data.data) : got.data.data;
+      if (record?.v !== 1 || record.entryId !== r.entry_id || !record.full?.sha256 || String(record.ownerDid).toLowerCase() !== expectedOwnerDid.toLowerCase())
+        fail('The trace record in your storage is not this note\'s, or not yours.');
+      const sealedOwnerDid = record.sealedOwnerDid || record.ownerDid;
+      const contentKey = unwrapKey(record.full.wraps?.owner, { ownerDid: sealedOwnerDid, entryId: r.entry_id }, 'full', 'owner', traceKey);
+
+      say('\nPreparing a run and checking the enclave on this machine...');
+      const nonce = randomBytes(32).toString('hex');
+      const prepared = await access({ action: 'prepare', request_id: r.request_id, revision: r.revision, nonce });
+      const own = { ownerDid: record.ownerDid, ownerPublicKey, ciphertextSha256: record.full.sha256 };
+      const request = { request_id: r.request_id, revision: r.revision, entry_id: r.entry_id, answer_key: r.answer_public_key };
+      const model = declared(r);
+      if (v.simulated) {
+        checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: prepared.runner, request, own, model },
+          { allowSimulated: true });
+        say('  --  SIMULATED attestation accepted (local test server only)');
+      } else {
+        const defaults = loadAttestationDefaults(v['approved-file']);
+        if (!defaults.runner || !defaults.sandbox) fail('This tool has no pinned runner and sandbox, so it cannot check a real run. Update it.');
+        const facts = verifyRunBundle(prepared.bundle, {
+          nonce, runHash: runHash(prepared.description), publicKey: prepared.public_key,
+          runnerSpec: defaults.runner, sandboxSpec: defaults.sandbox, template: defaults.template, approved: defaults.approved,
+        });
+        say(`  ok  app ${facts.appId}; OS, compose file (Router ${facts.routerVersions.GIT_SHA}) and deploy manifest approved`);
+        say(`  ok  runner and sandbox match pinned specs (code hash ${facts.codeHash.slice(0, 16)}...)`);
+        const res = await fetch('https://cloud-api.phala.network/api/v1/attestations/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hex: prepared.bundle.quote }), signal: AbortSignal.timeout(60_000) });
+        const verdict = await res.json().catch(() => ({}));
+        const body = verdict?.quote?.body || {};
+        if (!res.ok || verdict.success !== true || verdict.quote?.verified !== true) fail('Phala\'s verifier did not accept the quote. Nothing was granted.');
+        if (String(body.reportdata).replace(/^0x/, '') !== facts.reportData || String(body.rtmr3).replace(/^0x/, '') !== facts.quote.rtmr3) fail('Phala\'s verifier checked a different quote. Nothing was granted.');
+        say(`  ok  TDX signature valid (Phala's verifier, record ${verdict.checksum})`);
+        checkRunBundle(prepared.bundle, { description: prepared.description, code: r.app.code, publicKey: prepared.public_key, nonce, runner: facts.runner, request, own, model },
+          { verifiedReportData: facts.reportData });
+      }
+      say(`  ok  the run binds this request, the code above, the requester's key, ${model ? 'the model declaration above' : 'no model'}, the trace in your storage, your key and a fresh nonce`);
+
+      const wrap = wrapKey(contentKey, { ownerDid: sealedOwnerDid, entryId: r.entry_id }, 'full', 'reader', prepared.public_key);
+      contentKey.fill(0);
+      const grant = await issueRunGrant(prepared.public_key);
+      say('  ok  granted the run\'s key a 10-minute read of this one trace\n\nRunning...');
+      const answered = await access({ action: 'approve', request_id: r.request_id, revision: r.revision, run_id: prepared.description.run_id,
+        delegation: serializeDelegation(grant), wrap });
+      if (!answered.answer || answered.answer.run_id !== prepared.description.run_id) fail(`No answer from this run was kept (the request is now ${answered.state}).`);
+      checkRunResult(answered.answer.sealed, answered.answer.signature, prepared.description, prepared.public_key);
+      const result = openResult(answered.answer.sealed, prepared.description, traceKey);
+      if (result.ok) {
+        mkdirSync(v.records, { recursive: true, mode: 0o700 });
+        writeFileSync(recordFile(r.request_id), JSON.stringify({ request_id: r.request_id, revision: r.revision, run_id: prepared.description.run_id,
+          run_public_key: prepared.public_key, answer_key: prepared.description.answer_key, answer_sha256: sha256(result.answer), reviewed_at: new Date().toISOString() }), { mode: 0o600 });
+      }
+      say('  ok  the result is signed by the attested run');
+      if (result.model) {
+        const m = result.model;
+        say(`What the run says it sent to the model (signed by the run): ${m.calls} ${m.calls === 1 ? 'call' : 'calls'} to ${visible(m.model)} at ${visible(m.provider)}`
+          + (m.release ? `; verified release ${visible(m.release)} (${visible(m.verdict)})` : '; nothing was sent, so no release was verified')
+          + (m.receipts.length ? `; receipts ${m.receipts.map(visible).join(', ')}` : ''));
+      }
+      say(result.ok ? `Answer (only you can see it so far; the app wrote it, so treat it as data):\n${quoted(result.answer, '  > ')}` : `The app failed (only you can see this): ${visible(result.error)}`);
+      if (!interactive) say(`\nTo send it: release ${r.request_id}   To refuse: withhold ${r.request_id}`);
+      return { answered, result };
+    } finally { await client?.signOut?.(); }
+  }
+
+  if (action === 'inbox') {
+    const { requests } = await access({ action: 'inbox' });
+    if (!requests.length) say('No requests are waiting.');
+    for (const r of requests) say(`${r.request_id}  ${r.state.padEnd(8)}  ${visible(r.requester)}  ${r.entry_id}  ${r.app ? visible(r.app.purpose) : '(no app)'}${r.model?.declaration ? `  [calls a model: ${visible(r.model.declaration.provider)}]` : ''}`);
+    return;
+  }
+
+  if (action === 'review') {
+    let queue;
+    if (requestId) {
+      queue = [await access({ action: 'status', request_id: requestId })];
+    } else {
+      const { requests } = await access({ action: 'inbox' });
+      queue = requests.filter(r => r.state === 'pending' || r.state === 'answered');
+      if (!queue.length) { say('No requests are waiting.'); return; }
+      say(`${queue.length} ${queue.length === 1 ? 'request' : 'requests'} waiting.\n`);
+    }
+    for (let i = 0; i < queue.length; i++) {
+      const summary = queue[i];
+      const r = await access({ action: 'status', request_id: summary.request_id });
+      if (queue.length > 1) say(`── ${i + 1} of ${queue.length} ──────────────────────────────────────────────────`);
+      showApp(r);
+      const alreadyStored = await storedViaRouter(r.entry_id);
+      say(alreadyStored ? '\nThe trace of this note is already in your storage.' : `\n${FIRST_UPLOAD}`);
+      if (!r.app || (r.state !== 'pending' && r.state !== 'answered')) {
+        say(`\nThis request is ${r.state} and cannot be run.`);
+        continue;
+      }
+      const pin = reviewPin(r);
+      const choice = (await askLine('\nAction: [r]un, [w]ithhold (decline), [s]kip, [q]uit > ')).trim().toLowerCase();
+      if (choice === 'q' || choice === 'quit') break;
+      if (choice === 's' || choice === 'skip' || !choice) continue;
+      if (choice === 'w' || choice === 'withhold') {
+        const done = await access({ action: 'withhold', request_id: r.request_id, revision: r.revision });
+        say(`Withheld. The requester sees: declined. (${done.state})\n`);
+        continue;
+      }
+      if (choice !== 'r' && choice !== 'run') { say('Skipped.\n'); continue; }
+      let allowFirstUpload = v.yes;
+      if (!alreadyStored && !allowFirstUpload) {
+        const confirm = (await askLine('Upload this trace to your storage for the first time and run the app? [y/N] > ')).trim().toLowerCase();
+        if (confirm !== 'y' && confirm !== 'yes') { say('Skipped; nothing was uploaded or run.\n'); continue; }
+        allowFirstUpload = true;
+      }
+      const auth = await resolveAuth(true);
+      const outcome = await doRun(r, pin, { ...auth, allowFirstUpload, interactive: true });
+      if (!outcome) continue;
+      if (!outcome.result.ok) {
+        const failChoice = (await askLine('\nDecision: [w]ithhold (decline), [k]eep for later > ')).trim().toLowerCase();
+        if (failChoice === 'w' || failChoice === 'withhold') {
+          const done = await access({ action: 'withhold', request_id: r.request_id, revision: r.revision });
+          say(`Withheld. The requester sees: declined. (${done.state})\n`);
+        }
+        continue;
+      }
+      const decision = (await askLine(`\nDecision: [r]elease this exact answer to ${visible(r.requester)}, [w]ithhold (decline), [k]eep for later > `)).trim().toLowerCase();
+      if (decision === 'r' || decision === 'release') {
+        const fresh = await access({ action: 'status', request_id: r.request_id });
+        await doRelease(fresh, auth.traceKey);
+        say('');
+      } else if (decision === 'w' || decision === 'withhold') {
+        const done = await access({ action: 'withhold', request_id: r.request_id, revision: r.revision });
+        say(`Withheld. The requester sees: declined. (${done.state})\n`);
+      } else {
+        say(`Kept for later. You can release it with: release ${r.request_id}\n`);
+      }
+    }
+    return;
+  }
+
+  const r = await access({ action: 'status', request_id: requestId });
+  if (action === 'show') {
+    showApp(r);
+    if (await storedViaRouter(r.entry_id)) say('\nThe trace of this note is already in your storage.');
+    else say(`\n${FIRST_UPLOAD}`);
+    if (r.app && (r.state === 'pending' || r.state === 'answered')) say(`\nTo run exactly the request above: run ${r.request_id} --pin ${reviewPin(r)}`);
+    return;
+  }
+  if (action === 'withhold') {
+    const done = await access({ action: 'withhold', request_id: r.request_id, revision: r.revision });
+    say(`Withheld. The requester sees: declined. (${done.state})`);
+    return;
+  }
+
+  const auth = await resolveAuth(false);
+  if (!auth.traceKey) fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start), or pass --owner-key-file / --recovery-file.');
+
+  if (action === 'release') {
+    await doRelease(r, auth.traceKey);
+    return;
+  }
+
+  // run
+  await doRun(r, v.pin, { ...auth, allowFirstUpload: v.yes, interactive: false });
 }
+
 main().catch(err => {
   console.error(err instanceof Stop ? err.message : (err?.stack || String(err)));
   process.exitCode = err instanceof Stop ? 2 : 1;
