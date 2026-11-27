@@ -182,7 +182,7 @@ jobs:
   group-onboarding:
     # This pinned browser release supports Ubuntu 24.04, not ubuntu-latest's 26.04.
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -201,6 +201,7 @@ jobs:
           npm --prefix ../browser ci
           npm --prefix ../browser run build
           npm --prefix ../browser test
+          node --test scripts/trace-owner-auth.test.mjs
           # The browser checks below open the real home page, so build it first.
           npm --prefix ../web install --no-audit --no-fund
           npm --prefix ../web run build
@@ -209,6 +210,9 @@ jobs:
           PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/untrusted-content-browser-smoke.mjs
           PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/group-onboarding-browser-smoke.mjs
           PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/group-setup-live-smoke.mjs
+      - name: Pair a trace agent in a browser and release two test answers
+        working-directory: server
+        run: PLAYWRIGHT_MODULE="file://$RUNNER_TEMP/router-browser/node_modules/playwright/index.mjs" node scripts/trace-owner-plugin-e2e.mjs
 
   discord-image:
     runs-on: ubuntu-latest

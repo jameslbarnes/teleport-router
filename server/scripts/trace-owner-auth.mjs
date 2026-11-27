@@ -1,7 +1,7 @@
 // Key resolution, browser-authorized agent grants, encrypted recovery-file unlocking, and rules.json
 // setup for trace-app-owner.mjs. Private keys stay local and are never passed on argv or printed.
 import { createDecipheriv, createECDH, createHash, hkdfSync, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { computeAddress, SigningKey } from 'ethers';
 import { decryptBackup } from '../../browser/src/recovery.mjs';
@@ -65,7 +65,7 @@ export function createPendingAgent(dir) {
   writeFileSync(file, JSON.stringify({
     v: 1, agentKey, agentPublicKey, agentDid, verifyCode, createdAt: new Date().toISOString(),
   }, null, 2) + '\n', { mode: 0o600 });
-  return { agent_public_key: agentPublicKey, agent_did: agentDid, verify_code: verifyCode };
+  return { key_version: 2, agent_public_key: agentPublicKey, agent_did: agentDid, verify_code: verifyCode };
 }
 
 export function loadPendingAgent(dir) {
@@ -79,7 +79,11 @@ export function loadPendingAgent(dir) {
 export function saveAgentGrant(dir, grant) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = join(dir, 'agent-grant.json');
-  writeFileSync(file, JSON.stringify(grant, null, 2) + '\n', { mode: 0o600 });
+  const temp = file + '.' + randomBytes(8).toString('hex') + '.tmp';
+  try {
+    writeFileSync(temp, JSON.stringify(grant, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    renameSync(temp, file);
+  } finally { rmSync(temp, { force: true }); }
   const pending = join(dir, 'agent-pending.json');
   if (existsSync(pending)) rmSync(pending, { force: true });
   return file;
@@ -89,12 +93,23 @@ export function loadAgentGrant(dir) {
   const file = join(dir, 'agent-grant.json');
   if (!existsSync(file)) return null;
   const parsed = JSON.parse(readFileSync(file, 'utf8'));
-  if (parsed?.v !== 1 || !/^0x[0-9a-fA-F]{64}$/.test(parsed.agentKey || '')
-      || !/^0x[0-9a-fA-F]{64}$/.test(parsed.traceKey || '')
+  if (parsed?.v === 1)
+    throw new Error(`Older pairing saved an account private key in ${file}. Delete this local authorization or pair again to replace it. Keep your encrypted recovery backup. Any previous copies of that private key still work.`);
+  requireTraceOnlyGrant(parsed);
+  if (!/^0x[0-9a-fA-F]{64}$/.test(parsed.agentKey || '')
       || typeof parsed.delegation !== 'string' || !parsed.ownerDid || !parsed.space || !parsed.host) {
     throw new Error(`Saved agent authorization in ${file} is malformed. Re-authorize your agent.`);
   }
   return parsed;
+}
+
+function requireTraceOnlyGrant(data) {
+  if (data?.v !== 2) throw new Error('This authorization predates trace-only keys. Pair this machine again in your browser.');
+  if (!/^0x(?:02|03)[a-f0-9]{64}$/.test(data.accountPublicKey || '') || !/^0x[a-f0-9]{64}$/.test(data.traceKey || ''))
+    throw new Error('Missing trace-only key or account public key.');
+  const tracePublic = new SigningKey(data.traceKey).compressedPublicKey;
+  if (tracePublic === data.accountPublicKey || ('did:pkh:eip155:1:' + computeAddress(tracePublic)).toLowerCase() === String(data.ownerDid).toLowerCase())
+    throw new Error('The authorization contains an account key in place of a trace-only key.');
 }
 
 /** Open the browser-sealed agent authorization payload using the local agent's private key. */
@@ -118,8 +133,8 @@ export function openAgentGrant(sealed, { pairId, ownerDid, agentPrivateKey }) {
     decipher.setAuthTag(unb64(sealed.tag, 16));
     const plain = Buffer.concat([decipher.update(unb64(sealed.ciphertext)), decipher.final()]).toString('utf8');
     const data = JSON.parse(plain);
-    if (data?.v !== 1 || !/^0x[0-9a-fA-F]{64}$/.test(data.traceKey || '')
-        || typeof data.delegation !== 'string' || typeof data.routerKey !== 'string' || !data.routerKey
+    requireTraceOnlyGrant(data);
+    if (typeof data.delegation !== 'string' || typeof data.routerKey !== 'string' || !data.routerKey
         || String(data.ownerDid || '').toLowerCase() !== String(ownerDid).toLowerCase()
         || typeof data.space !== 'string' || !data.space || typeof data.host !== 'string' || !data.host) {
       throw new Error('Decrypted agent authorization is incomplete or mismatched.');

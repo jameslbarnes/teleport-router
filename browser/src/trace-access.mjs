@@ -1,6 +1,7 @@
-import { SigningKey } from 'ethers';
+import { SigningKey, computeAddress, sha256, toUtf8Bytes } from 'ethers';
 import { decryptBackup } from './recovery.mjs';
 import { sealAgentGrant } from './pair-seal.mjs';
+import { registerAgentKey, prepareAgentTraces } from './trace-agent-keys.mjs';
 
 const $ = id => document.getElementById(id);
 const id = new URLSearchParams(location.search).get('entry');
@@ -39,7 +40,7 @@ function element(tag, text, css) {
 }
 
 /** Delegate get-only access on router/traces/ to the local agent and seal the handoff to its public key. */
-async function authorizeAgent(info, { password, file } = {}) {
+async function authorizeAgent(info, { password, file, rotate = false } = {}) {
   const DAY = 86400000;
   const hostUrl = new URL(info.storage.host);
   if (hostUrl.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(hostUrl.hostname)) {
@@ -51,7 +52,7 @@ async function authorizeAgent(info, { password, file } = {}) {
   ]);
 
   let owner = null;
-  let traceKey = null;
+  let accountKey = null;
   try {
     if (info.storage.mode === 'openkey') {
       status('Opening OpenKey to authorize your agent…');
@@ -61,7 +62,7 @@ async function authorizeAgent(info, { password, file } = {}) {
       await owner.signIn();
       const recovery = await readRecovery(owner);
       if (!recovery?.networkRecovery) throw Error('Could not find the OpenKey recovery record in your storage.');
-      traceKey = await openNetworkRecovery(owner, recovery.networkRecovery, location.origin);
+      accountKey = await openNetworkRecovery(owner, recovery.networkRecovery, location.origin);
     } else {
       let envelope = null;
       if (file) {
@@ -75,10 +76,10 @@ async function authorizeAgent(info, { password, file } = {}) {
       status('Unlocking your saved storage key…');
       const backup = await decryptBackup(envelope, password);
       if (backup.handle !== info.handle) throw Error('That backup belongs to @' + backup.handle + ', not @' + info.handle + '.');
-      traceKey = backup.tinycloudKey;
+      accountKey = backup.tinycloudKey;
       const spacePrefix = info.storage.space.split(':').slice(5).join(':') || 'router';
       owner = new TinyCloudWeb({
-        provider: localProvider(traceKey),
+        provider: localProvider(accountKey),
         tinycloudHosts: [info.storage.host],
         spacePrefix,
         autoCreateSpace: false,
@@ -92,14 +93,16 @@ async function authorizeAgent(info, { password, file } = {}) {
       await owner.signIn();
     }
 
-    if (owner.did.toLowerCase() !== info.storage.owner_did.toLowerCase()) {
+    if (owner.did.toLowerCase() !== info.storage.owner_did.toLowerCase() || owner.spaceId !== info.storage.space) {
       throw Error('This storage account does not match your Router account.');
     }
-    const tracePub = new SigningKey(traceKey).compressedPublicKey;
-    if (info.storage.owner_public_key && SigningKey.computePublicKey(info.storage.owner_public_key, true) !== tracePub) {
+    const accountPublicKey = new SigningKey(accountKey).compressedPublicKey;
+    if (!info.storage.owner_public_key || SigningKey.computePublicKey(info.storage.owner_public_key, true) !== accountPublicKey) {
       throw Error('The unlocked key does not match the trace key linked to your Router account.');
     }
 
+    const keys = await registerAgentKey(owner, accountKey, rotate);
+    const pending = await prepareAgentTraces(api, owner, accountKey, keys, status);
     status('Creating a read-only grant for router/traces/…');
     const { delegation } = await owner.delegateTo(
       info.agent_did,
@@ -109,9 +112,10 @@ async function authorizeAgent(info, { password, file } = {}) {
 
     status('Sealing the authorization for your local agent…');
     const sealed = await sealAgentGrant({
-      v: 1,
+      v: 2,
       routerKey: key,
-      traceKey,
+      traceKey: keys.traceKey,
+      accountPublicKey,
       delegation: serializeDelegation(delegation),
       ownerDid: owner.did,
       space: info.storage.space,
@@ -119,9 +123,10 @@ async function authorizeAgent(info, { password, file } = {}) {
       handle: info.handle,
     }, { pairId: info.pair_id, ownerDid: owner.did, agentPublicKey: info.agent_public_key });
 
-    await api('/api/trace-agent/pair/complete', { token: pairToken, sealed });
+    await api('/api/trace-agent/pair/complete', { token: pairToken, key_version: 2, sealed });
     sessionStorage.removeItem('router_trace_agent_pair');
     pairToken = null;
+    return pending;
   } finally {
     owner?.cleanup?.();
   }
@@ -142,23 +147,29 @@ function renderPairCard(info) {
     element('h2', 'Allow your local agent to approve trace runs for @' + info.handle + '?'),
     element('p', 'Verification code: ' + info.verify_code + ' (confirm this matches what your agent showed you).'),
     element('p', 'Agent address: ' + info.agent_did),
-    element('p', 'What this grants: read-only access to router/traces/ for 1 year, so your agent can verify enclave runs and issue 10-minute reads of individual traces when you say yes. It cannot read or edit your published notes (router/posts/) or your insights folder.'),
-    element('p', isOpenKey
-      ? 'Your OpenKey account stays in OpenKey; only your trace decryption key and the read-only router/traces/ grant are sealed to your local agent.'
-      : 'Your trace decryption key is sealed end-to-end to this agent (Router only relays ciphertext). For recovery-file accounts, this is the same key that backs your storage.'),
+    element('p', 'This machine will be able to read your stored traces for one year. When you approve a run, your agent gives the enclave a 10-minute read of that trace. You decide separately whether to release the answer.'),
+    element('p', 'Your agent receives your Router sign-in, a trace-only decryption key and read access to the traces folder. Your storage and recovery keys stay with you.'),
   );
 
+  const options = document.createElement('details');
+  const replace = document.createElement('input');
+  replace.type = 'checkbox';
+  const replaceLabel = document.createElement('label');
+  replaceLabel.append(replace, ' Use a new trace key for future uploads');
+  options.append(element('summary', 'Replace a trace key'), replaceLabel,
+    element('p', 'Choose this if you lost a paired device. Other machines will need to pair again. A device that could read earlier traces may still be able to read them.'));
+  panel.append(options);
+
+  function finish(pending) {
+    panel.replaceChildren(element('h2', 'Agent authorized'),
+      element('p', 'Return to your agent to review requests.'));
+    if (pending.length) panel.append(element('p', 'Your agent is ready. Pair again to retry ' + pending.join(', ') + '.'));
+    status('Done. You can close this tab.');
+  }
   if (isOpenKey) {
     const allow = element('button', 'Allow with OpenKey', 'r-btn');
     allow.type = 'button';
-    allow.onclick = () => act(async () => {
-      await authorizeAgent(info);
-      panel.replaceChildren(
-        element('h2', 'Agent authorized'),
-        element('p', 'Return to your agent — it can now inspect and run trace apps you approve.'),
-      );
-      status('Done. You can close this tab.');
-    });
+    allow.onclick = () => act(async () => finish(await authorizeAgent(info, { rotate: replace.checked })));
     panel.append(allow);
   } else {
     const form = document.createElement('form');
@@ -186,12 +197,7 @@ function renderPairCard(info) {
       act(async () => {
         const pw = pwInput.value;
         pwInput.value = '';
-        await authorizeAgent(info, { password: pw, file: fileInput?.files?.[0] || null });
-        panel.replaceChildren(
-          element('h2', 'Agent authorized'),
-          element('p', 'Return to your agent — it can now inspect and run trace apps you approve.'),
-        );
-        status('Done. You can close this tab.');
+        finish(await authorizeAgent(info, { password: pw, file: fileInput?.files?.[0] || null, rotate: replace.checked }));
       });
     };
     panel.append(form);
@@ -246,13 +252,21 @@ async function show() {
   if (pairToken) {
     if (!key) { $('heading').textContent = 'Authorize your agent'; status('Sign in to Router to authorize your local agent.'); return; }
     try {
-      const info = await api('/api/trace-agent/pair/info', { token: pairToken });
+      const info = await api('/api/trace-agent/pair/info', { token: pairToken, key_version: 2 });
+      if (info.key_version !== 2) throw Error('This Router needs an update before it can authorize a trace-only key.');
+      const pub = SigningKey.computePublicKey(info.agent_public_key, true);
+      const digits = sha256(toUtf8Bytes(pub.toLowerCase())).slice(2, 10).toUpperCase();
+      if (info.verify_code !== digits.slice(0, 4) + '-' + digits.slice(4)
+          || info.agent_did.toLowerCase() !== 'did:pkh:eip155:1:' + computeAddress(pub).toLowerCase()) {
+        throw Error('The verification code or agent address does not match the key. Start pairing again.');
+      }
       renderPairCard(info);
       return;
     } catch (e) {
       sessionStorage.removeItem('router_trace_agent_pair');
       pairToken = null;
       status(e.message);
+      return;
     }
   }
   $('heading').textContent = 'Trace access requests';

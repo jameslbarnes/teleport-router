@@ -21,7 +21,7 @@
  * approval of the exact result, and nothing at all from fewer than MIN_PEOPLE people.
  */
 import { randomUUID } from 'node:crypto';
-import { verifyMessage } from 'ethers';
+import { SigningKey, verifyMessage } from 'ethers';
 import { canonical } from './author-records.js';
 import type { AuthorBinding } from './author-store.js';
 import { GroupStoreConflictError, type GroupStore } from './group-store.js';
@@ -381,6 +381,22 @@ export function insightsRelease(deps: ReleaseDeps) {
       return { handle: user.handle, owner_did: b.ownerDid, owner_public_key: compressPublicKey(b.networkRecovery?.publicKey || b.ownerPublicKey), full_max_bytes: FULL_MAX };
     },
 
+    /** The browser signs this public key with the existing trace recipient's key.
+     * Capture clients also verify it against their own pinned key before encrypting. */
+    async agentCertificate(user: User) {
+      const b = binding(user);
+      const raw = await (await deps.storeFor(b)).get('traces/agent.keys/v1/public');
+      if (raw === null) return null;
+      const { publicKey, signature } = JSON.parse(raw);
+      const accountKey = compressPublicKey(b.networkRecovery?.publicKey || b.ownerPublicKey);
+      if (!/^0x(?:02|03)[a-f0-9]{64}$/.test(publicKey) || publicKey === accountKey || !/^0x[a-f0-9]{130}$/.test(signature))
+        throw Error('Invalid trace agent key certificate.');
+      const message = JSON.stringify(['teleport-router/trace-agent-public/v1', b.ownerDid.toLowerCase(), b.space, accountKey, publicKey]);
+      if (compressPublicKey(SigningKey.recoverPublicKey('0x' + sha256Hex(message), signature)) !== accountKey)
+        throw Error('The trace agent key was not signed by this account.');
+      return { publicKey: publicKey as string, signature: signature as string };
+    },
+
     /** Public: the program and the enclave as it described itself, attestation included. Owners' clients check it themselves. */
     info() {
       return { program, runs_enabled: !!enclave, problem: enclaveProblem, release_key: releaseKey, app_id: enclave?.appId ?? null,
@@ -469,15 +485,15 @@ export function insightsRelease(deps: ReleaseDeps) {
       if (!validId(entryId)) throw new Error('entry_id is required');
       const entry = await deps.getEntry(entryId);
       if (!entry || entry.handle !== user.handle) throw new Error('That is not one of your posts.');
-      const part = (input: any, max: number, required: ('owner' | 'release')[], forbidden: ('owner' | 'release')[]) => {
-        const meta = checkPartMeta(input?.meta, required, forbidden);
+      const part = (input: any, max: number, required: ('owner' | 'release')[], forbidden: ('owner' | 'release')[], optional: 'agent'[] = []) => {
+        const meta = checkPartMeta(input?.meta, required, forbidden, optional);
         if (typeof input.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.data)) throw new Error('Trace data must be base64');
         const bytes = Buffer.from(input.data, 'base64');
         if (bytes.length !== meta.bytes || bytes.length > max || sha256Hex(bytes) !== meta.sha256) throw new Error('Trace data does not match its record, or is too large');
         return { meta, data: input.data as string, chunks: Math.ceil(input.data.length / CHUNK) };
       };
       // The full record is for its owner alone: the enclave's key must not be able to open it.
-      const full = part(body.full, FULL_MAX, ['owner'], ['release']);
+      const full = part(body.full, FULL_MAX, ['owner'], ['release'], ['agent']);
       let derived: ReturnType<typeof part> | undefined, policyId = '';
       if (body.derived) {
         const state = consentState(user);

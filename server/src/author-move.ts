@@ -55,6 +55,7 @@ export async function moveAuthorFolder(source: GroupStore, target: GroupStore, b
         if (!old[part]) continue;
         if (patch.hashes[part] !== old[part].sha256) throw new Error('A trace changed during the move.');
         moved[part] = { ...old[part], wraps: { ...old[part].wraps, owner: patch.wraps[part] } };
+        delete moved[part].wraps.agent;
         checkPartMeta(moved[part], ['owner'], part === 'full' ? ['release'] : []);
       }
       wire = canonical(moved);
@@ -67,7 +68,7 @@ export async function moveAuthorFolder(source: GroupStore, target: GroupStore, b
         if (!v || v.value !== prior) throw new Error('The destination changed during the move.');
         await target.put(key, wire, {ifMatch:v.etag});
       }
-    } else if (!key.startsWith('traces/')) {
+    } else if (!key.startsWith('traces/') || key.startsWith('traces/agent.keys/v1/')) {
       // Preserve the original recovery record and signed consents as history. A consent cannot transfer identities.
       path = 'previous-owners/' + oldAddress + '/' + key;
     }

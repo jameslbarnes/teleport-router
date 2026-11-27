@@ -59,7 +59,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
 import { parseArgs } from 'node:util';
-import { postFinder, originReader, eachLine, sliceHasher, buildTrace, sourceOf, mentionsNeverUpload, mentionsRouterWrite, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf } from './trace-lib.mjs';
+import { postFinder, originReader, eachLine, sliceHasher, buildTrace, sourceOf, mentionsNeverUpload, mentionsRouterWrite, sealFull, sealDerived, openFull, readTrace, compressPublicKey, publicKeyOf, verifiedAgentKey } from './trace-lib.mjs';
 
 // The extraction copy must fit the enclave's limit on what it opens (400 KiB of ciphertext).
 const EXTRACTION_MAX_BYTES = 380 * 1024;
@@ -68,7 +68,7 @@ const fail = message => { console.error(message); process.exit(1); };
 // Options are parsed strictly: an option's value is consumed as a value and never read as another option, so a
 // file name that looks like "--upload" cannot switch on an upload. A value that starts with "-" needs the
 // --option=value form. Unknown options and stray arguments stop the run.
-const STRING = ['router', 'state', 'days', 'key-file', 'rules', 'owner-key-file', 'owner-public-key', 'release-key', 'open', 'out'];
+const STRING = ['router', 'state', 'days', 'key-file', 'rules', 'owner-key-file', 'owner-public-key', 'agent-public-key', 'release-key', 'open', 'out'];
 const LISTS = ['projects', 'log', 'never-upload', 'upload'];
 const FLAGS = ['pointers', 'pointers-only', 'upload-all', 'extraction-copy'];
 let parsed;
@@ -81,7 +81,7 @@ const value = name => parsed[name.slice(2)];
 const values = name => parsed[name.slice(2)] || [];
 // --pointers-only is what the plugin's hook runs: it can index, copy and register pointers, and nothing else.
 if (flag('--pointers-only')) {
-  const other = ['--upload', '--upload-all', '--open', '--extraction-copy', '--owner-key-file', '--owner-public-key', '--release-key', '--out']
+  const other = ['--upload', '--upload-all', '--open', '--extraction-copy', '--owner-key-file', '--owner-public-key', '--agent-public-key', '--release-key', '--out']
     .filter(name => { const v = parsed[name.slice(2)]; return v !== undefined && v !== false && !(Array.isArray(v) && !v.length); });
   if (other.length) fail(`--pointers-only cannot be combined with ${other.join(', ')}. Nothing was read or sent.`);
 }
@@ -404,11 +404,14 @@ try {
       : value('--owner-public-key') ? compressPublicKey(value('--owner-public-key')) : state.owner?.publicKey;
     if (!mine) await stop('The first upload needs your storage key, so traces are encrypted to a key you supplied and not one Router reported.\nGive --owner-key-file <file with your storage key> or --owner-public-key <its public key, from your own copy>. Nothing was uploaded.');
     if (state.owner && state.owner.publicKey !== mine) await stop(`The storage key given differs from the one remembered in ${statePath}. Nothing was uploaded. If you changed your storage key, delete the "owner" entry there.`);
-    const reported = await call('/api/traces/owner');
+    const reported = await call('/api/traces/owner', { agent_key: true });
     if (compressPublicKey(reported.owner_public_key) !== mine) await stop('Router reports a different storage key for your account than the one you gave. Nothing was uploaded. Check which storage is linked to your Router account.');
     if (state.owner && state.owner.did !== reported.owner_did) await stop('Router reports a different storage identity than the one remembered. Nothing was uploaded.');
     if (!state.owner) { state.owner = { handle: reported.handle, did: reported.owner_did, publicKey: mine, confirmedAt: new Date().toISOString() }; await saveState(); }
-    return owner = { did: reported.owner_did, publicKey: mine, maxBytes: Math.min(reported.full_max_bytes || 6 * 1024 * 1024, 6 * 1024 * 1024) };
+    const agentPublicKey = verifiedAgentKey(reported.agent_certificate, reported.owner_did, reported.space, mine);
+    if (value('--agent-public-key') && agentPublicKey !== compressPublicKey(value('--agent-public-key')))
+      await stop('The trace agent key does not match this machine’s authorization. Re-authorize it in the browser before uploading.');
+    return owner = { did: reported.owner_did, publicKey: mine, agentPublicKey, maxBytes: Math.min(reported.full_max_bytes || 6 * 1024 * 1024, 6 * 1024 * 1024) };
   }
   const extraction = flag('--extraction-copy');
   let release = null;
@@ -475,7 +478,7 @@ try {
     Object.assign(line, { records: built.summary.records, bytes: built.plaintext.length, withheld: built.summary.withheld, secrets_removed: built.summary.secrets_removed ?? 0, shortened_to: built.summary.shortened_to });
     if (built.summary.withheld) totals.withheld++;
     const o = await ownerKey();
-    const sealed = sealFull(built.plaintext, { ownerDid: o.did, entryId }, o.publicKey);
+    const sealed = sealFull(built.plaintext, { ownerDid: o.did, entryId }, o.publicKey, o.agentPublicKey);
     let derived;
     if (small) {
       const r = await releaseKey();

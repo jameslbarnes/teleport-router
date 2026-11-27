@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { enabledTraceModels, traceAccessTool } from './trace-access-tool.js';
 import { SYSTEM_SKILLS } from './http.js';
 
-/** SHA-256 of JSON.stringify({description, inputSchema}) of router_trace_access with no model providers enabled (includes pair_start/pair_poll). */
-const MASTER_TOOL_SHA256 = '0d2c42471ede1b9ccbec65c7c24b17772fe4c9763c95e3167a67f756de40a6a0';
+/** SHA-256 of the trace-only pairing tool description and schema with no model providers enabled. */
+const MASTER_TOOL_SHA256 = '15d039bc1c0a9a518af88cc7cb35e02086078439d8115d05cda2e97956c696f1';
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 describe('router_trace_access as agents read it', () => {

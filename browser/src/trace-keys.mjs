@@ -20,6 +20,16 @@ async function openWrap(w, did, id, part, role, privateKey) {
     await wrappingKey(privateKey, w.ephemeralPublicKey, aad, 'decrypt'), ct));
 }
 
+/** Confirm that an existing agent wrap opens before skipping it during pairing. */
+export async function agentWrapOpens(wrap, did, id, privateKey) {
+  if (!wrap) return false;
+  try {
+    const key = await openWrap(wrap, did, id, 'full', 'agent', privateKey);
+    key.fill(0);
+    return true;
+  } catch { return false; }
+}
+
 /** Rewrap a content key on the owner's device. The trace bytes stay encrypted throughout. */
 export async function rewrapTraceKey(meta, did, id, privateKey, targetKey, part = 'full', role = 'reader', verifyPrivateKey) {
   const key = await openWrap(meta.wraps.owner, did, id, part, 'owner', privateKey);

@@ -111,7 +111,7 @@ async function main() {
     if (!pending) fail('No pending agent authorization found. Run `pair-init` first.');
     let pairId = v['pair-id'];
     const ownerDid = v['owner-did'];
-    if (!ownerDid) fail('Give --owner-did (from pair_start).');
+    if (!ownerDid) fail('Give --owner-did (from pair_start_v2).');
     let sealed;
     if (v['pair-token']) {
       const rk = resolveRouterKey({ routerKeyFile: v['router-key-file'], defaultRouterKeyFile });
@@ -158,12 +158,13 @@ async function main() {
       fail('The delegation does not match this agent or is not a valid read-only grant for router/traces/.');
     }
     saveAgentGrant(stateDir, {
-      v: 1,
+      v: 2,
       handle: opened.handle,
       routerKey: opened.routerKey,
       agentKey: pending.agentKey,
       agentDid: pending.agentDid,
       traceKey: opened.traceKey,
+      accountPublicKey: opened.accountPublicKey,
       delegation: opened.delegation,
       ownerDid: opened.ownerDid,
       space: opened.space,
@@ -246,14 +247,14 @@ async function main() {
       const rec = await unlockRecovery(true);
       routerKey = resolveRouterKey({ recovery: rec, defaultRouterKeyFile });
     } else {
-      fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start), or pass --router-key-file / --recovery-file.');
+      fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start_v2), or pass --router-key-file / --recovery-file.');
     }
   }
 
   async function resolveAuth(interactive = false) {
     if (agentGrant) {
-      const traceKey = v['trace-key-file'] ? readHexKeyFile(v['trace-key-file'], fail) : agentGrant.traceKey;
-      return { mode: 'delegated', agentGrant, ownerKey: null, traceKey };
+      if (v['trace-key-file']) fail('A paired agent uses its browser-authorized trace key. Omit --trace-key-file.');
+      return { mode: 'delegated', agentGrant, ownerKey: null, traceKey: agentGrant.traceKey };
     }
     let ownerKey = v['owner-key-file'] ? readHexKeyFile(v['owner-key-file'], fail) : null;
     if (!ownerKey && !recoveryFilePath && existsSync(defaultOwnerKeyFile)) {
@@ -313,8 +314,9 @@ async function main() {
     if (res?.status === 404 && body?.error === 'Not found') return false;
     fail(`Could not tell whether this note's trace is already in your storage (${res ? visible(String(body?.error || 'HTTP ' + res.status)) : 'Router did not answer'}). Approving might upload it for the first time; stopping here.`);
   }
-  function uploadFromThisMachine(entryId, ownerPublicKey) {
+  function uploadFromThisMachine(entryId, ownerPublicKey, agentPublicKey) {
     const args = [CAPTURE, '--router', v.router, '--owner-public-key', ownerPublicKey, '--upload', entryId,
+      ...(agentPublicKey ? ['--agent-public-key', agentPublicKey] : []),
       ...(v['capture-state'] ? ['--state', v['capture-state']] : []),
       ...(v.rules ? ['--rules', v.rules] : []),
       ...(v['capture-projects'] || []).flatMap(dir => ['--projects', dir])];
@@ -342,6 +344,8 @@ async function main() {
       || r.answer.description.answer_key !== reviewed.answer_key)
       fail('The request, its run or the requester\'s key changed since you reviewed it. Nothing was released; run it again.');
     checkRunResult(r.answer.sealed, r.answer.signature, r.answer.description, reviewed.run_public_key);
+    if (compressPublicKey(new Wallet(traceKey).signingKey.publicKey) !== r.answer.description.owner_public_key)
+      fail('This answer was reviewed under an earlier key. Use the original owner tool to release it, or review and run the request again with the paired agent.');
     const result = openResult(r.answer.sealed, r.answer.description, traceKey);
     if (!result.ok) fail(`The app failed, so there is nothing to release: ${visible(result.error)}\nWithhold it, or run it again.`);
     if (sha256(result.answer) !== reviewed.answer_sha256) fail('This is not the answer you reviewed. Nothing was released.');
@@ -354,7 +358,7 @@ async function main() {
   }
 
   async function doRun(r, pin, { mode, agentGrant: ag, ownerKey, traceKey, allowFirstUpload, interactive = false }) {
-    if (mode === 'owner' && !ownerKey) fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start), or pass --owner-key-file / --recovery-file.');
+    if (mode === 'owner' && !ownerKey) fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start_v2), or pass --owner-key-file / --recovery-file.');
     if (!r.app) fail('This request was made before apps were required. Decline it on the trace access page.');
     if (reviewPin(r) !== pin) fail('This request is not the one with the pin given: its version, requester, note, purpose, code or key changed. Nothing ran. Show it again.');
     if (!interactive) showApp(r);
@@ -362,7 +366,7 @@ async function main() {
     const metaKey = `router/traces/${r.entry_id}/meta`;
 
     let client = null;
-    let readMeta;
+    let readMeta, pairedStorage;
     let readMetaKey = metaKey;
     let expectedOwnerDid;
     let issueRunGrant;
@@ -370,7 +374,7 @@ async function main() {
     if (mode === 'delegated') {
       const parent = deserializeDelegation(ag.delegation);
       if (!parent.expiry || parent.expiry.getTime() <= Date.now()) {
-        fail('Your local agent authorization expired. Re-authorize in your browser (pair-init + router_trace_access pair_start).');
+        fail('Your local agent authorization expired. Re-authorize in your browser (pair-init + router_trace_access pair_start_v2).');
       }
       client = new TinyCloudNode({
         privateKey: ag.agentKey, host: tinycloudHost, autoCreateSpace: false,
@@ -378,6 +382,7 @@ async function main() {
       });
       await client.signIn();
       const delegatedAccess = await client.useDelegation(parent);
+      pairedStorage = delegatedAccess.kv;
       expectedOwnerDid = ag.ownerDid;
       readMetaKey = `${r.entry_id}/meta`;
       readMeta = () => delegatedAccess.kv.get(readMetaKey, { source: 'network' });
@@ -415,7 +420,7 @@ async function main() {
         const rulesCheck = await ensureUploadRules(rulesPath, { interactive, initRules: v['init-rules'], ask: askLine, say });
         if (!rulesCheck.ready) fail(rulesCheck.reason);
         say('Uploading it from this machine, encrypted to your storage key...');
-        uploadFromThisMachine(r.entry_id, ownerPublicKey);
+        uploadFromThisMachine(r.entry_id, ag?.accountPublicKey || ownerPublicKey, ag ? ownerPublicKey : null);
         got = await readMeta();
         if (traceRecordState(got, readMetaKey) !== 'stored') fail('The upload finished but no trace can be read for this note in your storage. Nothing ran.');
       }
@@ -423,11 +428,28 @@ async function main() {
       if (record?.v !== 1 || record.entryId !== r.entry_id || !record.full?.sha256 || String(record.ownerDid).toLowerCase() !== expectedOwnerDid.toLowerCase())
         fail('The trace record in your storage is not this note\'s, or not yours.');
       const sealedOwnerDid = record.sealedOwnerDid || record.ownerDid;
-      const contentKey = unwrapKey(record.full.wraps?.owner, { ownerDid: sealedOwnerDid, entryId: r.entry_id }, 'full', 'owner', traceKey);
+      const context = { ownerDid: sealedOwnerDid, entryId: r.entry_id };
+      let contentKey;
+      if (pairedStorage) {
+        if (record.full.wraps?.agent) {
+          try { contentKey = unwrapKey(record.full.wraps.agent, context, 'full', 'agent', traceKey); }
+          catch { /* After rotation, the browser stores a separate wrap for the new trace key. */ }
+        }
+        if (!contentKey) {
+          const path = `agent.keys/v1/${ownerPublicKey}/${r.entry_id}/${record.full.sha256}`;
+          const gotWrap = await pairedStorage.get(path, { source: 'network' });
+          const state = storedState(gotWrap, path);
+          if (state === 'none') fail('This trace was uploaded by an older client. Pair again in your browser to add access to its existing key.');
+          const raw = gotWrap.data.data;
+          contentKey = unwrapKey(typeof raw === 'string' ? JSON.parse(raw) : raw, context, 'full', 'agent', traceKey);
+        }
+      } else {
+        contentKey = unwrapKey(record.full.wraps?.owner, context, 'full', 'owner', traceKey);
+      }
 
       say('\nPreparing a run and checking the enclave on this machine...');
       const nonce = randomBytes(32).toString('hex');
-      const prepared = await access({ action: 'prepare', request_id: r.request_id, revision: r.revision, nonce });
+      const prepared = await access({ action: 'prepare', request_id: r.request_id, revision: r.revision, nonce, ...(ag ? { agent_review: true } : {}) });
       const own = { ownerDid: record.ownerDid, ownerPublicKey, ciphertextSha256: record.full.sha256 };
       const request = { request_id: r.request_id, revision: r.revision, entry_id: r.entry_id, answer_key: r.answer_public_key };
       const model = declared(r);
@@ -568,7 +590,7 @@ async function main() {
   }
 
   const auth = await resolveAuth(false);
-  if (!auth.traceKey) fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start), or pass --owner-key-file / --recovery-file.');
+  if (!auth.traceKey) fail('This machine is not authorized yet. Authorize in your browser (pair-init + router_trace_access pair_start_v2), or pass --owner-key-file / --recovery-file.');
 
   if (action === 'release') {
     await doRelease(r, auth.traceKey);

@@ -7,7 +7,7 @@
 //
 // The envelope is the same format as server/src/trace-envelope.ts; server/src/trace-capture.test.ts
 // checks the two against each other. Node built-ins only, so the plugin needs no install step.
-import { createCipheriv, createDecipheriv, createECDH, createHash, hkdfSync, randomBytes, ECDH } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createECDH, createHash, createPublicKey, hkdfSync, randomBytes, verify, ECDH } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { open } from 'node:fs/promises';
 
@@ -32,6 +32,22 @@ export function publicKeyOf(privateKey) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) throw new Error('Expected a 32-byte hex private key');
   const ecdh = createECDH('secp256k1'); ecdh.setPrivateKey(Buffer.from(privateKey.slice(2), 'hex'));
   return '0x' + ecdh.getPublicKey('hex', 'compressed');
+}
+
+/** Router relays this certificate. Only a signature under the locally pinned account
+ * key authorizes capture to encrypt a second copy of the per-note key. */
+export function verifiedAgentKey(cert, ownerDid, space, accountPublicKey) {
+  if (!cert) return null;
+  const account = compressPublicKey(accountPublicKey);
+  if (!/^0x(?:02|03)[a-f0-9]{64}$/.test(cert.publicKey) || cert.publicKey === account || !/^0x[a-f0-9]{130}$/.test(cert.signature))
+    throw Error('Invalid trace agent key certificate.');
+  const point = ECDH.convertKey(Buffer.from(account.slice(2), 'hex'), 'secp256k1');
+  const key = createPublicKey({ format: 'jwk', key: { kty: 'EC', crv: 'secp256k1',
+    x: point.subarray(1, 33).toString('base64url'), y: point.subarray(33).toString('base64url') } });
+  const message = JSON.stringify(['teleport-router/trace-agent-public/v1', ownerDid.toLowerCase(), space, account, cert.publicKey]);
+  if (!verify('sha256', Buffer.from(message), { key, dsaEncoding: 'ieee-p1363' }, Buffer.from(cert.signature.slice(2, 130), 'hex')))
+    throw Error('The trace agent key was not signed by your pinned account key.');
+  return cert.publicKey;
 }
 
 const partAAD = (c, part) => Buffer.from(JSON.stringify(['teleport-router/trace/v1', c.ownerDid.toLowerCase(), c.entryId, part]));
@@ -62,8 +78,9 @@ function sealFor(plaintext, context, part, recipients) {
   return { meta: { nonce: b64(nonce), tag: b64(tag), sha256: sha256Hex(ciphertext), bytes: ciphertext.length, wraps }, ciphertext };
 }
 
-/** Encrypt the full record for its owner alone. */
-export const sealFull = (plaintext, context, ownerPublicKey) => sealFor(plaintext, context, 'full', { owner: ownerPublicKey });
+/** Encrypt the full record for its owner and, if paired, the owner's dedicated trace key. */
+export const sealFull = (plaintext, context, ownerPublicKey, agentPublicKey) =>
+  sealFor(plaintext, context, 'full', { owner: ownerPublicKey, ...(agentPublicKey ? { agent: agentPublicKey } : {}) });
 
 /** Encrypt the shorter extraction copy for its owner and for the insights enclave's release key. The enclave
  * opens it only in a run its owner authorizes, and the owner should wrap only to a key they checked. */

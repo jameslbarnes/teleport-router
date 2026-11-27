@@ -38,6 +38,7 @@ export async function openKeyOwner(host, { traceSession, expectedDid, agentSpace
     : agentSpace ? [
       { service: 'tinycloud.kv', space: agentSpace, path: 'router/recovery-v1', actions: ['get'] },
       { service: 'tinycloud.kv', space: agentSpace, path: 'router/traces/', actions: ['get'] },
+      { service: 'tinycloud.kv', space: agentSpace, path: 'router/traces/agent.keys/v1/', actions: ['put'] },
     ]
     : [{ service: 'tinycloud.kv', space, path: 'router/', actions: ['get', 'put', 'list', 'del'] }];
   const options = {

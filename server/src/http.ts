@@ -1153,7 +1153,7 @@ export const SYSTEM_SKILLS: Skill[] = [
 ];
 
 /** Reported to MCP clients. Kept in step with the plugin manifests by tool-surface.test.ts. */
-export const ROUTER_MCP_VERSION = '0.6.4';
+export const ROUTER_MCP_VERSION = '0.6.5';
 
 // What each built-in tool does to the world, for clients that show or gate tools by effect.
 // read: changes nothing. write: changes Router state and can be undone. destructive: removes something.
@@ -1335,11 +1335,13 @@ const handleTraceAccess = traceAccess({
   // A post whose trace is still on its author's machine: their owner tool uploads it when they approve a run.
   async traceHeldLocally(entryId) { return await tracePointerService.stateOf(entryId) === 'held_locally'; },
   // What Router knows of a stored trace: never its contents, only its owner, its ciphertext hash and the owner's public key.
-  async traceInfo(user, entryId) {
+  async traceInfo(user, entryId, forAgent) {
     if (!insights) return null;
     const record: any = await insights.traceMetadata(user, entryId);
     if (!record?.full?.sha256) return null;
-    return { ownerDid: record.ownerDid, ciphertextSha256: record.full.sha256, ownerPublicKey: insights.ownerKey(user).owner_public_key };
+    const ownerPublicKey = forAgent ? (await insights.agentCertificate(user))?.publicKey : insights.ownerKey(user).owner_public_key;
+    if (!ownerPublicKey) throw new TraceRequestError('Authorize your trace agent in the browser again.', 409);
+    return { ownerDid: record.ownerDid, ciphertextSha256: record.full.sha256, ownerPublicKey };
   },
   // In the enclave, the sub-container host's runner (TRACE_APPS=subhost; see subhost/README.md). Local
   // development can instead run apps in this process with a simulated attestation, which owners'
@@ -2868,10 +2870,11 @@ async function createMCPServer(secretKey: string) {
 
     if (name === 'router_trace_access') {
       try {
-        // Running and releasing need the owner's storage key and trace key, which never reach Router or the agent.
+        // Verification, decryption and release run on the owner's machine.
         if (['prepare', 'approve', 'release'].includes(args?.action as string)) throw new TraceRequestError('Run and release from the owner\'s own tool, which checks the enclave\'s attestation and holds the owner\'s keys.');
         const user = await getToolUser();
-        if (args?.action === 'pair_start') {
+        if (args?.action === 'pair_start') throw new TraceAgentPairError('Update the Router plugin to pair with a trace-only key.', 409);
+        if (args?.action === 'pair_start_v2') {
           const result = traceAgentPair.start({ user, keyHash }, args || {});
           return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
         }
@@ -8374,7 +8377,8 @@ const server = createServer(async (req, res) => {
           case '/api/insights/consent': result = await insights.saveConsent(user, body.policy, body.signature); break;
           case '/api/insights/consent/revoke': result = await insights.revokeConsent(user); break;
           case '/api/insights/consent/status': result = insights.consentStatus(user); break;
-          case '/api/traces/owner': result = insights.ownerKey(user); break;
+          case '/api/traces/owner': result = { ...insights.ownerKey(user),
+            ...(body.agent_key === true ? { space: user.tinycloud?.space, agent_certificate: await insights.agentCertificate(user) } : {}) }; break;
           case '/api/traces': {
             // The post's pointer, if any, now says the trace is uploaded; a post without one gets one. Also when the post
             // already had its trace. putTrace has checked that the post is the caller's.

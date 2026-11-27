@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encryptBackup } from '../../browser/src/recovery.mjs';
 import { sealAgentGrant } from '../../browser/src/pair-seal.mjs';
+import { prepareAgentTraces, traceAgentKeys } from '../../browser/src/trace-agent-keys.mjs';
+import { publicKeyOf, sealFull, verifiedAgentKey } from '../../plugins/teleport-router/scripts/trace-lib.mjs';
 import {
   createPendingAgent, ensureUploadRules, loadAgentGrant, loadPendingAgent, openAgentGrant,
   readHexKeyFile, resolveRouterKey, saveAgentGrant, saveOwnerKeys, saveUploadRules, unlockRecoveryFile,
@@ -107,26 +109,69 @@ test('sealAgentGrant (browser WebCrypto) round-trips with openAgentGrant (Node) 
 
   const pairId = 'pair-123';
   const ownerDid = 'did:pkh:eip155:1:0x1111111111111111111111111111111111111111';
+  const accountKey = '0x' + randomBytes(32).toString('hex');
+  const accountPublicKey = publicKeyOf(accountKey);
+  const space = 'tinycloud:pkh:eip155:1:0x1111111111111111111111111111111111111111:router';
+  const salt = '0x' + '12'.repeat(32);
+  const keys = await traceAgentKeys(accountKey, ownerDid, space, salt);
+  assert(keys.traceKey !== accountKey);
+  assert((await traceAgentKeys(accountKey, ownerDid, space, salt)).traceKey === keys.traceKey);
+  assert((await traceAgentKeys(accountKey, ownerDid, space, '0x' + '34'.repeat(32))).traceKey !== keys.traceKey);
+  assert.equal(verifiedAgentKey(keys.certificate, ownerDid, space, accountPublicKey), publicKeyOf(keys.traceKey));
+  assert.throws(() => verifiedAgentKey(keys.certificate, ownerDid, space, pub.agent_public_key));
+  assert.throws(() => verifiedAgentKey(keys.certificate, ownerDid, space + '-other', accountPublicKey));
   const payload = {
-    v: 1,
+    v: 2,
     handle: 'alice',
     routerKey: 'router-secret-value',
-    traceKey: `0x${'ef'.repeat(32)}`,
+    traceKey: keys.traceKey,
+    accountPublicKey,
     delegation: 'serialized-delegation-blob',
     ownerDid,
-    space: 'urn:tinycloud:space:eip155:1:0x1111111111111111111111111111111111111111:router',
+    space,
     host: 'https://tee.node.tinycloud.xyz',
   };
   const sealed = await sealAgentGrant(payload, { pairId, ownerDid, agentPublicKey: pub.agent_public_key });
   const opened = openAgentGrant(sealed, { pairId, ownerDid, agentPrivateKey: pending.agentKey });
   assert.deepEqual(opened, payload);
+  const context = { pairId, ownerDid, agentPublicKey: pub.agent_public_key };
+  for (const rejected of [{ ...payload, v: 1 }, { ...payload, traceKey: accountKey }]) {
+    const wire = await sealAgentGrant(rejected, context);
+    assert.throws(() => openAgentGrant(wire, { pairId, ownerDid, agentPrivateKey: pending.agentKey }), /trace-only/);
+  }
 
   // Wrong pairId or ownerDid fails GCM authentication.
   assert.throws(() => openAgentGrant(sealed, { pairId: 'other-pair', ownerDid, agentPrivateKey: pending.agentKey }));
   assert.throws(() => openAgentGrant(sealed, { pairId, ownerDid: 'did:pkh:eip155:1:0x2222222222222222222222222222222222222222', agentPrivateKey: pending.agentKey }));
 
-  // saveAgentGrant persists agent-grant.json and removes agent-pending.json.
+  // An upgrade refuses the older file, then replaces it on successful pairing.
+  writeFileSync(join(dir, 'agent-grant.json'), JSON.stringify({ v: 1, traceKey: accountKey }), { mode: 0o600 });
+  assert.throws(() => loadAgentGrant(dir), /Delete this local authorization or pair again/);
   saveAgentGrant(dir, { ...opened, agentKey: pending.agentKey, agentDid: pending.agentDid });
   assert.equal(loadPendingAgent(dir), null);
   assert.equal(loadAgentGrant(dir).traceKey, payload.traceKey);
+});
+
+test('preparing older traces preserves what worked and reports individual failures on retry', async () => {
+  const accountKey = '0x' + randomBytes(32).toString('hex');
+  const ownerDid = 'did:pkh:eip155:1:0x1111111111111111111111111111111111111111';
+  const keys = await traceAgentKeys(accountKey, ownerDid, 'fixture', '0x' + '12'.repeat(32));
+  const records = new Map(), stored = new Map();
+  for (const id of ['old', 'new']) {
+    const { meta } = sealFull(Buffer.from(id), { ownerDid, entryId: id }, publicKeyOf(accountKey),
+      id === 'new' ? keys.certificate.publicKey : undefined);
+    records.set(id, { ownerDid, entryId: id, full: meta });
+  }
+  const api = async (path, input) => path === '/api/traces/list'
+    ? { entry_ids: ['old', 'damaged', 'new'] } : records.get(input.entry_id);
+  let writes = 0;
+  const owner = { did: ownerDid, kv: {
+    get: async path => stored.has(path) ? { ok: true, data: { data: stored.get(path) } }
+      : { ok: false, error: { code: 'KV_NOT_FOUND', message: 'Key not found: ' + path } },
+    put: async (path, value) => { writes++; stored.set(path, value); return { ok: true }; },
+  } };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(await prepareAgentTraces(api, owner, accountKey, keys), ['damaged']);
+    assert.equal(writes, 1);
+  }
 });

@@ -59,6 +59,10 @@ function checkedToken(token: unknown): string {
   return token;
 }
 
+function requireTraceOnly(input: Record<string, unknown>) {
+  if (input.key_version !== 2) throw new TraceAgentPairError('Update the Router plugin and reload the authorization page to pair with a trace-only key.', 409);
+}
+
 function checkedSealed(value: unknown): SealedPairPayload {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TraceAgentPairError('Invalid sealed pairing payload.');
   const v = value as Record<string, unknown>;
@@ -127,6 +131,7 @@ export function traceAgentPairing({
   return {
     start(actor: Actor, input: Record<string, unknown>) {
       const user = requireLinkedUser(actor);
+      requireTraceOnly(input);
       const agentPublicKey = checkedCompressedKey(input.agent_public_key);
       const agentDid = 'did:pkh:eip155:1:' + computeAddress(agentPublicKey);
       const token = randomBytes(32).toString('base64url');
@@ -139,6 +144,7 @@ export function traceAgentPairing({
         agentPublicKey, agentDid, verifyCode, createdAt, expiresAt, status: 'waiting',
       }, createdAt);
       return {
+        key_version: 2,
         pair_id: pairId,
         pair_token: token,
         url: `${origin}/trace-access#pair=${token}`,
@@ -151,11 +157,13 @@ export function traceAgentPairing({
 
     info(actor: Actor, input: Record<string, unknown>) {
       const user = requireLinkedUser(actor);
+      requireTraceOnly(input);
       const token = checkedToken(input.token);
       const r = store.get(token, now());
       if (!r || r.ownerKeyHash !== actor.keyHash) throw new TraceAgentPairError('This authorization link expired or belongs to another account.', 404);
       const tc = user.tinycloud;
       return {
+        key_version: 2,
         pair_id: r.pairId,
         status: r.status,
         handle: r.handle,
@@ -167,7 +175,7 @@ export function traceAgentPairing({
           host,
           space: tc.space,
           owner_did: tc.ownerDid,
-          owner_public_key: tc.ownerPublicKey || null,
+          owner_public_key: tc.networkRecovery?.publicKey || tc.ownerPublicKey || null,
           mode: tc.networkRecovery ? 'openkey' : 'recovery',
         },
       };
@@ -175,6 +183,7 @@ export function traceAgentPairing({
 
     complete(actor: Actor, input: Record<string, unknown>) {
       requireLinkedUser(actor);
+      requireTraceOnly(input);
       const token = checkedToken(input.token);
       const r = store.get(token, now());
       if (!r || r.ownerKeyHash !== actor.keyHash) throw new TraceAgentPairError('This authorization link expired or belongs to another account.', 404);

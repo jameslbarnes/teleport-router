@@ -13,8 +13,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { confirmOwnerRecovery as confirmBrowserRecovery, encryptBackup } from '../../browser/src/recovery.mjs';
 import { sealAgentGrant } from '../../browser/src/pair-seal.mjs';
+import { prepareAgentTraces, registerAgentKey } from '../../browser/src/trace-agent-keys.mjs';
 
 const PLUGIN_SCRIPTS = resolve('../plugins/teleport-router/scripts');
 const work = await mkdtemp(join(tmpdir(), 'router-plugin-owner-e2e-'));
@@ -130,6 +133,7 @@ try {
   const host = process.env.TINYCLOUD_HOST || 'https://tee.node.tinycloud.xyz';
   const reachable = process.env.SKIP_TINYCLOUD !== '1' && await fetch(host, { signal: AbortSignal.timeout(15000) }).then(() => true, () => false);
   if (!reachable) {
+    if (process.env.PLAYWRIGHT_MODULE && process.env.SKIP_TINYCLOUD !== '1') throw Error('Browser pairing needs a reachable TinyCloud node.');
     console.log(`SKIP part 2: TinyCloud at ${host} unavailable or skipped`);
   } else {
     const { Wallet } = await import('ethers');
@@ -255,6 +259,88 @@ try {
     assert.equal(status2.answer_text, 'agent-driven-ok');
     console.log('PASS agent-driven flow after one-time `setup`: inbox -> show -> run -> release with ZERO key flags or passwords');
 
+    // A real browser drives the same page a recovery-backed owner uses. Its key material
+    // starts in a saved, encrypted backup. The paired tool runs in a separate home.
+    if (process.env.PLAYWRIGHT_MODULE) {
+      const { chromium } = await import(process.env.PLAYWRIGHT_MODULE);
+      const state = join(homeB, '.router', 'traces', 'state.json');
+      const args = ['--router', B.base, '--capture-state', state, '--records', join(homeB, 'reviews'),
+        '--capture-projects', join(homeB, '.claude', 'projects'), '--simulated'];
+      const ownerCmd = async (cmd, input) => (await runProc([bundledOwner, ...cmd, ...args], { env: cleanEnv(homeB), input })).stdout;
+      const before = await B.post('/api/traces/metadata', { entry_id: entryId }, owner.key);
+      assert(before.full.wraps.owner && !before.full.wraps.agent);
+      const localAgent = new Client({ name: 'trace-pair-test', version: '1' });
+      const endpoint = new URL('/mcp/http', B.base);
+      endpoint.searchParams.set('key', owner.key);
+      await localAgent.connect(new StreamableHTTPClientTransport(endpoint));
+      const traceTool = async args => {
+        const reply = await localAgent.callTool({ name: 'router_trace_access', arguments: args });
+        if (reply.isError) throw Error('Trace tool: ' + reply.content[0].text);
+        return reply.structuredContent;
+      };
+      const init = JSON.parse(await ownerCmd(['pair-init']));
+      const pair = await traceTool({ action: 'pair_start_v2', key_version: init.key_version, agent_public_key: init.agent_public_key });
+      assert.equal(pair.key_version, 2);
+      assert.equal(pair.verify_code, init.verify_code);
+      const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'] });
+      try {
+        const page = await browser.newPage({ storageState: { cookies: [], origins: [{ origin: B.base, localStorage: [
+          { name: 'router_key', value: owner.key }, { name: 'router_recovery:' + owner.handle, value: await readFile(recB, 'utf8') },
+        ] }] } });
+        await page.goto(pair.url);
+        await page.getByText('Verification code: ' + init.verify_code, { exact: false }).waitFor();
+        await page.locator('#requests input[type=password]').fill(password);
+        await page.getByRole('button', { name: 'Allow', exact: true }).click();
+        try { await page.getByRole('heading', { name: 'Agent authorized', exact: true }).waitFor({ timeout: 90000 }); }
+        catch { throw Error('Browser pairing did not finish: ' + await page.locator('#status').innerText()); }
+      } finally { await browser.close(); }
+      const picked = await traceTool({ action: 'pair_poll', pair_token: pair.pair_token });
+      await localAgent.close();
+      await ownerCmd(['pair-finish', '--pair-id', picked.pair_id, '--owner-did', pair.owner_did], JSON.stringify(picked));
+      const localWire = await readFile(join(homeB, '.router', 'traces', 'agent-grant.json'), 'utf8');
+      assert(!localWire.toLowerCase().includes(ownerKey.slice(2).toLowerCase()), 'account private key reached the paired machine');
+      const localGrant = JSON.parse(localWire);
+      assert.equal(localGrant.accountPublicKey, wallet.signingKey.compressedPublicKey);
+      const browserKeys = await registerAgentKey(node, ownerKey);
+      assert(localGrant.traceKey === browserKeys.traceKey, 'paired file contains the dedicated trace key');
+      assert.deepEqual(await B.post('/api/traces/metadata', { entry_id: entryId }, owner.key), before);
+
+      const fresh = await B.post('/api/entries', { secret_key: owner.key, content: 'Second trace for the paired browser test.', posting_intent: 'user-requested' });
+      const nextId = fresh.receipt.entry_id;
+      const nextLog = join(projectsB, '7f7f7f7f-fresh.jsonl');
+      await writeFile(nextLog, claudeLog('7f7f7f7f-fresh', nextId, 'NEW_PAIR'));
+      await runProc([bundledCapture, '--router', B.base, '--state', state, '--log', nextLog, '--pointers-only'], {
+        env: cleanEnv(homeB, { ROUTER_KEY: owner.key }),
+      });
+      await rm(nextLog);
+      if (fresh.receipt.notification_required) await B.post('/api/entries/' + nextId + '/notice', {
+        secret_key: owner.key, evidence_kind: 'agent_reported', notice_id: fresh.receipt.notice_id,
+        notice_sha256: fresh.receipt.notice_sha256, conversation_ref: 'synthetic-plugin-e2e/fresh',
+      }, owner.key);
+      await B.post('/api/entries/' + nextId + '/publish', {}, owner.key);
+      for (const [id, marker] of [[entryId, 'PLUGIN_UX'], [nextId, 'NEW_PAIR']]) {
+        const asked = await B.post('/api/trace-access', { action: 'request', entry_id: id, app: {
+          purpose: 'Verify the synthetic word in the paired browser test.',
+          code: "function analyze(trace) { return /MARKER-([A-Z_]+) hello/.exec(trace)?.[1] || 'missing'; }",
+        } }, asker.key);
+        const shown = await ownerCmd(['show', asked.request_id]);
+        const pin = shown.match(/--pin ([a-f0-9]{64})/)?.[1]; assert(pin);
+        const run = await ownerCmd(['run', asked.request_id, '--pin', pin, '--yes']);
+        assert(run.includes('  > ' + marker), run);
+        const waiting = await B.post('/api/trace-access', { action: 'status', request_id: asked.request_id }, asker.key);
+        assert.equal(waiting.state, 'pending'); assert.equal(waiting.answer_text, undefined);
+        await ownerCmd(['release', asked.request_id]);
+        const received = await B.post('/api/trace-access', { action: 'status', request_id: asked.request_id }, asker.key);
+        assert.equal(received.state, 'released'); assert.equal(received.answer_text, marker);
+      }
+      const uploaded = await B.post('/api/traces/metadata', { entry_id: nextId }, owner.key);
+      assert(uploaded.full.wraps.agent && uploaded.full.wraps.owner);
+      const rotated = await registerAgentKey(node, ownerKey, true);
+      assert(rotated.traceKey !== localGrant.traceKey);
+      assert((await registerAgentKey(node, ownerKey)).traceKey === rotated.traceKey);
+      console.log('PASS saved-backup browser pairing: old and new trace answers received after release; account private key absent from local grant.');
+    }
+
     // Part 2c: Option 2 — Browser-authorized scoped local agent (OpenKey-style: separate traceKey, owner master key NEVER given to CLI!).
     const ownerC = { handle: `plc${suffix}`, key: randomBytes(32).toString('base64url') };
     await B.post('/api/identity/register', { secret_key: ownerC.key, handle: ownerC.handle });
@@ -323,12 +409,15 @@ try {
     assert(initOut.agent_public_key && initOut.agent_did && initOut.verify_code);
 
     // Step 2: Agent calls pair_start (via Router API / MCP)
-    const pairStart = await B.post('/api/trace-agent/pair/start', { agent_public_key: initOut.agent_public_key }, ownerC.key);
+    const pairStart = await B.post('/api/trace-agent/pair/start', { key_version: initOut.key_version, agent_public_key: initOut.agent_public_key }, ownerC.key);
     assert.equal(pairStart.verify_code, initOut.verify_code);
 
     // Step 3: Browser reads pair/info, verifies mode=openkey, delegates ONLY router/traces/ (get), seals to agent_public_key, and completes!
-    const pairInfo = await B.post('/api/trace-agent/pair/info', { token: pairStart.pair_token }, ownerC.key);
+    const pairInfo = await B.post('/api/trace-agent/pair/info', { key_version: 2, token: pairStart.pair_token }, ownerC.key);
     assert.equal(pairInfo.storage.mode, 'openkey');
+    assert.equal(pairInfo.storage.owner_public_key, tracePubC);
+    const dedicated = await registerAgentKey(nodeC, traceKeyC);
+    assert.deepEqual(await prepareAgentTraces((path, body) => B.post(path, body, ownerC.key), nodeC, traceKeyC, dedicated), []);
     const { serializeDelegation } = await import('@tinycloud/node-sdk');
     const { delegation: scopedParent } = await nodeC.delegateTo(
       pairInfo.agent_did,
@@ -336,10 +425,10 @@ try {
       { expiry: 365 * 86400000, requireActivation: true },
     );
     const sealedHandoff = await sealAgentGrant({
-      v: 1, handle: ownerC.handle, routerKey: ownerC.key, traceKey: traceKeyC,
+      v: 2, handle: ownerC.handle, routerKey: ownerC.key, traceKey: dedicated.traceKey, accountPublicKey: tracePubC,
       delegation: serializeDelegation(scopedParent), ownerDid: nodeC.did, space: nodeC.spaceId, host,
     }, { pairId: pairInfo.pair_id, ownerDid: nodeC.did, agentPublicKey: pairInfo.agent_public_key });
-    await B.post('/api/trace-agent/pair/complete', { token: pairStart.pair_token, sealed: sealedHandoff }, ownerC.key);
+    await B.post('/api/trace-agent/pair/complete', { key_version: 2, token: pairStart.pair_token, sealed: sealedHandoff }, ownerC.key);
 
     // Step 4: Agent polls (gets opaque ciphertext only!) and pipes it to `pair-finish`!
     const polled = await B.post('/api/trace-agent/pair/poll', { token: pairStart.pair_token }, ownerC.key);
@@ -348,6 +437,8 @@ try {
       bundledOwner, 'pair-finish', '--pair-id', polled.pair_id, '--owner-did', pairStart.owner_did, '--capture-state', stateC,
     ], { env: cleanEnv(homeC), input: JSON.stringify(polled) });
     assert.match(finOut.stdout, /authorized local agent for/);
+    const storedGrant = await readFile(join(homeC, '.router', 'traces', 'agent-grant.json'), 'utf8');
+    assert(!storedGrant.includes(masterKeyC.slice(2)) && !storedGrant.includes(traceKeyC.slice(2)));
 
     // Step 5: Agent saves rules.json (after asking user in chat) and runs show -> run --yes -> release with ZERO master key, ZERO key flags!
     await runProc([bundledOwner, 'rules', '--capture-state', stateC], { env: cleanEnv(homeC) });

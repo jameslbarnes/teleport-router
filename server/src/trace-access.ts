@@ -122,7 +122,7 @@ export interface TraceRunnerClient {
   run(input: { run_id: string; delegation: string; wrap: KeyWrap; host: string; model_key?: string }): Promise<{ run_id: string; sealed: SealedAnswer; signature: string }>;
 }
 /** What Router knows about the stored trace: its owner, the hash of its ciphertext and the owner's public key. */
-export type TraceInfo = (owner: User, entryId: string) => Promise<{ ownerDid: string; ciphertextSha256: string; ownerPublicKey: string } | null>;
+export type TraceInfo = (owner: User, entryId: string, forAgent: boolean) => Promise<{ ownerDid: string; ciphertextSha256: string; ownerPublicKey: string } | null>;
 
 interface Dependencies {
   store: ReturnType<typeof traceRequestStore>;
@@ -270,7 +270,7 @@ export function traceAccess({ store, visible, getUser, host, runner, traceInfo, 
       if (refused) throw new TraceRequestError(refused, 503);
       if (!r.modelKey) throw new TraceRequestError(NO_KEY, 409);
     }
-    const trace = await traceInfo(actor.user, r.entryId);
+    const trace = await traceInfo(actor.user, r.entryId, input.agent_review === true);
     if (!trace) {
       // The trace is still on the author's machine: their owner tool uploads it when they approve the run.
       const local = traceHeldLocally ? await traceHeldLocally(r.entryId).catch(() => false) : false;
