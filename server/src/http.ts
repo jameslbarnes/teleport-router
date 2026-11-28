@@ -63,6 +63,8 @@ import { normalizeBenchmarkNote, computeBoard, renderBoard, benchmarkWriteProble
   type BenchmarkNote } from './benchmarks.js';
 import { normalizeTerritoryNote, normalizePlaceRef, normalizeMark, computeMaps, renderMaps, placeWriteProblem,
   type TerritoryNote, type MarkKind, type MapView } from './research-map.js';
+import { skillNotesOn, benchmarksOn, researchMapsOn, switchedOffTool, switchedOffWriteFields, switchedOffFieldMessage, writeSchemaFor,
+  RESEARCH_MAPS_OFF_MESSAGE } from './feature-switches.js';
 import { scrapeConversation, detectPlatform, isValidShareUrl, ScrapeError } from './scraper.js';
 import { createNotificationService, createSendGridClient, verifyUnsubscribeToken, verifyEmailToken, type NotificationService } from './notifications.js';
 import { deliverEntry, getDefaultVisibility, canViewEntry, canView, normalizeEntry, isDefaultAiOnly, isEntryAiOnly, type DeliveryConfig } from './delivery.js';
@@ -1765,7 +1767,8 @@ if (storage instanceof StagedStorage) {
 
   storage.onPublish(async (entry) => {
     // Not awaited: delivering the note must never wait for, or fail with, the skill record.
-    void rememberSkillNoteWithRetries(entry);
+    // While skill notes are switched off, a skill note publishes as an ordinary note and nothing points to it.
+    if (skillNotesOn()) void rememberSkillNoteWithRetries(entry);
     if (entry.to?.some(to => to.startsWith('#'))) runDiscordFeeds();
     // Deliver addressed entries (unified addressing)
     if (entry.to && entry.to.length > 0) {
@@ -2174,7 +2177,8 @@ async function groupMapData(rawGroupId: string, handle: string): Promise<{ group
   const current = await storage.getChannel(groupId);
   if (!current?.subscribers.some(s => s.handle === handle)) return { error: 'The person’s group membership changed. Nothing was returned.' };
   const admins = current.subscribers.filter(s => s.role === 'admin').map(s => s.handle);
-  return { groupId, maps: computeMaps(entries, admins, computeBoard(entries, admins)) };
+  // With benchmarks switched off, a place shows no board.
+  return { groupId, maps: computeMaps(entries, admins, benchmarksOn() ? computeBoard(entries, admins) : undefined) };
 }
 
 type SkillEntry = JournalEntry & { skill: SkillNote; handle: string };
@@ -2378,7 +2382,8 @@ async function createMCPServer(secretKey: string) {
   };
   // Server instructions reach the agent at the start of a session even when it loads tool descriptions lazily.
   // A slow or failed lookup must not hold up the connection: the session then starts without the list.
-  const atStart = keyRecovery ? null : await within(SKILL_LOOKUP_MS, skillsForList());
+  // While skill notes are switched off, nothing is looked up and no list is given.
+  const atStart = keyRecovery || !skillNotesOn() ? null : await within(SKILL_LOOKUP_MS, skillsForList());
   const skillIndex = keyRecovery ? KEY_RECOVERY_MESSAGE : atStart ? renderSkillIndex(atStart.items, atStart.mutes) || undefined : undefined;
   // Trace requests waiting on this person, so their agent can tell them at the start of the session.
   const waitingTraces = keyRecovery ? null : await within(SKILL_LOOKUP_MS, (async () => {
@@ -2424,8 +2429,9 @@ async function createMCPServer(secretKey: string) {
         .map(skill => ({ name: skill.name, inputSchema: skill.inputSchema,
           description: `${KEY_RECOVERY_MESSAGE} ${skill.name === 'router_posting_rules' ? 'Read saved posting rules with action get.' : skill.description}` })) };
     }
-    const visibleNow = await within(SKILL_LOOKUP_MS, skillsForList());
-    const skillIndexText = visibleNow
+    const skillNotesListed = skillNotesOn();
+    const visibleNow = skillNotesListed ? await within(SKILL_LOOKUP_MS, skillsForList()) : null;
+    const skillIndexText = !skillNotesListed ? '' : visibleNow
       ? [renderSkillIndex(visibleNow.items, visibleNow.mutes), renderSkillHint(visibleNow.waiting)].filter(Boolean).join('\n\n')
         || 'No skills are shared with this person yet.'
       : 'The list of shared skills could not be read just now. Use action "list" to try again.';
@@ -2516,6 +2522,7 @@ async function createMCPServer(secretKey: string) {
     const tools = SYSTEM_SKILLS
       .filter(skill => {
         if (skill.handlerType !== 'builtin') return false;
+        if (switchedOffTool(skill.name)) return false;
         if (skill.name === 'router_daily_question') {
           if (!user) return false;
           const last = user.lastDailyQuestionAt;
@@ -2544,6 +2551,8 @@ async function createMCPServer(secretKey: string) {
           description = SEARCH_TOOL_DESCRIPTION;
         } else if (skill.name === 'router_use_skill' && !override?.description) {
           description = `${skill.description}\n\n${skillIndexText}`;
+        } else if (skill.name === 'router_map' && !override?.description && !benchmarksOn()) {
+          description = skill.description.replace(', with benchmark boards where they sit', '');
         } else if (skill.name === 'router_settings' && !override?.description) {
           description = `Read or change the person's Router settings. Current: defaultAiOnly=${aiOnlyDefault}. Confirm with the person before any change.`;
         } else if (skill.name === 'router_skills' && !override?.description) {
@@ -2569,7 +2578,8 @@ async function createMCPServer(secretKey: string) {
           name: skill.name,
           ...toolAnnotations(skill.name),
           description,
-          inputSchema: skill.inputSchema,
+          // Fields of switched-off features are left out of the write schema.
+          inputSchema: skill.name === 'router_write_entry' ? writeSchemaFor(skill.inputSchema!) : skill.inputSchema,
           ...(['router_write_entry', 'router_record_sharing_notice'].includes(skill.name) ? { outputSchema: {
             type: 'object' as const, properties: { receipt: { type: 'object' as const } }, required: ['receipt'],
           } } : {}),
@@ -2612,6 +2622,8 @@ async function createMCPServer(secretKey: string) {
     if (keyRecovery && !recoveryAllowsTool(name, args)) {
       return { isError: true, content: [{ type: 'text' as const, text: KEY_RECOVERY_MESSAGE }] };
     }
+    const switchedOff = switchedOffTool(name);
+    if (switchedOff) return { isError: true, content: [{ type: 'text' as const, text: switchedOff }] };
     const parseToolSince = (sinceRaw?: string): number | undefined => {
       const raw = sinceRaw?.trim();
       if (!raw) return undefined;
@@ -2915,6 +2927,14 @@ async function createMCPServer(secretKey: string) {
       const topicHints = (args as { topic_hints?: string[] })?.topic_hints;
       const repo = normalizeRepo((args as { repo?: unknown })?.repo);
       const tags = normalizeTags((args as { tags?: unknown })?.tags);
+      // A field of a switched-off feature is refused, not dropped: the note would otherwise publish as something its author did not mean.
+      for (const { field, feature } of switchedOffWriteFields()) {
+        const sent = (args as Record<string, unknown> | undefined)?.[field];
+        // Absent, null and an empty string all mean "not sent", as they do for these fields when the feature is on.
+        if (sent !== undefined && sent !== null && sent !== '') {
+          return { content: [{ type: 'text' as const, text: switchedOffFieldMessage(feature, field) }], isError: true };
+        }
+      }
       let skillNote: SkillNote | undefined;
       try { skillNote = normalizeSkillNote((args as { skill?: unknown })?.skill); }
       catch (err) { return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true }; }
@@ -3465,7 +3485,8 @@ async function createMCPServer(secretKey: string) {
         }
 
         const date = new Date(entry.timestamp).toISOString().split('T')[0];
-        const type = entry.skill ? `skill ("${entry.skill.name}": ${oneLine(entry.skill.whenToUse)})` : entry.isReflection ? 'reflection' : 'note';
+        // While skill notes are switched off, a stored skill note reads as an ordinary note.
+        const type = entry.skill && skillNotesOn() ? `skill ("${entry.skill.name}": ${oneLine(entry.skill.whenToUse)})` : entry.isReflection ? 'reflection' : 'note';
         const author = entry.handle ? `@${entry.handle}` : entry.pseudonym;
         const traceHelp = keyRecovery ? 'requests are paused during key recovery' : 'request with router_trace_access';
         // Readers of the post may learn whether its trace exists and where it is; the check above has passed.
@@ -3784,7 +3805,7 @@ async function createMCPServer(secretKey: string) {
 
       if (action === 'list') {
         const systemSkillsList = SYSTEM_SKILLS
-          .filter(s => s.handlerType === 'builtin')
+          .filter(s => s.handlerType === 'builtin' && !switchedOffTool(s.name)) // switched-off features are not listed
           .map(s => {
             const hasOverride = skillOverrides[s.name];
             const status = hasOverride ? ' [CUSTOMIZED]' : '';
@@ -3834,10 +3855,10 @@ async function createMCPServer(secretKey: string) {
           };
         }
 
-        // Verify it's a valid system skill
-        const systemSkill = SYSTEM_SKILLS.find(s => s.name === toolName && s.handlerType === 'builtin');
+        // Verify it's a valid system skill (a tool of a switched-off feature is not one to customize)
+        const systemSkill = SYSTEM_SKILLS.find(s => s.name === toolName && s.handlerType === 'builtin' && !switchedOffTool(s.name));
         if (!systemSkill) {
-          const validNames = SYSTEM_SKILLS.filter(s => s.handlerType === 'builtin').map(s => s.name).join(', ');
+          const validNames = SYSTEM_SKILLS.filter(s => s.handlerType === 'builtin' && !switchedOffTool(s.name)).map(s => s.name).join(', ');
           return {
             content: [{ type: 'text' as const, text: `Unknown tool: "${toolName}". Valid options: ${validNames}` }],
             isError: true,
@@ -3883,7 +3904,7 @@ async function createMCPServer(secretKey: string) {
 
         const systemSkill = SYSTEM_SKILLS.find(s => s.name === toolName && s.handlerType === 'builtin');
         if (!systemSkill) {
-          const validNames = SYSTEM_SKILLS.filter(s => s.handlerType === 'builtin').map(s => s.name).join(', ');
+          const validNames = SYSTEM_SKILLS.filter(s => s.handlerType === 'builtin' && !switchedOffTool(s.name)).map(s => s.name).join(', ');
           return {
             content: [{ type: 'text' as const, text: `Unknown tool: "${toolName}". Valid options: ${validNames}` }],
             isError: true,
@@ -8434,6 +8455,11 @@ const server = createServer(async (req, res) => {
 
     // GET /api/channels/:id/map - a private group's research maps, for current members (key in the Authorization header)
     if (req.method === 'GET' && url.pathname.match(/^\/api\/channels\/[^/]+\/map$/)) {
+      if (!researchMapsOn()) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: RESEARCH_MAPS_OFF_MESSAGE }));
+        return;
+      }
       const auth = req.headers.authorization || '';
       const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
       const viewer = key && isValidSecretKey(key) ? await storage.getUserByKeyHash(hashSecretKey(key)) : null;
@@ -8449,7 +8475,8 @@ const server = createServer(async (req, res) => {
         return;
       }
       res.writeHead(200, { 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ group: loaded.groupId, viewer: viewer.handle, maps: loaded.maps }));
+      // `boards: false` tells the map page to leave benchmark boards out of its legend while they are switched off.
+      res.end(JSON.stringify({ group: loaded.groupId, viewer: viewer.handle, maps: loaded.maps, ...(benchmarksOn() ? {} : { boards: false }) }));
       return;
     }
 
@@ -10499,6 +10526,9 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
         filePath = '/entry.html';
       }
 
+      // While research maps are switched off, the map page and its script answer like a missing page. The files stay in place.
+      const mapPageOff = !researchMapsOn() && (filePath === '/map.html' || filePath === '/map.js');
+
       const fullPath = join(STATIC_DIR, filePath);
       const ext = extname(fullPath);
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
@@ -10510,7 +10540,7 @@ Keep the energy up. Follow their curiosity. This is the beginning of something.`
           ? 'public, max-age=31536000, immutable'
           : 'public, max-age=3600');
 
-      try {
+      if (!mapPageOff) try {
         // In production every page sits in STATIC_DIR. In a checkout the home page is built by Astro into
         // web/dist (npm --prefix web run build), so look there second. That folder does not exist in the image.
         const content = await readFile(fullPath).catch(() => readFile(join(STATIC_DIR, 'web', 'dist', filePath)));

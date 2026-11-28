@@ -60,7 +60,7 @@ describe('research maps', () => {
     let startupOutput = '';
     child = spawn(process.execPath, ['--import', 'tsx', 'src/http.ts'], {
       cwd: process.cwd(),
-      env: { ...process.env, PORT: String(port), BASE_URL: base, STAGED_STORAGE: 'memory', STAGING_DELAY_MS: '3600000', TINYCLOUD_GROUPS: 'memory', TINYCLOUD_AUTHORS: '', MODERATOR_URL: '', TELEGRAM_BOT_TOKEN: '', MATRIX_HOMESERVER_URL: '' },
+      env: { ...process.env, ROUTER_RESEARCH_MAPS: '1', PORT: String(port), BASE_URL: base, STAGED_STORAGE: 'memory', STAGING_DELAY_MS: '3600000', TINYCLOUD_GROUPS: 'memory', TINYCLOUD_AUTHORS: '', MODERATOR_URL: '', TELEGRAM_BOT_TOKEN: '', MATRIX_HOMESERVER_URL: '' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stderr?.on('data', data => { startupOutput = (startupOutput + data.toString()).slice(-2000); });
@@ -124,6 +124,22 @@ describe('research maps', () => {
     const place = body.maps[0].places.find((p: any) => p.id === 'few-examples');
     expect(place.marks).toHaveLength(1);
     expect(place.marks[0]).toMatchObject({ handle: member.handle, kind: 'failed-attempt', text: 'Training on its own output did nothing.' });
+  });
+
+  it('reads without boards while benchmarks are switched off (this server leaves ROUTER_BENCHMARKS unset)', async () => {
+    const { tools } = await memberClient.listTools();
+    const mapTool = tools.find(t => t.name === 'router_map')!;
+    expect(mapTool.description).not.toMatch(/benchmark|board/i);
+    expect(tools.map(t => t.name)).not.toContain('router_benchmarks');
+    const overview = await memberClient.callTool({ name: 'router_map', arguments: { group_id: lab } });
+    expect(overview.isError).toBeFalsy();
+    expect(text(overview)).not.toMatch(/board/i);
+    const body = await (await api(`/api/channels/${lab}/map`, undefined, member.key)).json() as any;
+    expect(body.boards).toBe(false);
+    expect(body.maps[0].places.every((p: any) => p.scenarios.length === 0)).toBe(true);
+    // A scenario cannot be placed on the map while benchmarks are off.
+    const refused = await write(adminClient, admin.key, 'Scenario', { place: 'field-map/few-examples', benchmark: { kind: 'scenario', scenario: 'held-out' } }, [`#${lab}`]);
+    expect(refused.error).toBe('Benchmarks are switched off on this server. Post it again without the `benchmark` field.');
   });
 
   it('shows nothing to anyone outside the group', async () => {

@@ -73,7 +73,7 @@ describe('skill notes', () => {
     let startupOutput = '';
     child = spawn(process.execPath, ['--import', 'tsx', 'src/http.ts'], {
       cwd: process.cwd(),
-      env: { ...process.env, PORT: String(port), BASE_URL: base, STAGED_STORAGE: 'memory', STAGING_DELAY_MS: '3600000', TINYCLOUD_GROUPS: 'memory', TINYCLOUD_AUTHORS: '', MODERATOR_URL: '', TELEGRAM_BOT_TOKEN: '', MATRIX_HOMESERVER_URL: '' },
+      env: { ...process.env, ROUTER_SKILL_NOTES: '1', PORT: String(port), BASE_URL: base, STAGED_STORAGE: 'memory', STAGING_DELAY_MS: '3600000', TINYCLOUD_GROUPS: 'memory', TINYCLOUD_AUTHORS: '', MODERATOR_URL: '', TELEGRAM_BOT_TOKEN: '', MATRIX_HOMESERVER_URL: '' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stderr?.on('data', data => { startupOutput = (startupOutput + data.toString()).slice(-2000); });
