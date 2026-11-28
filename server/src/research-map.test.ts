@@ -87,6 +87,10 @@ describe('working out a map', () => {
     expect(place.scenarios).toEqual([{ name: 'held-out', title: 'Held-out sentences', metric: 'word error rate, %', better: 'lower', publishedScore: undefined,
       best: { score: 20, handle: 'ana', replicated: false, entryId: result.id } }]);
     expect(place.marks.map(m => m.kind)).toEqual(['result']);
+    // With benchmarks switched off the server passes no board: the map still reads, with no score at the place.
+    const withoutBoard = computeMaps(entries, ADMINS)[0].places.find(p => p.id === 'few-examples')!;
+    expect(withoutBoard.scenarios).toEqual([]);
+    expect(renderMaps(computeMaps(entries, ADMINS), { group: 'lab' })).not.toMatch(/board|best 20/);
   });
 
   it('says why a note can\'t go to a place', () => {

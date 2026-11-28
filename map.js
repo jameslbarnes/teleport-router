@@ -125,14 +125,16 @@ function stageColumn(map, stage) {
   return el('section', { className: 'stage' }, parts);
 }
 
+// A server with benchmarks switched off says so (boards: false), and the legend then leaves boards out.
 function legend() {
+  const hasBoard = !data || data.boards !== false;
   const swatch = (status) => el('span', { className: 'swatch', 'data-status': status, 'aria-hidden': 'true' });
   return el('div', { className: 'legend' }, [
     el('span', {}, [swatch('established'), document.createTextNode('Established: settled ground')]),
     el('span', {}, [swatch('emerging'), document.createTextNode('Emerging: the frontier')]),
     el('span', {}, [swatch('open'), document.createTextNode('Open gap: nothing settled yet')]),
     el('span', {}, [el('span', { className: 'badge', text: 'notes' }), document.createTextNode(' what members attached')]),
-    el('span', {}, [el('span', { className: 'badge badge--board', text: 'best' }), document.createTextNode(' a benchmark board’s best checked score')]),
+    hasBoard ? el('span', {}, [el('span', { className: 'badge badge--board', text: 'best' }), document.createTextNode(' a benchmark board’s best checked score')]) : null,
   ]);
 }
 
